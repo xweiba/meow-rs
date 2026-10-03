@@ -288,6 +288,35 @@ pub fn parse_proxy_with_dialer(
                 .get("udp")
                 .and_then(serde_yaml::Value::as_bool)
                 .unwrap_or(false);
+            // Trojan always runs over TLS; `network` adds ws / grpc / h2 /
+            // httpupgrade under it like VLESS (subscriptions commonly ship
+            // trojan+grpc). Ignoring it used to send bare trojan to a gRPC
+            // front-end, which answers with a non-TLS error.
+            let network = config
+                .get("network")
+                .and_then(|v| v.as_str())
+                .unwrap_or("tcp");
+            let alpn: Vec<String> = config
+                .get("alpn")
+                .and_then(|v| v.as_sequence())
+                .map(|seq| {
+                    seq.iter()
+                        .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let fingerprint = config.get("client-fingerprint").and_then(|v| v.as_str());
+            let effective_sni = if sni.is_empty() { server } else { sni };
+            let mut tls_cfg = meow_transport::tls::TlsConfig::new(effective_sni);
+            tls_cfg.skip_cert_verify = skip_verify;
+            tls_cfg.alpn = default_transport_alpn(network, alpn);
+            tls_cfg.fingerprint = fingerprint.map(std::string::ToString::to_string);
+            let mut transport = meow_proxy::transport_chain::TransportChain::empty();
+            if let Some(layer) =
+                network_layer("trojan", name, config, server, effective_sni, true, network)?
+            {
+                transport.push(layer);
+            }
 
             #[cfg_attr(not(feature = "mux"), allow(unused_mut))]
             let mut adapter = TrojanAdapter::new(
@@ -299,7 +328,9 @@ pub fn parse_proxy_with_dialer(
                 skip_verify,
                 udp,
                 Arc::clone(dialer),
-            );
+            )
+            .with_transport(&tls_cfg, transport)
+            .map_err(|e| format!("{name}: {e}"))?;
             #[cfg(feature = "mux")]
             if let Some(mux_options) = parse_mux_options(name, config)? {
                 // muxcool rides VLESS CommandMux; trojan has no equivalent
@@ -1664,154 +1695,8 @@ fn parse_vless(
         chain.push(Box::new(tls_layer));
     }
 
-    match network {
-        "tcp" => {} // no extra layer
-        "ws" => {
-            use meow_transport::ws::{WsConfig, WsLayer};
-            let ws_opts = config.get("ws-opts");
-            let path = ws_opts
-                .and_then(|o| o.get("path"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("/")
-                .to_string();
-            // host_header: user-supplied Host, or fall back to server address.
-            // WsLayer::new requires Some; normalization is the config layer's job
-            // (ADR-0001 §1 — transport never infers values from context).
-            let host_header = ws_opts
-                .and_then(|o| o.get("headers"))
-                .and_then(|h| h.get("Host"))
-                .and_then(|v| v.as_str())
-                .map_or_else(|| server.to_string(), std::string::ToString::to_string);
-            // `max-early-data` buffers caller writes until the upgrade
-            // completes — clamped to the 2048-byte ceiling (the transport
-            // layer re-clamps programmatic configs at connect; #648).
-            let max_early_data = ws_max_early_data(ws_opts);
-            let early_data_header_name = ws_opts
-                .and_then(|o| o.get("early-data-header-name"))
-                .and_then(|v| v.as_str())
-                .map(std::string::ToString::to_string);
-            let ws_cfg = WsConfig {
-                path,
-                host_header: Some(host_header),
-                extra_headers: vec![],
-                max_early_data,
-                early_data_header_name,
-            };
-            let ws_layer =
-                WsLayer::new(ws_cfg).map_err(|e| format!("vless: ws layer error: {e}"))?;
-            chain.push(Box::new(ws_layer));
-        }
-        "grpc" => {
-            use meow_transport::grpc::{GrpcConfig, GrpcLayer};
-            let grpc_opts = config.get("grpc-opts");
-            let service_name = grpc_opts
-                .and_then(|o| o.get("grpc-service-name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("GunService")
-                .to_string();
-            // Authority: mihomo's gun transport sets `Host` to `servername`
-            // and only falls back to the dial host when `servername` is empty
-            // (adapter/outbound/vless.go). Front-ends that route gRPC by
-            // `:authority` are provisioned against that value, so match it
-            // rather than always sending the dial host (issue #377). Resolved
-            // here per ADR-0001 §1 — the transport never infers it.
-            let authority = config
-                .get("servername")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or(server)
-                .to_string();
-            let grpc_cfg = GrpcConfig {
-                service_name,
-                authority,
-            };
-            chain.push(Box::new(GrpcLayer::new(grpc_cfg)));
-        }
-        "h2" => {
-            use meow_transport::h2::{H2Config, H2Layer};
-            let h2_opts = config.get("h2-opts");
-            let path = h2_opts
-                .and_then(|o| o.get("path"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("/")
-                .to_string();
-            // `h2-opts.host` is a list; default to server when absent.
-            // Class A: empty host list is rejected — H2Layer asserts non-empty
-            // (debug) and upstream requires at least one authority value.
-            let hosts: Vec<String> = h2_opts
-                .and_then(|o| o.get("host"))
-                .and_then(|v| v.as_sequence())
-                .map_or_else(
-                    || vec![server.to_string()],
-                    |seq| {
-                        seq.iter()
-                            .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
-                            .collect()
-                    },
-                );
-            if hosts.is_empty() {
-                return Err(format!(
-                    "vless: h2-opts.host must not be empty for proxy '{name}' \
-                     (H2 requires at least one authority value)"
-                ));
-            }
-            let h2_cfg = H2Config { path, hosts };
-            chain.push(Box::new(H2Layer::new(h2_cfg)));
-        }
-        "httpupgrade" => {
-            use meow_transport::httpupgrade::{
-                HttpUpgradeConfig, HttpUpgradeLayer, MAX_EXTRA_HEADERS,
-            };
-            let hu_opts = config.get("http-upgrade-opts");
-            let path = hu_opts
-                .and_then(|o| o.get("path"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("/")
-                .to_string();
-            let host_header = hu_opts
-                .and_then(|o| o.get("host"))
-                .and_then(|v| v.as_str())
-                .map(std::string::ToString::to_string)
-                .or_else(|| Some(server.to_string()));
-            let extra_headers: Vec<(String, String)> = match hu_opts
-                .and_then(|o| o.get("headers"))
-                .and_then(|h| h.as_mapping())
-            {
-                Some(m) => {
-                    // Same remotely-supplied header-list bound as xhttp
-                    // (issue #648); `connect()` re-checks it.
-                    if m.len() > MAX_EXTRA_HEADERS {
-                        return Err(format!(
-                            "vless: http-upgrade-opts.headers has {} entries (max {MAX_EXTRA_HEADERS})",
-                            m.len()
-                        ));
-                    }
-                    m.iter()
-                        .filter_map(|(k, v)| {
-                            let key = k.as_str()?.to_string();
-                            let val = v.as_str()?.to_string();
-                            Some((key, val))
-                        })
-                        .collect()
-                }
-                None => Vec::new(),
-            };
-            let hu_cfg = HttpUpgradeConfig {
-                path,
-                host_header,
-                extra_headers,
-            };
-            chain.push(Box::new(HttpUpgradeLayer::new(hu_cfg)));
-        }
-        "xhttp" => {
-            let xhttp_cfg = parse_vless_xhttp_config(config, server, &servername, tls)?;
-            chain.push(Box::new(meow_transport::xhttp::XhttpLayer::new(xhttp_cfg)));
-        }
-        other => {
-            return Err(format!(
-                "vless: unsupported network '{other}'; valid values: tcp, ws, grpc, h2, httpupgrade, xhttp"
-            ));
-        }
+    if let Some(layer) = network_layer("vless", name, config, server, &servername, tls, network)? {
+        chain.push(layer);
     }
 
     #[cfg_attr(not(feature = "vless-encryption"), allow(unused_mut))]
@@ -2290,6 +2175,168 @@ fn decode_raw_url_base64_lenient(s: &str) -> Option<Vec<u8>> {
 /// that does not offer `h2` (issue #377). An explicit `alpn:` always wins.
 /// upstream: mihomo forces `h2` in its gun (gRPC) transport TLS config.
 #[cfg(any(feature = "vless", feature = "vmess"))]
+/// The transport under the proxy protocol for `network` (ws, grpc, h2,
+/// httpupgrade, xhttp); `None` for plain TCP. Shared by VLESS and Trojan so
+/// both read the same `*-opts` keys the same way.
+fn network_layer(
+    proto: &str,
+    name: &str,
+    config: &HashMap<String, serde_yaml::Value>,
+    server: &str,
+    servername: &str,
+    tls: bool,
+    network: &str,
+) -> std::result::Result<Option<Box<dyn meow_transport::Transport>>, String> {
+    match network {
+    "tcp" => Ok(None), // no extra layer
+    "ws" => {
+        use meow_transport::ws::{WsConfig, WsLayer};
+        let ws_opts = config.get("ws-opts");
+        let path = ws_opts
+            .and_then(|o| o.get("path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("/")
+            .to_string();
+        // host_header: user-supplied Host, or fall back to server address.
+        // WsLayer::new requires Some; normalization is the config layer's job
+        // (ADR-0001 §1 — transport never infers values from context).
+        let host_header = ws_opts
+            .and_then(|o| o.get("headers"))
+            .and_then(|h| h.get("Host"))
+            .and_then(|v| v.as_str())
+            .map_or_else(|| server.to_string(), std::string::ToString::to_string);
+        // `max-early-data` buffers caller writes until the upgrade
+        // completes — clamped to the 2048-byte ceiling (the transport
+        // layer re-clamps programmatic configs at connect; #648).
+        let max_early_data = ws_max_early_data(ws_opts);
+        let early_data_header_name = ws_opts
+            .and_then(|o| o.get("early-data-header-name"))
+            .and_then(|v| v.as_str())
+            .map(std::string::ToString::to_string);
+        let ws_cfg = WsConfig {
+            path,
+            host_header: Some(host_header),
+            extra_headers: vec![],
+            max_early_data,
+            early_data_header_name,
+        };
+        let ws_layer =
+            WsLayer::new(ws_cfg).map_err(|e| format!("{proto}: ws layer error: {e}"))?;
+        Ok(Some(Box::new(ws_layer)))
+    }
+    "grpc" => {
+        use meow_transport::grpc::{GrpcConfig, GrpcLayer};
+        let grpc_opts = config.get("grpc-opts");
+        let service_name = grpc_opts
+            .and_then(|o| o.get("grpc-service-name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("GunService")
+            .to_string();
+        // Authority: mihomo's gun transport sets `Host` to `servername`
+        // and only falls back to the dial host when `servername` is empty
+        // (adapter/outbound/vless.go). Front-ends that route gRPC by
+        // `:authority` are provisioned against that value, so match it
+        // rather than always sending the dial host (issue #377). Resolved
+        // here per ADR-0001 §1 — the transport never infers it.
+        // (Trojan's gun transport does the same with `sni`.)
+        let authority = if servername.is_empty() {
+            server
+        } else {
+            servername
+        }
+        .to_string();
+        let grpc_cfg = GrpcConfig {
+            service_name,
+            authority,
+        };
+        Ok(Some(Box::new(GrpcLayer::new(grpc_cfg))))
+    }
+    "h2" => {
+        use meow_transport::h2::{H2Config, H2Layer};
+        let h2_opts = config.get("h2-opts");
+        let path = h2_opts
+            .and_then(|o| o.get("path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("/")
+            .to_string();
+        // `h2-opts.host` is a list; default to server when absent.
+        // Class A: empty host list is rejected — H2Layer asserts non-empty
+        // (debug) and upstream requires at least one authority value.
+        let hosts: Vec<String> = h2_opts
+            .and_then(|o| o.get("host"))
+            .and_then(|v| v.as_sequence())
+            .map_or_else(
+                || vec![server.to_string()],
+                |seq| {
+                    seq.iter()
+                        .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
+                        .collect()
+                },
+            );
+        if hosts.is_empty() {
+            return Err(format!(
+                "vless: h2-opts.host must not be empty for proxy '{name}' \
+                 (H2 requires at least one authority value)"
+            ));
+        }
+        let h2_cfg = H2Config { path, hosts };
+        Ok(Some(Box::new(H2Layer::new(h2_cfg))))
+    }
+    "httpupgrade" => {
+        use meow_transport::httpupgrade::{
+            HttpUpgradeConfig, HttpUpgradeLayer, MAX_EXTRA_HEADERS,
+        };
+        let hu_opts = config.get("http-upgrade-opts");
+        let path = hu_opts
+            .and_then(|o| o.get("path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("/")
+            .to_string();
+        let host_header = hu_opts
+            .and_then(|o| o.get("host"))
+            .and_then(|v| v.as_str())
+            .map(std::string::ToString::to_string)
+            .or_else(|| Some(server.to_string()));
+        let extra_headers: Vec<(String, String)> = match hu_opts
+            .and_then(|o| o.get("headers"))
+            .and_then(|h| h.as_mapping())
+        {
+            Some(m) => {
+                // Same remotely-supplied header-list bound as xhttp
+                // (issue #648); `connect()` re-checks it.
+                if m.len() > MAX_EXTRA_HEADERS {
+                    return Err(format!(
+                        "vless: http-upgrade-opts.headers has {} entries (max {MAX_EXTRA_HEADERS})",
+                        m.len()
+                    ));
+                }
+                m.iter()
+                    .filter_map(|(k, v)| {
+                        let key = k.as_str()?.to_string();
+                        let val = v.as_str()?.to_string();
+                        Some((key, val))
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        let hu_cfg = HttpUpgradeConfig {
+            path,
+            host_header,
+            extra_headers,
+        };
+        Ok(Some(Box::new(HttpUpgradeLayer::new(hu_cfg))))
+    }
+    "xhttp" => {
+        let xhttp_cfg = parse_vless_xhttp_config(config, server, servername, tls)?;
+        Ok(Some(Box::new(meow_transport::xhttp::XhttpLayer::new(xhttp_cfg))))
+    }
+    other => Err(format!(
+        "{proto}: unsupported network '{other}'; valid values: tcp, ws, grpc, h2, httpupgrade, xhttp"
+    )),
+}
+}
+
 fn default_transport_alpn(network: &str, alpn: Vec<String>) -> Vec<String> {
     if !alpn.is_empty() {
         return alpn;

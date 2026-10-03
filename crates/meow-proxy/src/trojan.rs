@@ -27,6 +27,7 @@ use tracing::debug;
 #[cfg(feature = "mux")]
 use crate::mux::{MuxClient, MuxOptions};
 use crate::stream_conn::StreamConn;
+use crate::transport_chain::TransportChain;
 use crate::transport_to_proxy_err;
 use std::sync::Arc;
 
@@ -50,6 +51,9 @@ pub struct TrojanAdapter {
     support_udp: bool,
     health: ProxyHealth,
     tls_layer: Arc<TlsLayer>,
+    /// Layers under the Trojan header after TLS (ws / grpc / h2 / ...);
+    /// empty for plain trojan.
+    transport: Arc<TransportChain>,
     /// Pluggable TCP dialer for the underlying connection to the proxy
     /// server (direct or via dialer-proxy).
     dialer: Arc<dyn crate::dialer::TcpDialer>,
@@ -103,9 +107,19 @@ impl TrojanAdapter {
             support_udp: udp,
             health: ProxyHealth::new(),
             tls_layer: Arc::new(tls_layer),
+            transport: Arc::new(TransportChain::empty()),
             #[cfg(feature = "mux")]
             mux: None,
         }
+    }
+
+    /// Replace the TLS settings (ALPN, fingerprint) and add the transport
+    /// layers the config's `network` asks for. Call before [`Self::with_mux`].
+    pub fn with_transport(mut self, tls: &TlsConfig, transport: TransportChain) -> Result<Self> {
+        let layer = TlsLayer::new(tls).map_err(transport_to_proxy_err)?;
+        self.tls_layer = Arc::new(layer);
+        self.transport = Arc::new(transport);
+        Ok(self)
     }
 
     /// Enable sing-mux compatible connection multiplexing.  The Trojan
@@ -120,12 +134,14 @@ impl TrojanAdapter {
         let port = self.port;
         let hex_password = self.hex_password.clone();
         let tls_layer = Arc::clone(&self.tls_layer);
+        let transport = Arc::clone(&self.transport);
         let dialer = Arc::clone(&self.dialer);
 
         let dial: crate::mux::DialFn = Arc::new(move || {
             let server = server.clone();
             let hex_password = hex_password.clone();
             let tls_layer = Arc::clone(&tls_layer);
+            let transport = Arc::clone(&transport);
             let dialer = Arc::clone(&dialer);
             Box::pin(async move {
                 // Build the mux-destination request header.
@@ -158,10 +174,11 @@ impl TrojanAdapter {
                     .dial(&server, port, false)
                     .await
                     .map_err(MeowError::Io)?;
-                let mut stream = tls_layer
+                let stream = tls_layer
                     .connect(tcp)
                     .await
                     .map_err(transport_to_proxy_err)?;
+                let mut stream = transport.connect(stream).await?;
                 stream.write_all(header).await.map_err(MeowError::Io)?;
                 Ok(Box::new(StreamConn(stream)) as Box<dyn ProxyConn>)
             })
@@ -217,11 +234,12 @@ impl TrojanAdapter {
         let mut hdr_buf = [0u8; TROJAN_HEADER_BUF_SIZE];
         let header = self.build_header(metadata, cmd, &mut hdr_buf)?;
 
-        let mut stream = self
+        let stream = self
             .tls_layer
             .connect(stream)
             .await
             .map_err(transport_to_proxy_err)?;
+        let mut stream = self.transport.connect(stream).await?;
 
         stream.write_all(header).await.map_err(MeowError::Io)?;
         Ok(stream)
@@ -907,5 +925,46 @@ mod tests {
         assert_eq!(buf[1] as usize, "back.internal".len());
         assert_eq!(&buf[2..15], b"back.internal");
         assert_eq!(&buf[15..], &8388u16.to_be_bytes());
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn with_transport_keeps_the_network_layers() {
+        let plain = TrojanAdapter::new(
+            "t",
+            "example.com",
+            443,
+            "pw",
+            "",
+            false,
+            false,
+            Arc::new(crate::dialer::DirectDialer),
+        );
+        assert_eq!(plain.transport.len(), 0, "plain trojan: TLS only");
+
+        let mut chain = TransportChain::empty();
+        // Any layer will do: the adapter must keep what the config built.
+        chain.push(Box::new(
+            TlsLayer::new(&TlsConfig::new("inner.example.com")).expect("tls layer"),
+        ));
+        let mut tls = TlsConfig::new("edge.example.com");
+        tls.alpn = vec!["h2".into()];
+        let grpc = TrojanAdapter::new(
+            "t",
+            "example.com",
+            443,
+            "pw",
+            "",
+            false,
+            false,
+            Arc::new(crate::dialer::DirectDialer),
+        )
+        .with_transport(&tls, chain)
+        .expect("tls layer");
+        assert_eq!(grpc.transport.len(), 1, "network layer kept under TLS");
     }
 }

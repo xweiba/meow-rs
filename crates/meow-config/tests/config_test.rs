@@ -1066,6 +1066,59 @@ proxies:
     assert!(config.proxies.contains_key("trojan-server"));
 }
 
+#[tokio::test]
+async fn test_proxy_parsing_trojan_transports() {
+    // Subscriptions ship trojan over grpc / ws; `network` must be honoured,
+    // not dropped (a bare trojan hello to a gRPC front-end never connects).
+    let yaml = r#"
+proxies:
+  - name: "trojan-grpc"
+    type: trojan
+    server: "example.com"
+    port: 443
+    password: "password123"
+    sni: "edge.example.com"
+    network: grpc
+    grpc-opts: { grpc-service-name: mygrpc }
+  - name: "trojan-ws"
+    type: trojan
+    server: "example.com"
+    port: 443
+    password: "password123"
+    network: ws
+    ws-opts: { path: /ws, headers: { Host: cdn.example.com } }
+    client-fingerprint: chrome
+  - name: "trojan-h2"
+    type: trojan
+    server: "example.com"
+    port: 443
+    password: "password123"
+    network: h2
+    h2-opts: { host: [example.com], path: /h2 }
+"#;
+    let config = load_config_from_str(yaml).await.unwrap();
+    for name in ["trojan-grpc", "trojan-ws", "trojan-h2"] {
+        assert!(config.proxies.contains_key(name), "{name} should parse");
+    }
+}
+
+#[tokio::test]
+async fn test_proxy_parsing_trojan_unknown_network_skipped() {
+    let yaml = r#"
+proxies:
+  - name: "trojan-kcp"
+    type: trojan
+    server: "example.com"
+    port: 443
+    password: "password123"
+    network: kcp
+"#;
+    // Like other unusable entries, it is skipped (with a warning), never
+    // silently turned into plain trojan.
+    let config = load_config_from_str(yaml).await.unwrap();
+    assert!(!config.proxies.contains_key("trojan-kcp"));
+}
+
 #[cfg(feature = "mux")]
 #[tokio::test]
 async fn test_proxy_parsing_trojan_legacy_mux_enabled() {
