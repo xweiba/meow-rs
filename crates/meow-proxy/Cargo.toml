@@ -39,6 +39,9 @@ snell = ["dep:argon2", "dep:boring", "dep:blake2", "meow-transport/simple-obfs"]
 # `anytls_rs`). The client's TLS is supplied by meow-transport's BoringSSL
 # TlsLayer through anytls-rs's `TlsConnect` hook, so no second TLS stack.
 anytls = ["dep:meow-anytls"]
+# SSH outbound (`type: ssh`, mihomo-compatible), chainable through
+# `dialer-proxy` for multi-hop jumps. Pure Rust (russh on ring).
+ssh = ["dep:russh"]
 # Hysteria2 outbound implemented in-tree on top of quiche (BoringSSL-native
 # QUIC + HTTP/3), so it links no rustls and no second crypto library.
 hysteria2 = ["dep:quiche", "dep:boring", "dep:blake2", "dep:webpki-root-certs", "dep:tokio-util"]
@@ -66,6 +69,7 @@ tokio-util = { workspace = true, optional = true }
 yamux = { workspace = true, optional = true }
 h2 = { version = "0.4", optional = true }
 meow-anytls = { workspace = true, optional = true }
+russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2"], optional = true }
 # quiche = QUIC + HTTP/3 for the hysteria2 outbound, on BoringSSL (shares the
 # `boring` crate's vendored copy). No rustls, no second crypto library.
 quiche = { workspace = true, optional = true }

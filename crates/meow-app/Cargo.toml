@@ -31,6 +31,7 @@ dhat-heap = ["dhat"]
 # Protocol features — forwarded to meow-proxy and meow-config
 ss = ["meow-config/ss", "meow-proxy/ss"]
 trojan = ["meow-config/trojan", "meow-proxy/trojan"]
+ssh = ["meow-config/ssh", "meow-proxy/ssh"]
 vless = ["meow-config/vless", "meow-proxy/vless"]
 vless-vision = ["vless", "meow-config/vless-vision", "meow-proxy/vless-vision"]
 vless-encryption = ["vless", "meow-config/vless-encryption", "meow-proxy/vless-encryption"]
@@ -71,7 +72,7 @@ listener-shadowsocks = ["meow-listener/listener-shadowsocks"]
 # Convenience bundles
 minimal = ["ss", "trojan", "dns-server", "listener-mixed"]
 full = [
-    "ss", "trojan", "vless", "vless-vision", "vless-encryption", "vmess", "snell", "hysteria2", "anytls", "ech-tls-tunnel", "mux", "kcptun",
+    "ss", "trojan", "vless", "vless-vision", "vless-encryption", "vmess", "snell", "hysteria2", "anytls", "ech-tls-tunnel", "mux", "kcptun", "ssh",
     "dns-server", "dns-encrypted",
     "listener-http", "listener-socks5", "listener-tproxy", "listener-mixed", "listener-tun",
 ]

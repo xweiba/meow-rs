@@ -23,6 +23,7 @@ pub enum AdapterType {
     Hysteria2,
     Anytls,
     Snell,
+    Ssh,
     /// Built-in nop adapter (`PASS`) — a matched rule is skipped silently
     /// by the match loop (upstream `C.Pass`).
     Pass,
@@ -56,6 +57,7 @@ impl fmt::Display for AdapterType {
             AdapterType::Hysteria2 => write!(f, "Hysteria2"),
             AdapterType::Anytls => write!(f, "AnyTLS"),
             AdapterType::Snell => write!(f, "Snell"),
+            AdapterType::Ssh => write!(f, "Ssh"),
             AdapterType::Pass => write!(f, "Pass"),
             AdapterType::PassRule => write!(f, "PassRule"),
             AdapterType::Compatible => write!(f, "Compatible"),

@@ -361,6 +361,13 @@ pub fn parse_proxy_with_dialer(
             let adapter = parse_socks5(name, config, dialer)?;
             Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
         }
+        #[cfg(feature = "ssh")]
+        "ssh" => {
+            let adapter = parse_ssh(name, config, dialer)?;
+            Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
+        }
+        #[cfg(not(feature = "ssh"))]
+        "ssh" => Err(feature_gated_proxy_type("ssh")),
         "direct" => {
             reject_unthreaded_dialer(name, "direct", dialer)?;
             let adapter = parse_direct(name, config, ipv6)?;
@@ -660,6 +667,59 @@ fn parse_snell(
 /// `headers:` entries are injected into the CONNECT request only.
 ///
 /// upstream: `adapter/outbound/http.go`
+/// `type: ssh` (mihomo fields): `server`, `port` (22), `username`, and
+/// `password` or `private-key` (key text, or a path to it) with optional
+/// `private-key-passphrase`; `host-key` (one or a list of "type base64").
+#[cfg(feature = "ssh")]
+fn parse_ssh(
+    name: &str,
+    config: &HashMap<String, serde_yaml::Value>,
+    dialer: &Arc<dyn meow_proxy::dialer::TcpDialer>,
+) -> std::result::Result<meow_proxy::SshAdapter, String> {
+    use meow_proxy::ssh_adapter::{parse_host_keys, SshAuth};
+    let text = |k: &str| config.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    let server = text("server").ok_or(format!("ssh[{name}]: missing server"))?;
+    let port = match config.get("port") {
+        None => 22,
+        Some(_) => required_port(config, "ssh")?,
+    };
+    let user = text("username").unwrap_or_else(|| "root".to_string());
+    let auth = if let Some(key) = text("private-key") {
+        let pem = if key.contains("-----BEGIN") {
+            key
+        } else {
+            std::fs::read_to_string(&key)
+                .map_err(|e| format!("ssh[{name}]: private-key file {key}: {e}"))?
+        };
+        SshAuth::Key {
+            pem,
+            passphrase: text("private-key-passphrase"),
+        }
+    } else if let Some(p) = text("password") {
+        SshAuth::Password(p)
+    } else {
+        return Err(format!("ssh[{name}]: needs password or private-key"));
+    };
+    let host_keys: Vec<String> = match config.get("host-key") {
+        Some(serde_yaml::Value::String(k)) => vec![k.clone()],
+        Some(serde_yaml::Value::Sequence(v)) => v
+            .iter()
+            .filter_map(|k| k.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let host_keys = parse_host_keys(&host_keys).map_err(|e| format!("ssh[{name}]: {e}"))?;
+    Ok(meow_proxy::SshAdapter::new(
+        name,
+        &server,
+        port,
+        &user,
+        auth,
+        host_keys,
+        Arc::clone(dialer),
+    ))
+}
+
 fn parse_http(
     name: &str,
     config: &HashMap<String, serde_yaml::Value>,

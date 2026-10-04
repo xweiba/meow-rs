@@ -16,6 +16,8 @@ pub mod http_adapter;
 pub mod mux;
 pub mod reject;
 pub mod socks5_adapter;
+#[cfg(feature = "ssh")]
+pub mod ssh_adapter;
 pub mod stream_conn;
 #[cfg(any(feature = "vmess", feature = "vless-encryption"))]
 pub(crate) mod tasked_duplex;
@@ -86,6 +88,8 @@ pub use reject::RejectAdapter;
 #[cfg(feature = "ss")]
 pub use shadowsocks_adapter::ShadowsocksAdapter;
 pub use socks5_adapter::Socks5Adapter;
+#[cfg(feature = "ssh")]
+pub use ssh_adapter::SshAdapter;
 pub use stream_conn::StreamConn;
 pub use transport_chain::TransportChain;
 #[cfg(feature = "trojan")]
