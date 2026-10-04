@@ -145,6 +145,7 @@ fn group(lines: &[Arc<Line>]) -> SmartGroup {
             usage: UsageTracker::new(),
             reprobe: AtomicI64::new(i64::MAX),
             loads: Loads::default(),
+            started: std::sync::atomic::AtomicBool::new(true),
         }),
     }
 }

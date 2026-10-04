@@ -68,6 +68,8 @@ struct Shared {
     reprobe: AtomicI64,
     /// How busy each line is now (received bytes per second).
     loads: Loads,
+    /// Upkeep (probes, the load sampler) runs: from the first dial on.
+    started: std::sync::atomic::AtomicBool,
 }
 
 impl Drop for Shared {
@@ -125,12 +127,8 @@ impl SmartGroup {
             usage: UsageTracker::new(),
             reprobe: AtomicI64::new(0),
             loads: Loads::default(),
+            started: std::sync::atomic::AtomicBool::new(false),
         });
-        // Background upkeep; it ends once the group is dropped (reload).
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            rt.spawn(upkeep(Arc::downgrade(&shared)));
-            rt.spawn(sample_loads(Arc::downgrade(&shared)));
-        }
         Self { shared }
     }
 
@@ -152,6 +150,21 @@ impl SmartGroup {
 }
 
 impl Shared {
+    /// Starts the background upkeep (probes every line, samples the loads)
+    /// the first time the group is used: a config has many automatic
+    /// groups, most never chosen, and probing all of them at start costs
+    /// memory and connections for nothing. It ends once the group is
+    /// dropped (reload).
+    fn start(self: &Arc<Self>) {
+        if self.started.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(upkeep(Arc::downgrade(self)));
+            rt.spawn(sample_loads(Arc::downgrade(self)));
+        }
+    }
+
     fn member(&self, name: &str) -> Option<&Arc<dyn Proxy>> {
         self.members.iter().find(|p| p.name() == name)
     }
@@ -457,6 +470,7 @@ impl ProxyAdapter for SmartGroup {
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
         let me = &self.shared;
+        me.start();
         me.usage.touch_user_traffic(metadata);
         let site = site_of(metadata);
         let plan = me
@@ -514,6 +528,7 @@ impl ProxyAdapter for SmartGroup {
 
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
         let me = &self.shared;
+        me.start();
         me.usage.touch_user_traffic(metadata);
         let site = site_of(metadata);
         let plan = me.store.plan(&site, &me.candidates(true));

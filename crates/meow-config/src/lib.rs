@@ -3776,6 +3776,18 @@ fn build_named_listeners(
 /// [`resource_cache_dir_for_config_path`] of the config file, or `None`
 /// for a document with no backing file (`--config-string`).
 pub async fn build_config(
+    raw: raw::RawConfig,
+    cache_dir: Option<&Path>,
+) -> Result<Config, anyhow::Error> {
+    let built = build_config_inner(raw, cache_dir).await;
+    // PaoPao: rule data (geosite tries, ~10k subscription rules) is built
+    // through large temporary structures; hand their freed pages back to
+    // the system, so the resident footprint (what iOS limits) drops.
+    meow_common::memory::release_free_memory();
+    built
+}
+
+async fn build_config_inner(
     mut raw: raw::RawConfig,
     cache_dir: Option<&Path>,
 ) -> Result<Config, anyhow::Error> {
