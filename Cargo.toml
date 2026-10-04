@@ -16,6 +16,7 @@ members = [
     "crates/meow-app",
     "crates/meow-bench",
     "crates/meow-mobile",
+    "crates/meow-script",
 ]
 
 [profile.release]

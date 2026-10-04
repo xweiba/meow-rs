@@ -1,0 +1,17 @@
+[package]
+name = "meow-script"
+description = "Rewrite scripts for meow-rs: Surge / Loon / Quantumult X style JavaScript ($request, $response, $done, $persistentStore …) on QuickJS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rquickjs = { version = "0.14", features = ["array-buffer"] }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true
