@@ -15,7 +15,11 @@ pub mod geodata_fetch;
 extern crate self as meow_app;
 #[cfg(feature = "embed")]
 #[path = "main.rs"]
-#[allow(dead_code, unused_imports, reason = "the binary's CLI paths stay unused here")]
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the binary's CLI paths stay unused here"
+)]
 mod app_main;
 #[cfg(feature = "embed")]
 pub mod embed;

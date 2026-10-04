@@ -76,7 +76,9 @@ mod android {
             if ok {
                 Ok(())
             } else {
-                Err(std::io::Error::other("VpnService.protect refused the socket"))
+                Err(std::io::Error::other(
+                    "VpnService.protect refused the socket",
+                ))
             }
         }
     }
@@ -98,10 +100,13 @@ mod android {
         let home = text(&mut env, &home);
         if !service.is_null() {
             match (env.get_java_vm(), env.new_global_ref(&service)) {
-                (Ok(vm), Ok(service)) => meow_common::set_socket_protector(std::sync::Arc::new(
-                    VpnProtector { vm, service },
-                )
-                    as Arc<dyn meow_common::SocketProtector>),
+                (Ok(vm), Ok(service)) => {
+                    meow_common::set_socket_protector(std::sync::Arc::new(VpnProtector {
+                        vm,
+                        service,
+                    })
+                        as Arc<dyn meow_common::SocketProtector>)
+                }
                 _ => {
                     return env
                         .new_string("cannot reach the VPN service")

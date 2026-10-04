@@ -512,8 +512,12 @@ impl Store {
             // Unknown or poor: race the three most promising, from
             // different exits where known (three lines on one machine prove
             // nothing).
-            plan.lines = diverse_first(&g, plan.lines, 3);
-            plan.race = rs.len().min(3);
+            // Nothing known about any line yet (just started, probes still
+            // running): race wider so a few dead lines up front can't make
+            // the first pages wait on timeouts.
+            let width = if best.all.is_finite() { 3 } else { 6 };
+            plan.lines = diverse_first(&g, plan.lines, width);
+            plan.race = rs.len().min(width);
             plan.known = best.known;
         }
         drop(g);

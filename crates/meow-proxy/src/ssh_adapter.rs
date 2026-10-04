@@ -11,8 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use meow_common::{
-    AdapterType, MeowError, Metadata, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn,
-    Result,
+    AdapterType, MeowError, Metadata, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn, Result,
 };
 use russh::client::{self, Handle};
 use russh::keys::{PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
@@ -76,9 +75,7 @@ fn err(e: impl std::fmt::Display) -> MeowError {
 /// Parses `host-key` entries ("ssh-ed25519 AAAA… [comment]").
 pub fn parse_host_keys(keys: &[String]) -> std::result::Result<Vec<PublicKey>, String> {
     keys.iter()
-        .map(|k| {
-            PublicKey::from_openssh(k.trim()).map_err(|e| format!("ssh host-key '{k}': {e}"))
-        })
+        .map(|k| PublicKey::from_openssh(k.trim()).map_err(|e| format!("ssh host-key '{k}': {e}")))
         .collect()
 }
 
@@ -108,10 +105,7 @@ impl SshAdapter {
     }
 
     /// A signed-in session over `stream` (already at the SSH server).
-    async fn handshake(
-        &self,
-        stream: Box<dyn meow_transport::Stream>,
-    ) -> Result<Handle<Client>> {
+    async fn handshake(&self, stream: Box<dyn meow_transport::Stream>) -> Result<Handle<Client>> {
         let config = Arc::new(client::Config {
             inactivity_timeout: None,
             keepalive_interval: Some(Duration::from_secs(30)),
@@ -133,7 +127,11 @@ impl SshAdapter {
             SshAuth::Key { pem, passphrase } => {
                 let key = russh::keys::decode_secret_key(pem, passphrase.as_deref())
                     .map_err(|e| err(format!("private key: {e}")))?;
-                let hash = handle.best_supported_rsa_hash().await.map_err(err)?.flatten();
+                let hash = handle
+                    .best_supported_rsa_hash()
+                    .await
+                    .map_err(err)?
+                    .flatten();
                 handle
                     .authenticate_publickey(
                         &self.user,
@@ -145,7 +143,10 @@ impl SshAdapter {
             }
         };
         if !ok {
-            return Err(err(format!("{}@{}: sign-in refused", self.user, self.addr_str)));
+            return Err(err(format!(
+                "{}@{}: sign-in refused",
+                self.user, self.addr_str
+            )));
         }
         Ok(handle)
     }
@@ -226,10 +227,15 @@ impl ProxyAdapter for SshAdapter {
         stream: Box<dyn ProxyConn>,
         metadata: &Metadata,
     ) -> Result<Box<dyn ProxyConn>> {
-        let session = self.handshake(Box::new(StreamConn(Box::new(stream)))).await?;
+        let session = self
+            .handshake(Box::new(StreamConn(Box::new(stream))))
+            .await?;
         let conn = self.open(&session, metadata).await?;
         // The channel keeps the session's connection alive while it lives.
-        Ok(Box::new(Keep { conn, _session: session }))
+        Ok(Box::new(Keep {
+            conn,
+            _session: session,
+        }))
     }
 
     fn health(&self) -> &ProxyHealth {

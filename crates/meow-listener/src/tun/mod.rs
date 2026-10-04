@@ -448,7 +448,10 @@ impl TunListener {
             {
                 dev_name = "vpn".to_string();
             }
-            info!("TUN listener '{}' using the platform's device (fd {fd})", self.name);
+            info!(
+                "TUN listener '{}' using the platform's device (fd {fd})",
+                self.name
+            );
             device = Some(d);
         }
         // Phones create no device of their own: the VPN hands one over.

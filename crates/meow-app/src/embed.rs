@@ -22,9 +22,7 @@ fn stop_slot() -> &'static Mutex<Option<tokio::sync::oneshot::Sender<()>>> {
 pub fn with_tun_fd(config_yaml: &str, fd: i32) -> anyhow::Result<String> {
     let mut doc: serde_yaml::Value =
         serde_yaml::from_str(config_yaml).context("config is not YAML")?;
-    let map = doc
-        .as_mapping_mut()
-        .context("config must be a mapping")?;
+    let map = doc.as_mapping_mut().context("config must be a mapping")?;
     let tun = map
         .entry("tun".into())
         .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
@@ -54,14 +52,22 @@ pub fn run(home: &str, config_yaml: &str, fd: i32) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     *stop_slot().lock() = Some(tx);
-    let result = run_application(args, &LogTarget::Console, ShutdownSignal::Embedded(rx), None);
+    let result = run_application(
+        args,
+        &LogTarget::Console,
+        ShutdownSignal::Embedded(rx),
+        None,
+    );
     *stop_slot().lock() = None;
     result
 }
 
 /// Asks a running core to stop; true when one was running.
 pub fn stop() -> bool {
-    stop_slot().lock().take().is_some_and(|tx| tx.send(()).is_ok())
+    stop_slot()
+        .lock()
+        .take()
+        .is_some_and(|tx| tx.send(()).is_ok())
 }
 
 /// Whether a core runs now.

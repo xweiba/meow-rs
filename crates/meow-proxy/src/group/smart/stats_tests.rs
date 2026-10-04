@@ -277,3 +277,12 @@ fn refresh_candidates_recent_then_best() {
     assert_eq!(c.len(), 4);
     assert_eq!(&c[..2], &lines(&["e", "d"])[..]);
 }
+
+#[test]
+fn cold_start_races_wider() {
+    let (s, _) = store();
+    let all = lines(&["a", "b", "c", "d", "e", "f", "g"]);
+    assert_eq!(s.plan("x.com", &all).race, 6, "nothing known yet");
+    s.report("", "c", &ok(100.0));
+    assert_eq!(s.plan("x.com", &all).race, 3, "probes have answered");
+}
