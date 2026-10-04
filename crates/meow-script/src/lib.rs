@@ -115,6 +115,9 @@ pub struct Options {
     pub http: Option<HttpFn>,
     /// A scheduled run (`type=cron`): no `$request` / `$response`.
     pub cron: bool,
+    /// [`argument`](Self::argument) is a JSON object handed to the script
+    /// as an object (Loon `[Argument]` with `argument=[{a},{b}]`).
+    pub argument_object: bool,
     /// Where `$notification.post` / `$notify` go (else the log).
     pub notify: Option<NotifyFn>,
 }
@@ -129,6 +132,7 @@ impl Default for Options {
             store: Arc::new(Store::new(None)),
             http: None,
             cron: false,
+            argument_object: false,
             notify: None,
         }
     }
@@ -286,6 +290,7 @@ var $task = {
     });
   },
 };
+if (__paopao_argument_object) { try { $argument = JSON.parse($argument); } catch (e) {} }
 var $utils = { ungzip: function (b) { return new Uint8Array(__paopao_ungzip(b)); } };
 // Surge: seconds since the epoch.
 $script.startTime = Date.now() / 1000;
@@ -529,6 +534,7 @@ pub fn run(
                 })?,
             )?;
             g.set("$argument", opts.argument.as_str())?;
+            g.set("__paopao_argument_object", opts.argument_object)?;
             let script = Object::new(ctx.clone())?;
             script.set("name", opts.name.as_str())?;
             script.set(

@@ -114,6 +114,7 @@ fn rule(name: &str, pattern: &str, response: bool, path: &str) -> ScriptRule {
         response,
         path: path.into(),
         argument: "lat=1".into(),
+        argument_object: false,
         binary_body: false,
         requires_body: true,
         timeout: Duration::from_secs(3),

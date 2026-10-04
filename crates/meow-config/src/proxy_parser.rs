@@ -731,8 +731,10 @@ fn parse_ssh(
 /// directory; made on first use), `skip-cert-verify`, `store` (the
 /// scripts' `$persistentStore` file), and `scripts:` entries in Surge
 /// terms — `name`, `type` (http-request | http-response), `pattern`,
-/// `script-path`, `argument`, `binary-body-mode`, `requires-body`,
-/// `timeout` (seconds).
+/// `script-path`, `argument` (`argument-object` for a JSON object),
+/// `binary-body-mode`, `requires-body`, `timeout` (seconds), and for
+/// `type: cron` a `cron` expression instead of a pattern; `notifications`
+/// (file the scripts' notifications go to), `utc-offset` (minutes).
 #[cfg(feature = "mitm")]
 fn parse_mitm(
     name: &str,
@@ -790,6 +792,7 @@ fn parse_mitm(
                 response,
                 path: script.into(),
                 argument: str_of("argument").unwrap_or_default(),
+                argument_object: flag("argument-object"),
                 binary_body: flag("binary-body-mode"),
                 requires_body: flag("requires-body"),
                 timeout: std::time::Duration::from_secs(

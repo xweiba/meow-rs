@@ -154,6 +154,8 @@ pub struct ScriptRule {
     /// Path of the script, relative to the meow home directory.
     pub path: PathBuf,
     pub argument: String,
+    /// The argument is a JSON object the script gets as an object.
+    pub argument_object: bool,
     pub binary_body: bool,
     pub requires_body: bool,
     pub timeout: Duration,
@@ -363,6 +365,7 @@ impl Shared {
             store: Arc::clone(&self.store),
             http: Some(self.http_fn()),
             cron: rule.cron.is_some(),
+            argument_object: rule.argument_object,
             notify: Some(self.notify_fn(&rule.name)),
         };
         let (mut req, mut resp) = (request.clone(), response.cloned());

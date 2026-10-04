@@ -385,3 +385,20 @@ fn cron_runs_have_no_request_and_notifications_reach_the_embedder() {
     assert_eq!(seen[1].body, "plain");
     assert_eq!(seen[1].url, None);
 }
+
+#[test]
+fn loon_object_arguments() {
+    let o = Options {
+        argument: r#"{"lat":"31.2","on":"true"}"#.into(),
+        argument_object: true,
+        ..Options::default()
+    };
+    let out = run(
+        r#"$done({ body: $argument.lat + '|' + $argument.on });"#,
+        &req(),
+        Some(&resp(b"")),
+        &o,
+    )
+    .unwrap();
+    assert_eq!(out.body.unwrap(), b"31.2|true");
+}
