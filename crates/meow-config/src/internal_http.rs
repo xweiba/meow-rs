@@ -494,6 +494,21 @@ fn decode_chunked(mut input: &[u8], limit: usize) -> Result<Vec<u8>> {
 /// Returns `None` if there are no `proxies:` entries, if the first entry has
 /// no `name:` field, or if that name isn't in the map (e.g. it failed to
 /// load during proxy construction).
+/// The first `n` proxies of `raw_proxies`, in config order, that exist in
+/// `proxies` (download racing: one dead line can't hold a fetch).
+pub fn first_named_proxies(
+    raw_proxies: Option<&[std::collections::HashMap<String, serde_yaml::Value>]>,
+    proxies: &std::collections::HashMap<smol_str::SmolStr, Arc<dyn Proxy>>,
+    n: usize,
+) -> Vec<Arc<dyn Proxy>> {
+    raw_proxies
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|e| proxies.get(e.get("name")?.as_str()?).cloned())
+        .take(n)
+        .collect()
+}
+
 pub fn first_named_proxy(
     raw_proxies: Option<&[std::collections::HashMap<String, serde_yaml::Value>]>,
     proxies: &std::collections::HashMap<smol_str::SmolStr, Arc<dyn Proxy>>,

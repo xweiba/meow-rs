@@ -2489,6 +2489,7 @@ dependencies = [
  "async-trait",
  "base64",
  "dashmap",
+ "futures",
  "hickory-proto",
  "httparse",
  "ipnet",

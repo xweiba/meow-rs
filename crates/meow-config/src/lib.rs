@@ -2859,6 +2859,16 @@ fn missing_geodata_downloads<'a>(
     downloads
 }
 
+/// The geo DBs `raw`'s rules reference that are not on disk yet, as
+/// `(url, destination)` — what a background startup fetch has to get.
+pub fn missing_geodata_for(raw: &raw::RawConfig, geo: &GeoDataConfig) -> Vec<(String, PathBuf)> {
+    let scan = collect_geo_scan_lines(raw, &HashMap::new());
+    missing_geodata_downloads(raw, geo, &scan)
+        .into_iter()
+        .map(|(url, path)| (url.clone(), path))
+        .collect()
+}
+
 /// Whether the shared prefetch proxy layer is worth building. `http`
 /// providers need it for the payload prefetch itself; `file` providers read
 /// locally but their payloads can carry geo references whose download rides
@@ -2913,6 +2923,10 @@ async fn ensure_geodata(
         // indexes for structural checks and are fetched only at real startup.
         return;
     }
+    if geo.background_fetch {
+        // meow-app's startup fetch downloads them without holding startup.
+        return;
+    }
     let downloads = missing_geodata_downloads(raw, geo, scan_lines);
     if downloads.is_empty() {
         return;
@@ -2947,13 +2961,14 @@ fn build_parser_context_with_geo(
 ) -> Result<meow_rules::ParserContext, anyhow::Error> {
     let geoip_path = geo.mmdb_path.clone().unwrap_or_else(default_geoip_path);
     let asn_path = geo.asn_path.clone().unwrap_or_else(default_asn_path);
-    build_parser_context_at(
+    build_parser_context_at_opts(
         raw,
         &geoip_path,
         &asn_path,
         &meow_rules::geosite::default_geosite_candidates(),
         geo.geosite_path.as_deref(),
         provider_payloads,
+        geo.background_fetch,
     )
 }
 
@@ -2967,6 +2982,7 @@ fn build_parser_context_with_geo(
 /// builds a `ParserContext` carrying the readers. Fail-fast — the error names
 /// the offending rule and the path tried — when the scan matches but the load
 /// fails.
+#[cfg(test)]
 fn build_parser_context_at(
     raw: &raw::RawConfig,
     geoip_path: &Path,
@@ -2975,6 +2991,30 @@ fn build_parser_context_at(
     geosite_explicit: Option<&Path>,
     provider_payloads: &rule_provider::PrefetchedPayloads,
 ) -> Result<meow_rules::ParserContext, anyhow::Error> {
+    build_parser_context_at_opts(
+        raw,
+        geoip_path,
+        asn_path,
+        geosite_candidates,
+        geosite_explicit,
+        provider_payloads,
+        false,
+    )
+}
+
+/// [`build_parser_context_at`]; with `tolerate_missing` (`geodata.
+/// background-fetch`) an absent GeoIP / ASN DB starts out empty instead of
+/// failing: its rules match nothing until the background fetch lands and
+/// the rules are rebuilt.
+fn build_parser_context_at_opts(
+    raw: &raw::RawConfig,
+    geoip_path: &Path,
+    asn_path: &Path,
+    geosite_candidates: &[PathBuf],
+    geosite_explicit: Option<&Path>,
+    provider_payloads: &rule_provider::PrefetchedPayloads,
+    tolerate_missing: bool,
+) -> Result<meow_rules::ParserContext, anyhow::Error> {
     // Scan everything that can hold a geo rule — top-level rules, sub-rules
     // blocks, and rule-provider payloads — so a GEOIP/IP-ASN/GEOSITE key used
     // only outside `rules:` still gets binned into the indexes (issue #277).
@@ -2982,7 +3022,10 @@ fn build_parser_context_at(
 
     let geoip_trigger = lines.iter().find(|l| line_references_geoip(l));
     let geoip = match geoip_trigger {
-        Some(_) if is_offline_validate() && !geoip_path.exists() => {
+        Some(_) if (is_offline_validate() || tolerate_missing) && !geoip_path.exists() => {
+            if tolerate_missing {
+                warn!("GeoIP database not here yet; GEOIP rules match nothing until it arrives");
+            }
             Some(Arc::new(meow_rules::country_index::CountryIndex::default()))
         }
         Some(trigger) => {
@@ -2999,7 +3042,7 @@ fn build_parser_context_at(
 
     let asn_trigger = lines.iter().find(|l| line_references_asn(l));
     let asn = match asn_trigger {
-        Some(_) if is_offline_validate() && !asn_path.exists() => {
+        Some(_) if (is_offline_validate() || tolerate_missing) && !asn_path.exists() => {
             Some(Arc::new(meow_rules::asn_index::AsnIndex::default()))
         }
         Some(trigger) => {
@@ -5447,6 +5490,71 @@ mod geoip_context_tests {
         assert!(
             msg.contains("GEOIP,JP,PROXY"),
             "error must name the sub-rule line that triggered the load: {msg}"
+        );
+    }
+
+    /// `geodata.background-fetch`: a missing GeoIP / ASN DB starts out
+    /// empty (rules match nothing until the background fetch rebuilds them)
+    /// instead of failing startup.
+    #[test]
+    fn background_fetch_tolerates_missing_mmdb() {
+        let raw = raw::RawConfig {
+            rules: Some(vec![
+                "GEOIP,CN,DIRECT".to_string(),
+                "IP-ASN,15169,DIRECT".to_string(),
+                "GEOSITE,cn,DIRECT".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let nonexistent = PathBuf::from("/nonexistent-bg-fetch/Country.mmdb");
+        let ctx = build_parser_context_at_opts(
+            &raw,
+            &nonexistent,
+            &nonexistent_asn(),
+            &nonexistent_geosite(),
+            None,
+            &HashMap::new(),
+            true,
+        )
+        .expect("missing DBs must not fail with background-fetch");
+        assert!(ctx.geoip.is_some());
+        assert!(ctx.asn.is_some());
+        // Without it: the usual fail-fast.
+        assert!(build_parser_context_at(
+            &raw,
+            &nonexistent,
+            &nonexistent_asn(),
+            &nonexistent_geosite(),
+            None,
+            &HashMap::new(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn missing_geodata_for_lists_only_referenced_dbs() {
+        let dir = std::env::temp_dir().join(format!("meow-geo-{}", std::process::id()));
+        let geo = GeoDataConfig {
+            mmdb_path: Some(dir.join("Country.mmdb")),
+            asn_path: Some(dir.join("GeoLite2-ASN.mmdb")),
+            geosite_path: Some(dir.join("geosite.dat")),
+            background_fetch: true,
+            ..Default::default()
+        };
+        let raw = raw::RawConfig {
+            rules: Some(vec![
+                "GEOSITE,category-ads-all,REJECT".to_string(),
+                "GEOIP,CN,DIRECT".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let want: Vec<PathBuf> = missing_geodata_for(&raw, &geo)
+            .into_iter()
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(
+            want,
+            vec![dir.join("Country.mmdb"), dir.join("geosite.dat")]
         );
     }
 

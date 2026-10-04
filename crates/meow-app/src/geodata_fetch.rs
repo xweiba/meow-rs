@@ -197,16 +197,29 @@ pub async fn run_on_startup(
     dns_server: Arc<RwLock<Option<meow_api::routes::DnsServerHandle>>>,
     cache_dir: Option<std::path::PathBuf>,
 ) {
-    let targets = compute_targets(&geo);
-
     let route = tunnel.route_snapshot();
     let proxies = &route.proxies;
-    let download_proxy = meow_config::internal_http::first_named_proxy(
-        raw_config.read().proxies.as_deref(),
-        proxies,
-    );
-
-    let downloaded = fetch_missing(&targets, download_proxy.as_ref()).await;
+    let downloaded = if geo.background_fetch {
+        // Only what the rules use, racing a few lines (startup never waited).
+        let raw = raw_config.read().clone();
+        let racers =
+            meow_config::internal_http::first_named_proxies(raw.proxies.as_deref(), proxies, 3);
+        let mut got = Vec::new();
+        for (url, dest) in meow_config::missing_geodata_for(&raw, &geo) {
+            match meow_config::geodata::download_and_replace_racing(&url, &dest, &racers).await {
+                Ok(()) => got.push("geodata"),
+                Err(e) => warn!("geodata background fetch: {url}: {e:#}"),
+            }
+        }
+        got
+    } else {
+        let targets = compute_targets(&geo);
+        let download_proxy = meow_config::internal_http::first_named_proxy(
+            raw_config.read().proxies.as_deref(),
+            proxies,
+        );
+        fetch_missing(&targets, download_proxy.as_ref()).await
+    };
     if downloaded.is_empty() {
         return;
     }

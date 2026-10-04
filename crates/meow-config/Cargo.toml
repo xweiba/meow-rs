@@ -42,6 +42,7 @@ mux = ["meow-proxy/mux"]
 external-ui-download = ["dep:zip"]
 
 [dependencies]
+futures = { workspace = true }
 meow-common = { workspace = true }
 meow-trie = { workspace = true }
 meow-dns = { workspace = true, features = ["encrypted"] }

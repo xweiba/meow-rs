@@ -26,6 +26,8 @@ pub struct GeoDataConfig {
     pub mmdb_url: String,
     pub asn_url: String,
     pub geosite_url: String,
+    /// `geodata.background-fetch`: missing DBs never block startup.
+    pub background_fetch: bool,
 }
 
 impl Default for GeoDataConfig {
@@ -39,6 +41,7 @@ impl Default for GeoDataConfig {
             mmdb_url: DEFAULT_MMDB_URL.to_string(),
             asn_url: DEFAULT_ASN_URL.to_string(),
             geosite_url: DEFAULT_GEOSITE_URL.to_string(),
+            background_fetch: false,
         }
     }
 }
@@ -100,6 +103,7 @@ pub fn parse_geodata(raw: Option<&RawGeoDataConfig>) -> Result<GeoDataConfig, an
         geosite_url: urls
             .and_then(|u| u.geosite.clone())
             .unwrap_or_else(|| DEFAULT_GEOSITE_URL.to_string()),
+        background_fetch: r.background_fetch,
     })
 }
 
@@ -163,14 +167,45 @@ pub async fn download_and_replace(
     let bytes = internal_http::fetch(url, proxy, &[])
         .await
         .map_err(|e| anyhow!("fetching {url}: {e}"))?;
+    write_atomically(dest, &tmp, &bytes).await
+}
 
+/// Like [`download_and_replace`], but fetches through every proxy in
+/// `proxies` at once and keeps the first complete body: one dead or slow
+/// line can't hold the download (direct when `proxies` is empty).
+pub async fn download_and_replace_racing(
+    url: &str,
+    dest: &Path,
+    proxies: &[Arc<dyn Proxy>],
+) -> Result<(), anyhow::Error> {
+    if proxies.len() <= 1 {
+        return download_and_replace(url, dest, proxies.first()).await;
+    }
+    info!(
+        "geodata: downloading {} from {} racing {} proxies",
+        dest.display(),
+        url,
+        proxies.len()
+    );
+    let attempts = proxies.iter().map(|p| {
+        let p = Arc::clone(p);
+        Box::pin(async move { internal_http::fetch(url, Some(&p), &[]).await })
+    });
+    let (bytes, _) = futures::future::select_ok(attempts)
+        .await
+        .map_err(|e| anyhow!("fetching {url}: {e}"))?;
+    let tmp = crate::unique_scratch_path(dest);
+    write_atomically(dest, &tmp, &bytes).await
+}
+
+async fn write_atomically(dest: &Path, tmp: &Path, bytes: &[u8]) -> Result<(), anyhow::Error> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::write(&tmp, &bytes).await?;
+    tokio::fs::write(tmp, bytes).await?;
 
-    if let Err(e) = tokio::fs::rename(&tmp, dest).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
+    if let Err(e) = tokio::fs::rename(tmp, dest).await {
+        let _ = tokio::fs::remove_file(tmp).await;
         return Err(anyhow!(
             "atomic rename {} → {}: {}",
             tmp.display(),
@@ -194,6 +229,13 @@ mod tests {
 
     fn raw_defaults() -> RawGeoDataConfig {
         RawGeoDataConfig::default()
+    }
+
+    #[test]
+    fn background_fetch_is_parsed() {
+        let raw: RawGeoDataConfig = serde_yaml::from_str("background-fetch: true").unwrap();
+        assert!(parse_geodata(Some(&raw)).unwrap().background_fetch);
+        assert!(!parse_geodata(None).unwrap().background_fetch);
     }
 
     #[test]

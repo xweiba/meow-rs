@@ -138,6 +138,13 @@ pub struct RawGeoDataConfig {
     pub auto_update_interval: Option<u32>,
     /// Download URL overrides. Defaults baked in when absent.
     pub url: Option<RawGeoDataUrls>,
+    /// Never hold startup on a geo database download: a missing GeoIP / ASN
+    /// / geosite DB starts out empty (its rules match nothing), only the
+    /// DBs the rules reference are fetched in the background — racing a
+    /// few proxies — and the rules are rebuilt once they land. For apps
+    /// whose first start may have no direct route to the download host.
+    #[serde(default)]
+    pub background_fetch: bool,
     // Upstream-only fields accepted for forward-compat; we warn-once and ignore.
     pub geodata_mode: Option<serde_yaml::Value>,
     pub geodata_loader: Option<serde_yaml::Value>,
