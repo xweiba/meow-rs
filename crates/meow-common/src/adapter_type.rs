@@ -10,6 +10,9 @@ pub enum AdapterType {
     Fallback,
     UrlTest,
     LoadBalance,
+    /// Per-site learning group (PaoPao's `smart`): the line each website
+    /// does best on, sticky exits, failing lines sit out a while.
+    Smart,
     Relay,
     Shadowsocks,
     Socks5,
@@ -42,6 +45,7 @@ impl fmt::Display for AdapterType {
             AdapterType::Fallback => write!(f, "Fallback"),
             AdapterType::UrlTest => write!(f, "URLTest"),
             AdapterType::LoadBalance => write!(f, "LoadBalance"),
+            AdapterType::Smart => write!(f, "Smart"),
             AdapterType::Relay => write!(f, "Relay"),
             AdapterType::Shadowsocks => write!(f, "Shadowsocks"),
             AdapterType::Socks5 => write!(f, "Socks5"),

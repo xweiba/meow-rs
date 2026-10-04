@@ -2617,6 +2617,7 @@ dependencies = [
  "rand 0.9.4",
  "rcgen 0.13.2",
  "rustls",
+ "serde",
  "serde_json",
  "sha2",
  "shadowsocks",
