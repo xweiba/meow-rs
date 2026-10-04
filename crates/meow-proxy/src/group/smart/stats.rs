@@ -43,6 +43,16 @@ const PINNED_TRIES: usize = 4;
 pub const BAN_SECS: i64 = 5 * 60;
 /// This many failures in a row (any site) ban a line.
 const BAN_STREAK: u32 = 3;
+/// A line receiving this fast (bytes/s) is busy: new connections may go to
+/// a line with more room left.
+const SPILL_RATE: f64 = (1u64 << 20) as f64;
+/// What a line not yet seen busy is assumed to carry (bytes/s).
+const ASSUMED_CAPACITY: f64 = 2.0 * SPILL_RATE;
+/// 速度最快: share of dials that try a line not measured yet.
+const MEASURE_RATE: f64 = 0.1;
+
+/// Lines' load now: line → (bytes/s now, fastest seen).
+pub type LoadView = HashMap<String, (f64, f64)>;
 
 /// What is known about one line for one site (or overall).
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -202,6 +212,11 @@ pub struct Plan {
     /// The site has an exit: one line at a time (never two addresses at
     /// once), same exit first.
     pub pinned: bool,
+    /// The first line takes this connection only (its exit's line is busy):
+    /// the family stays on this pin.
+    pub keep_pin: Option<String>,
+    /// 速度最快: no pins at all.
+    pub no_pin: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -228,6 +243,8 @@ struct Inner {
     bans: HashMap<String, i64>,
     dirty: bool,
     balance: bool,
+    /// 速度最快: the line seen fastest, no per-site learning.
+    fastest: bool,
     rng: StdRng,
 }
 
@@ -276,6 +293,7 @@ impl Store {
             bans: HashMap::new(),
             dirty: false,
             balance: false,
+            fastest: false,
             rng: StdRng::from_os_rng(),
         };
         if let Some(saved) = path
@@ -311,6 +329,12 @@ impl Store {
     /// the fastest.
     pub fn set_balance(&self, on: bool) {
         self.inner.lock().balance = on;
+    }
+
+    /// 速度最快: always the line seen fastest on real downloads (latency
+    /// until measured), now and then one not measured yet.
+    pub fn set_fastest(&self, on: bool) {
+        self.inner.lock().fastest = on;
     }
 
     /// Writes the records if they changed (atomic replace).
@@ -448,6 +472,12 @@ impl Store {
 
     /// Orders `lines` (the group members that are up) for `site`.
     pub fn plan(&self, site: &str, lines: &[String]) -> Plan {
+        self.plan_with(site, lines, &LoadView::new())
+    }
+
+    /// [`Self::plan`], with how busy each line is now: a busy line hands
+    /// new connections to a comparable one with more room left.
+    pub fn plan_with(&self, site: &str, lines: &[String], load: &LoadView) -> Plan {
         if lines.is_empty() {
             return Plan::default();
         }
@@ -481,11 +511,55 @@ impl Store {
             .collect();
         rs.sort_by(|a, b| a.eff().total_cmp(&b.eff()));
         let ordered: Vec<String> = rs.iter().map(|r| r.line.to_string()).collect();
+        // How much a line carries at most, and how much is free now.
+        let capacity = |g: &Inner, l: &str| -> f64 {
+            let (_, peak) = load.get(l).copied().unwrap_or_default();
+            let tp = g.overall.get(l).map_or(0.0, |r| r.throughput);
+            peak.max(tp)
+        };
+        let busy = |l: &str| load.get(l).is_some_and(|(rate, _)| *rate >= SPILL_RATE);
 
-        if let Some(pin) = g.pins.get(&family_key(site)) {
+        if g.fastest {
+            return fastest_plan(&mut g, &rs, &|g: &Inner, l: &str| capacity(g, l));
+        }
+
+        // Sites whose accounts watch the address (Google, OpenAI …) never
+        // spread over lines.
+        let watched = family_key(site).starts_with("family:");
+        if let Some(pin) = g.pins.get(&family_key(site)).cloned() {
             if now - pin.last_used < STICKY_TTL && lines.contains(&pin.line) {
                 let cost: HashMap<&str, f64> = rs.iter().map(|r| (r.line, r.eff())).collect();
-                return pinned_plan(&g, pin, &ordered, &cost);
+                let mut plan = pinned_plan(&g, &pin, &ordered, &cost);
+                if !watched && busy(&plan.lines[0]) {
+                    // The exit's line is busy (a download): this new
+                    // connection may take a line of the same country with
+                    // more room. The family stays where it is.
+                    let first = plan.lines[0].clone();
+                    let country = g
+                        .exits
+                        .get(&first)
+                        .map(|e| e.country.clone())
+                        .unwrap_or_default();
+                    let limit = cost.get(first.as_str()).copied().unwrap_or(f64::INFINITY);
+                    let peers: Vec<&str> = rs
+                        .iter()
+                        .filter(|r| {
+                            r.line == first
+                                || (!country.is_empty()
+                                    && g.exits.get(r.line).is_some_and(|e| e.country == country)
+                                    && r.eff().is_finite()
+                                    && r.eff() <= (limit * 2.0).max(limit + 400.0))
+                        })
+                        .map(|r| r.line)
+                        .collect();
+                    let pick = roomiest(&mut g, &peers, load, &|g: &Inner, l: &str| capacity(g, l));
+                    if pick != first {
+                        plan.lines.retain(|l| l != &pick);
+                        plan.lines.insert(0, pick);
+                        plan.keep_pin = Some(pin.line.clone());
+                    }
+                }
+                return plan;
             }
         }
         let best = rs[0];
@@ -499,7 +573,19 @@ impl Store {
         let good = best.known && best.site < GOOD_COST;
         let roll: f64 = g.rng.random();
         if good && roll >= EXPLORE_RATE {
-            // A good line for this site: use it alone.
+            // A good line for this site: use it alone — or, when it is busy,
+            // the comparable one with the most room left.
+            if !watched && busy(best.line) {
+                let limit = best.site;
+                let peers: Vec<&str> = rs
+                    .iter()
+                    .filter(|r| r.known && r.site <= limit * 1.3 + 100.0)
+                    .map(|r| r.line)
+                    .collect();
+                let pick = roomiest(&mut g, &peers, load, &|g: &Inner, l: &str| capacity(g, l));
+                plan.lines.retain(|l| l != &pick);
+                plan.lines.insert(0, pick);
+            }
             plan.race = 1;
             plan.known = true;
         } else if good && rs.len() > 1 {
@@ -598,6 +684,77 @@ fn evict(g: &mut Inner) {
     }
 }
 
+/// Of `lines`, the one with the most room left (capacity − rate now),
+/// comparing two picked at random ("power of two choices": spreads load
+/// without everyone rushing to the same line).
+fn roomiest(
+    g: &mut Inner,
+    lines: &[&str],
+    load: &LoadView,
+    capacity: &dyn Fn(&Inner, &str) -> f64,
+) -> String {
+    match lines.len() {
+        0 => return String::new(),
+        1 => return lines[0].to_string(),
+        _ => {}
+    }
+    let room = |g: &Inner, l: &str| {
+        let rate = load.get(l).map_or(0.0, |(r, _)| *r);
+        let cap = capacity(g, l);
+        (if cap > 0.0 { cap } else { ASSUMED_CAPACITY }) - rate
+    };
+    let a = g.rng.random_range(0..lines.len());
+    let mut b = g.rng.random_range(0..lines.len() - 1);
+    if b >= a {
+        b += 1;
+    }
+    let (la, lb) = (lines[a], lines[b]);
+    if room(g, la) >= room(g, lb) {
+        la.to_string()
+    } else {
+        lb.to_string()
+    }
+}
+
+/// 速度最快: the line seen fastest on real downloads first (lines not
+/// measured yet after, by latency); now and then an unmeasured one first,
+/// so it gets measured.
+fn fastest_plan(g: &mut Inner, rs: &[Ranked<'_>], capacity: &dyn Fn(&Inner, &str) -> f64) -> Plan {
+    let mut measured: Vec<(&str, f64)> = rs
+        .iter()
+        .filter(|r| r.all.is_finite())
+        .map(|r| (r.line, capacity(g, r.line)))
+        .filter(|(_, c)| *c > 0.0)
+        .collect();
+    measured.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut lines: Vec<String> = measured.iter().map(|(l, _)| l.to_string()).collect();
+    let rest: Vec<String> = rs
+        .iter()
+        .map(|r| r.line.to_string())
+        .filter(|l| !lines.contains(l))
+        .collect();
+    let unmeasured: Vec<&String> = rest
+        .iter()
+        .filter(|l| rs.iter().any(|r| r.line == l.as_str() && r.all.is_finite()))
+        .collect();
+    if !unmeasured.is_empty() && (lines.is_empty() || g.rng.random::<f64>() < MEASURE_RATE) {
+        let pick = unmeasured[g.rng.random_range(0..unmeasured.len())].clone();
+        lines.insert(0, pick);
+    }
+    for l in rest {
+        if !lines.contains(&l) {
+            lines.push(l);
+        }
+    }
+    Plan {
+        lines,
+        race: 1,
+        known: true,
+        no_pin: true,
+        ..Plan::default()
+    }
+}
+
 /// Keeps a pinned family on its exit: the pinned line, then lines with the
 /// same exit address, then the same country, then the rest by cost.
 fn pinned_plan(g: &Inner, pin: &Pin, ordered: &[String], cost: &HashMap<&str, f64>) -> Plan {
@@ -640,6 +797,7 @@ fn pinned_plan(g: &Inner, pin: &Pin, ordered: &[String], cost: &HashMap<&str, f6
         race: 1,
         known: true,
         pinned: true,
+        ..Plan::default()
     }
 }
 
@@ -671,6 +829,7 @@ fn balanced_plan(site: &str, rs: &[Ranked<'_>]) -> Plan {
         race: 1,
         known: false,
         pinned: true,
+        ..Plan::default()
     }
 }
 

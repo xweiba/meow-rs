@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use meow_common::ProxyConn;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+use super::load::LineLoad;
 use super::stats::Outcome;
 
 pub struct MeteredConn {
@@ -20,6 +21,8 @@ pub struct MeteredConn {
     received: u64,
     sent: u64,
     report: Option<Box<dyn FnOnce(Outcome) + Send + Sync>>,
+    /// The line's load counter (received bytes as they come).
+    load: Option<std::sync::Arc<LineLoad>>,
 }
 
 impl MeteredConn {
@@ -37,7 +40,14 @@ impl MeteredConn {
             received: 0,
             sent: 0,
             report: Some(Box::new(report)),
+            load: None,
         }
+    }
+
+    /// Also counts received bytes into the line's load.
+    pub fn counting(mut self, load: std::sync::Arc<LineLoad>) -> Self {
+        self.load = Some(load);
+        self
     }
 }
 
@@ -76,6 +86,9 @@ impl AsyncRead for MeteredConn {
                 self.first = self.wrote_at.map(|w| w.elapsed());
             }
             self.received += n;
+            if let Some(l) = &self.load {
+                l.add(n);
+            }
         }
         res
     }

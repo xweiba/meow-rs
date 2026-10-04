@@ -3163,7 +3163,7 @@ fn parse_proxy_group_inner(
                 members.extend(slot.read().iter().cloned());
             }
             let balance = matches!(config.strategy.as_deref(), Some("consistent-hashing"));
-            Ok(Arc::new(meow_proxy::group::smart::SmartGroup::new(
+            let group = meow_proxy::group::smart::SmartGroup::new(
                 &config.name,
                 members,
                 config
@@ -3172,7 +3172,15 @@ fn parse_proxy_group_inner(
                     .unwrap_or_else(|| "https://www.gstatic.com/generate_204".to_string()),
                 balance,
                 true,
-            )))
+            );
+            // PaoPao's 速度最快: by real download speed, not latency.
+            Ok(Arc::new(
+                if config.strategy.as_deref() == Some("throughput") {
+                    group.fastest()
+                } else {
+                    group
+                },
+            ))
         }
         "fallback" => {
             let group = FallbackGroup::new_with_providers(&config.name, proxies, slots)

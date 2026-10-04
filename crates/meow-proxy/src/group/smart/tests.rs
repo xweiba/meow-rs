@@ -144,6 +144,7 @@ fn group(lines: &[Arc<Line>]) -> SmartGroup {
             health: ProxyHealth::new(),
             usage: UsageTracker::new(),
             reprobe: AtomicI64::new(i64::MAX),
+            loads: Loads::default(),
         }),
     }
 }

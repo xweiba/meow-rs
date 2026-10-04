@@ -286,3 +286,72 @@ fn cold_start_races_wider() {
     s.report("", "c", &ok(100.0));
     assert_eq!(s.plan("x.com", &all).race, 3, "probes have answered");
 }
+
+fn exit(ip: &str, cc: &str) -> Exit {
+    Exit {
+        ip: ip.into(),
+        country: cc.into(),
+    }
+}
+
+const MB: f64 = (1u64 << 20) as f64;
+
+#[test]
+fn a_busy_exit_lends_new_connections_to_a_roomier_line_of_its_country() {
+    let (s, _) = store();
+    for l in ["a", "b", "far"] {
+        s.report("", l, &ok(100.0));
+        s.report("dl.example", l, &ok(100.0));
+    }
+    s.set_exit("a", exit("1.1.1.1", "JP"));
+    s.set_exit("b", exit("2.2.2.2", "JP"));
+    s.set_exit("far", exit("3.3.3.3", "US"));
+    s.use_line("dl.example", "a");
+    let all = lines(&["a", "b", "far"]);
+    // Quiet: the exit's line.
+    let p = s.plan_with("dl.example", &all, &LoadView::new());
+    assert_eq!(p.lines[0], "a");
+    assert!(p.keep_pin.is_none());
+    // Downloading at 3 MB/s of its 3.5: b (same country, idle) takes the
+    // new connection; the family stays on a; never the other country.
+    let load: LoadView = [
+        ("a".to_string(), (3.0 * MB, 3.5 * MB)),
+        ("b".to_string(), (0.0, 3.0 * MB)),
+        ("far".to_string(), (0.0, 50.0 * MB)),
+    ]
+    .into();
+    let p = s.plan_with("dl.example", &all, &load);
+    assert_eq!(p.lines[0], "b");
+    assert_eq!(p.keep_pin.as_deref(), Some("a"));
+    // Sites whose accounts watch the address never spread.
+    for l in ["a", "b"] {
+        s.report("google.com", l, &ok(100.0));
+    }
+    s.use_line("google.com", "a");
+    assert_eq!(s.plan_with("google.com", &all, &load).lines[0], "a");
+}
+
+#[test]
+fn fastest_goes_by_measured_download_speed_and_never_pins() {
+    let (s, _) = store();
+    for l in ["slow", "quick", "new"] {
+        s.report("", l, &ok(if l == "slow" { 50.0 } else { 300.0 }));
+    }
+    s.set_fastest(true);
+    let load: LoadView = [
+        ("slow".to_string(), (0.0, 1.0 * MB)),
+        ("quick".to_string(), (0.0, 9.0 * MB)),
+    ]
+    .into();
+    let all = lines(&["slow", "quick", "new"]);
+    let mut first = std::collections::HashMap::new();
+    for _ in 0..300 {
+        let p = s.plan_with("x.com", &all, &load);
+        assert!(p.no_pin);
+        *first.entry(p.lines[0].clone()).or_insert(0) += 1;
+    }
+    // Lower latency doesn't win; the unmeasured one is tried now and then.
+    assert!(first["quick"] > 230, "{first:?}");
+    assert!(first.get("new").copied().unwrap_or(0) > 5, "{first:?}");
+    assert!(!first.contains_key("slow"), "{first:?}");
+}

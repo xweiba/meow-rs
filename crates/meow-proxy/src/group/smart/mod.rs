@@ -16,6 +16,7 @@
 //! Ideas from PaoPao's Go core (and mihomo's Smart group); our own code.
 
 mod family;
+mod load;
 mod metered;
 pub mod stats;
 
@@ -34,6 +35,7 @@ use smol_str::SmolStr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, warn};
 
+use self::load::Loads;
 use self::metered::MeteredConn;
 use self::stats::{site_key, Exit, Outcome, Store};
 use super::UsageTracker;
@@ -64,6 +66,8 @@ struct Shared {
     usage: UsageTracker,
     /// Unix nanos of the last all-banned re-probe.
     reprobe: AtomicI64,
+    /// How busy each line is now (received bytes per second).
+    loads: Loads,
 }
 
 impl Drop for Shared {
@@ -120,12 +124,20 @@ impl SmartGroup {
             health: ProxyHealth::new(),
             usage: UsageTracker::new(),
             reprobe: AtomicI64::new(0),
+            loads: Loads::default(),
         });
         // Background upkeep; it ends once the group is dropped (reload).
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(upkeep(Arc::downgrade(&shared)));
+            rt.spawn(sample_loads(Arc::downgrade(&shared)));
         }
         Self { shared }
+    }
+
+    /// 速度最快: always the line seen fastest on real downloads.
+    pub fn fastest(self) -> Self {
+        self.shared.store.set_fastest(true);
+        self
     }
 
     /// What is known about `site` (the app's "this site uses …").
@@ -357,6 +369,19 @@ async fn upkeep(weak: Weak<Shared>) {
     }
 }
 
+/// Turns the lines' byte counters into rates, once a second, until the
+/// group is dropped.
+async fn sample_loads(weak: Weak<Shared>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tick.tick().await;
+        let Some(me) = weak.upgrade() else {
+            return;
+        };
+        me.loads.sample(Instant::now());
+    }
+}
+
 /// Asks through `proxy` where its traffic leaves to the internet.
 async fn probe_exit(proxy: &dyn Proxy) -> std::io::Result<Exit> {
     let meta = Metadata {
@@ -434,7 +459,9 @@ impl ProxyAdapter for SmartGroup {
         let me = &self.shared;
         me.usage.touch_user_traffic(metadata);
         let site = site_of(metadata);
-        let plan = me.store.plan(&site, &me.candidates(false));
+        let plan = me
+            .store
+            .plan_with(&site, &me.candidates(false), &me.loads.snapshot());
         if plan.lines.is_empty() {
             return Err(me.no_line());
         }
@@ -456,11 +483,20 @@ impl ProxyAdapter for SmartGroup {
             match me.race(&site, metadata, &lines[..n], timeout).await {
                 Ok((line, conn, connect)) => {
                     *me.now.write() = Some(SmolStr::from(line.as_str()));
-                    me.store.use_line(&site, &line);
+                    if !plan.no_pin {
+                        // A connection lent to a roomier line keeps the
+                        // family on its exit.
+                        me.store
+                            .use_line(&site, plan.keep_pin.as_deref().unwrap_or(&line));
+                    }
                     let store_owner = Arc::clone(me);
-                    return Ok(Box::new(MeteredConn::new(conn, connect, move |r| {
-                        store_owner.store.report(&site, &line, &r);
-                    })));
+                    let load = me.loads.of(&line);
+                    return Ok(Box::new(
+                        MeteredConn::new(conn, connect, move |r| {
+                            store_owner.store.report(&site, &line, &r);
+                        })
+                        .counting(load),
+                    ));
                 }
                 Err(e) => errs.push(e.to_string()),
             }
