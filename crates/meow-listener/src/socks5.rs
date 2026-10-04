@@ -105,59 +105,58 @@ async fn handle_socks5_inner(
     // names the policy (`IN-USER` rules) for local programs too.
     let auth = auth.filter(|a| !a.credentials.is_empty());
     let skipped = auth.is_some_and(|a| a.should_skip(&src_addr.ip()));
-    let in_user: Option<String> = if let Some(auth) =
-        auth.filter(|_| !skipped || methods.contains(&USER_PASS_AUTH))
-    {
-        if !methods.contains(&USER_PASS_AUTH) {
-            stream
-                .write_all(&[SOCKS5_VERSION, NO_ACCEPTABLE_METHODS])
-                .await?;
-            return Err("client does not support username/password auth".into());
-        }
-        stream.write_all(&[SOCKS5_VERSION, USER_PASS_AUTH]).await?;
+    let in_user: Option<String> =
+        if let Some(auth) = auth.filter(|_| !skipped || methods.contains(&USER_PASS_AUTH)) {
+            if !methods.contains(&USER_PASS_AUTH) {
+                stream
+                    .write_all(&[SOCKS5_VERSION, NO_ACCEPTABLE_METHODS])
+                    .await?;
+                return Err("client does not support username/password auth".into());
+            }
+            stream.write_all(&[SOCKS5_VERSION, USER_PASS_AUTH]).await?;
 
-        // RFC 1929 sub-negotiation: [0x01, ulen, user..., plen, pass...]
-        let mut sub_ver = [0u8; 1];
-        read_exact_before(stream, &mut sub_ver, deadline).await?;
-        if sub_ver[0] != 0x01 {
-            return Err("invalid auth sub-negotiation version".into());
-        }
-        // Borrow username/password from stack buffers; the username is only
-        // copied to the heap after a successful verify (audit #182 — the
-        // failure/empty path previously allocated two Strings regardless).
-        let mut ulen = [0u8; 1];
-        read_exact_before(stream, &mut ulen, deadline).await?;
-        let mut user_buf = [0u8; 255];
-        read_exact_before(stream, &mut user_buf[..ulen[0] as usize], deadline).await?;
-        let mut plen = [0u8; 1];
-        read_exact_before(stream, &mut plen, deadline).await?;
-        let mut pass_buf = [0u8; 255];
-        read_exact_before(stream, &mut pass_buf[..plen[0] as usize], deadline).await?;
-        let Ok(username) = std::str::from_utf8(&user_buf[..ulen[0] as usize]) else {
-            stream.write_all(&[0x01, 0x01]).await?;
-            return Err("invalid SOCKS5 username encoding".into());
-        };
-        let Ok(password) = std::str::from_utf8(&pass_buf[..plen[0] as usize]) else {
-            stream.write_all(&[0x01, 0x01]).await?;
-            return Err("invalid SOCKS5 password encoding".into());
-        };
+            // RFC 1929 sub-negotiation: [0x01, ulen, user..., plen, pass...]
+            let mut sub_ver = [0u8; 1];
+            read_exact_before(stream, &mut sub_ver, deadline).await?;
+            if sub_ver[0] != 0x01 {
+                return Err("invalid auth sub-negotiation version".into());
+            }
+            // Borrow username/password from stack buffers; the username is only
+            // copied to the heap after a successful verify (audit #182 — the
+            // failure/empty path previously allocated two Strings regardless).
+            let mut ulen = [0u8; 1];
+            read_exact_before(stream, &mut ulen, deadline).await?;
+            let mut user_buf = [0u8; 255];
+            read_exact_before(stream, &mut user_buf[..ulen[0] as usize], deadline).await?;
+            let mut plen = [0u8; 1];
+            read_exact_before(stream, &mut plen, deadline).await?;
+            let mut pass_buf = [0u8; 255];
+            read_exact_before(stream, &mut pass_buf[..plen[0] as usize], deadline).await?;
+            let Ok(username) = std::str::from_utf8(&user_buf[..ulen[0] as usize]) else {
+                stream.write_all(&[0x01, 0x01]).await?;
+                return Err("invalid SOCKS5 username encoding".into());
+            };
+            let Ok(password) = std::str::from_utf8(&pass_buf[..plen[0] as usize]) else {
+                stream.write_all(&[0x01, 0x01]).await?;
+                return Err("invalid SOCKS5 password encoding".into());
+            };
 
-        if !auth.credentials.verify(username, password) {
-            stream.write_all(&[0x01, 0x01]).await?;
-            return Err(format!("SOCKS5 auth failed for user {username:?}").into());
-        }
-        stream.write_all(&[0x01, 0x00]).await?;
-        Some(username.to_string())
-    } else {
-        if !methods.contains(&NO_AUTH) {
-            stream
-                .write_all(&[SOCKS5_VERSION, NO_ACCEPTABLE_METHODS])
-                .await?;
-            return Err("client does not support no-auth SOCKS5".into());
-        }
-        stream.write_all(&[SOCKS5_VERSION, NO_AUTH]).await?;
-        None
-    };
+            if !auth.credentials.verify(username, password) {
+                stream.write_all(&[0x01, 0x01]).await?;
+                return Err(format!("SOCKS5 auth failed for user {username:?}").into());
+            }
+            stream.write_all(&[0x01, 0x00]).await?;
+            Some(username.to_string())
+        } else {
+            if !methods.contains(&NO_AUTH) {
+                stream
+                    .write_all(&[SOCKS5_VERSION, NO_ACCEPTABLE_METHODS])
+                    .await?;
+                return Err("client does not support no-auth SOCKS5".into());
+            }
+            stream.write_all(&[SOCKS5_VERSION, NO_AUTH]).await?;
+            None
+        };
 
     // 2. Request
     let mut req = [0u8; 4];

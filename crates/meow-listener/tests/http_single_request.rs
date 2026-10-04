@@ -305,7 +305,7 @@ async fn final_response_stops_an_incomplete_request_upload() {
         .unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn client_eof_reaps_a_silent_origin_without_half_closing_it_early() {
     let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin_addr = origin.local_addr().unwrap();
@@ -338,6 +338,11 @@ async fn client_eof_reaps_a_silent_origin_without_half_closing_it_early() {
         .await
         .unwrap();
     request_seen_rx.await.unwrap();
+    // Pause only now: a clock paused from the start auto-advances past the
+    // proxy's dial timeout while the real loopback connect is in flight,
+    // the dial is abandoned and the origin waits in accept() forever. The
+    // half-close linger starts after this point, so the test still steps it.
+    tokio::time::pause();
     // Keep the client write half open until the origin has received the
     // request. Otherwise Tokio's paused clock can auto-advance to the relay
     // timer while this task is still waiting on the oneshot.
@@ -758,7 +763,7 @@ async fn interim_response_hop_by_hop_headers_are_stripped() {
     handler.await.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn abandoned_upgrade_is_reaped_by_the_half_close_linger() {
     let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin_addr = origin.local_addr().unwrap();
@@ -797,6 +802,11 @@ async fn abandoned_upgrade_is_reaped_by_the_half_close_linger() {
     // them must still be observed while the upgrade decision is pending.
     client.write_all(b"early-protocol-bytes").await.unwrap();
     request_seen_rx.await.unwrap();
+    // Pause only now: a clock paused from the start auto-advances past the
+    // proxy's dial timeout while the real loopback connect is in flight,
+    // the dial is abandoned and the origin waits in accept() forever. The
+    // half-close linger starts after this point, so the test still steps it.
+    tokio::time::pause();
     // Keep the client write half open until the origin has received the
     // request, mirroring client_eof_reaps_a_silent_origin: the paused clock
     // must not auto-advance to the relay timer before the handshake lands.

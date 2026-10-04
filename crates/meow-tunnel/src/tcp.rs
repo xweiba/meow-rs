@@ -1,7 +1,7 @@
 use crate::relay::{copy_bidirectional_buf_tracked, RELAY_BUF_SIZE};
 use crate::statistics::Statistics;
 use crate::tunnel::{ResolvedTarget, TunnelInner};
-use meow_common::{with_dial_timeout, Metadata, ProxyConn};
+use meow_common::{with_dial_timeout, Metadata, ProxyAdapter, ProxyConn};
 use smallvec::{smallvec, SmallVec};
 use smol_str::SmolStr;
 use std::sync::Arc;
@@ -34,7 +34,53 @@ enum ConnectionKey {
     Headless,
 }
 
+/// The groups a connection passes through and the proxy it leaves by, in
+/// mihomo's `chains` order: the proxy first, the rule's target last
+/// (`["香港 01", "auto", "proxy", "policy:final"]`). Peeks down the groups
+/// like a match-time probe (no round-robin advance, no usage stats), so
+/// panels can show where traffic actually goes, not just the rule target.
+pub fn resolved_chain(top: &dyn ProxyAdapter, metadata: &Metadata) -> SmallVec<[Arc<str>; 1]> {
+    const MAX_HOPS: usize = 16;
+    let mut names: SmallVec<[Arc<str>; 4]> = smallvec![Arc::from(top.name())];
+    let mut next = top.unwrap_proxy(metadata, false);
+    for _ in 0..MAX_HOPS {
+        let Some(p) = next else { break };
+        names.push(Arc::from(p.name()));
+        next = p.unwrap_proxy(metadata, false);
+    }
+    names.into_iter().rev().collect()
+}
+
 impl<'a> ConnectionGuard<'a> {
+    /// [`track_named`](Self::track_named) with the whole resolved chain,
+    /// worked out only when the API will show it.
+    fn track_resolved(
+        stats: &'a Statistics,
+        metadata: &Metadata,
+        rule: SmolStr,
+        rule_payload: SmolStr,
+        proxy: &dyn ProxyAdapter,
+    ) -> Self {
+        if let Some(counters) = stats.begin_headless_connection() {
+            return Self {
+                stats,
+                key: ConnectionKey::Headless,
+                counters,
+            };
+        }
+        let (id, counters) = stats.track_connection_with_counters(
+            metadata.pure(),
+            rule,
+            rule_payload,
+            resolved_chain(proxy, metadata),
+        );
+        Self {
+            stats,
+            key: ConnectionKey::Api(id),
+            counters,
+        }
+    }
+
     fn track_named(
         stats: &'a Statistics,
         metadata: &Metadata,
@@ -171,6 +217,26 @@ impl<'a> TcpAdmission<'a> {
         Some(guard)
     }
 
+    /// [`track_named`](Self::track_named), recording the groups and proxy
+    /// `proxy` resolves to for this connection (see [`resolved_chain`]).
+    pub fn track_resolved(
+        self,
+        metadata: &Metadata,
+        rule: SmolStr,
+        rule_payload: SmolStr,
+        proxy: &dyn ProxyAdapter,
+    ) -> Option<ConnectionGuard<'a>> {
+        let generation = self.inner.tcp_generation.read();
+        if *generation != self.generation {
+            debug!("TCP routing setup invalidated by cold reload");
+            return None;
+        }
+        let guard =
+            ConnectionGuard::track_resolved(&self.inner.stats, metadata, rule, rule_payload, proxy);
+        drop(generation);
+        Some(guard)
+    }
+
     /// Register only if no cold reload has crossed this routing decision.
     /// The read lock covers both validation and insertion: a reload cannot
     /// close the table between these operations and leave an old flow alive.
@@ -299,7 +365,7 @@ pub async fn route_inbound_tcp<C>(
     // Track the connection — guard drops it on every exit path, including
     // the abort case where the manual close call below would never run.
     // API-only metadata and proxy-name ownership are built only when needed.
-    let Some(guard) = admission.track_named(&metadata, rule_name, rule_payload, proxy.name())
+    let Some(guard) = admission.track_resolved(&metadata, rule_name, rule_payload, proxy.as_ref())
     else {
         return;
     };
@@ -395,6 +461,89 @@ pub async fn route_inbound_tcp<C>(
 
 #[cfg(test)]
 mod tests {
+    /// A group (or, without `next`, a proxy) that resolves to `next`.
+    struct Hop {
+        name: &'static str,
+        next: Option<Arc<dyn meow_common::Proxy>>,
+        health: meow_common::ProxyHealth,
+    }
+
+    fn hop(name: &'static str, next: Option<Arc<dyn meow_common::Proxy>>) -> Arc<Hop> {
+        Arc::new(Hop {
+            name,
+            next,
+            health: meow_common::ProxyHealth::new(),
+        })
+    }
+
+    #[async_trait::async_trait]
+    impl ProxyAdapter for Hop {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn adapter_type(&self) -> meow_common::AdapterType {
+            if self.next.is_some() {
+                meow_common::AdapterType::Selector
+            } else {
+                meow_common::AdapterType::Direct
+            }
+        }
+        fn addr(&self) -> &str {
+            ""
+        }
+        fn support_udp(&self) -> bool {
+            false
+        }
+        async fn dial_tcp(&self, _m: &Metadata) -> meow_common::Result<Box<dyn ProxyConn>> {
+            Err(meow_common::MeowError::NotSupported("hop".into()))
+        }
+        async fn dial_udp(
+            &self,
+            _m: &Metadata,
+        ) -> meow_common::Result<Box<dyn meow_common::ProxyPacketConn>> {
+            Err(meow_common::MeowError::NotSupported("hop".into()))
+        }
+        fn unwrap_proxy(&self, _m: &Metadata, _touch: bool) -> Option<Arc<dyn meow_common::Proxy>> {
+            self.next.clone()
+        }
+        fn health(&self) -> &meow_common::ProxyHealth {
+            &self.health
+        }
+    }
+
+    impl meow_common::Proxy for Hop {
+        fn alive(&self) -> bool {
+            true
+        }
+        fn alive_for_url(&self, _url: &str) -> bool {
+            true
+        }
+        fn last_delay(&self) -> u16 {
+            0
+        }
+        fn last_delay_for_url(&self, _url: &str) -> u16 {
+            0
+        }
+        fn delay_history(&self) -> Vec<meow_common::DelayHistory> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn chains_name_the_proxy_first_and_the_rule_target_last() {
+        let line = hop("香港 01", None);
+        let auto = hop("auto", Some(line));
+        let select = hop("proxy", Some(auto));
+        let policy = hop("policy:final", Some(select));
+        let chain = resolved_chain(policy.as_ref(), &Metadata::default());
+        let names: Vec<&str> = chain.iter().map(|s| &**s).collect();
+        assert_eq!(names, ["香港 01", "auto", "proxy", "policy:final"]);
+        // A plain proxy is its own chain.
+        let alone = resolved_chain(hop("DIRECT", None).as_ref(), &Metadata::default());
+        assert_eq!(alone.len(), 1);
+        assert_eq!(&*alone[0], "DIRECT");
+    }
+
     use super::*;
     use meow_common::{ConnType, Network};
 
