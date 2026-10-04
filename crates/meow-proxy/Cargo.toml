@@ -45,7 +45,7 @@ ssh = ["dep:russh"]
 # MITM + rewrite scripts (`type: mitm`): TLS for chosen hosts terminated
 # with the user's own CA, Surge / Loon style http-request / http-response
 # scripts on QuickJS (meow-script). PaoPao's virtual location rides on it.
-mitm = ["dep:boring", "dep:tokio-boring", "dep:rcgen", "dep:flate2", "dep:httparse", "dep:regex", "dep:meow-script", "dep:time"]
+mitm = ["dep:boring", "dep:tokio-boring", "dep:rcgen", "dep:flate2", "dep:httparse", "dep:fancy-regex", "dep:meow-script", "dep:time"]
 # Hysteria2 outbound implemented in-tree on top of quiche (BoringSSL-native
 # QUIC + HTTP/3), so it links no rustls and no second crypto library.
 hysteria2 = ["dep:quiche", "dep:boring", "dep:blake2", "dep:webpki-root-certs", "dep:tokio-util"]
@@ -85,7 +85,7 @@ tokio-boring = { workspace = true, optional = true }
 rcgen = { version = "0.13", optional = true, features = ["x509-parser"] }
 flate2 = { version = "1", optional = true }
 httparse = { version = "1", optional = true }
-regex = { workspace = true, optional = true }
+fancy-regex = { version = "0.14", optional = true }
 meow-script = { path = "../meow-script", optional = true }
 time = { workspace = true, optional = true }
 # Mozilla CA roots for the hysteria2 quiche verify store (mirrors meow-transport).

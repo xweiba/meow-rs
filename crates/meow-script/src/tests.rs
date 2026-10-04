@@ -10,6 +10,7 @@ fn opts(binary: bool, store: Arc<Store>) -> Options {
         binary_body: binary,
         timeout: Duration::from_secs(2),
         store,
+        http: None,
     }
 }
 
@@ -200,4 +201,130 @@ fn response_scripts_may_answer_with_a_response_object() {
     assert_eq!(out.body.unwrap(), vec![7, 8]);
     assert!(out.headers.unwrap().contains(&("X-B".into(), "1".into())));
     assert!(out.response.is_none());
+}
+
+fn with_http(store: Arc<Store>, seen: Arc<parking_lot::Mutex<Vec<HttpRequest>>>) -> Options {
+    let mut o = opts(false, store);
+    o.http = Some(Arc::new(move |req: HttpRequest| {
+        seen.lock().push(req.clone());
+        if req.url.contains("fail") {
+            return Err("connection refused".into());
+        }
+        Ok(HttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: serde_json::json!({
+                "echo": format!("{} {}", req.method, req.url),
+                "body": String::from_utf8_lossy(&req.body),
+            })
+            .to_string()
+            .into_bytes(),
+        })
+    }));
+    o
+}
+
+#[test]
+fn http_client_callbacks_and_task_fetch_promises() {
+    let store = Arc::new(Store::new(None));
+    let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let out = run(
+        r#"
+        $httpClient.post({ url: 'https://api.example/a', headers: { 'X-K': 'v' }, body: 'hi', timeout: 3 }, (err, resp, data) => {
+            if (err) throw new Error(err);
+            const a = JSON.parse(data).echo;
+            $httpClient.get('https://fail.example/', (err2, r2, d2) => {
+                $task.fetch({ url: 'https://api.example/b', method: 'PUT', body: { x: 1 } }).then(r => {
+                    $done({ body: [a, err2, resp.status, r.statusCode, JSON.parse(r.body).body].join('|') });
+                });
+            });
+        });
+        "#,
+        &req(),
+        Some(&resp(b"")),
+        &with_http(store, Arc::clone(&seen)),
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8(out.body.unwrap()).unwrap(),
+        r#"POST https://api.example/a|connection refused|200|200|{"x":1}"#
+    );
+    let seen = seen.lock();
+    assert_eq!(seen.len(), 3);
+    assert!(seen[0].headers.contains(&("X-K".into(), "v".into())));
+    assert_eq!(seen[0].body, b"hi");
+    assert!(
+        seen[0].timeout <= Duration::from_secs(2) && seen[0].timeout > Duration::from_millis(1500),
+        "3 s asked, capped by the script's own 2 s deadline: {:?}",
+        seen[0].timeout
+    );
+    assert_eq!(seen[2].method, "PUT");
+}
+
+#[test]
+fn binary_mode_and_no_network() {
+    let store = Arc::new(Store::new(None));
+    let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let out = run(
+        r#"
+        $httpClient.get({ url: 'https://x/', 'binary-mode': true }, (e, r, d) => {
+            $done({ body: (d instanceof Uint8Array ? 'bytes ' : 'text ') + d.length });
+        });
+        "#,
+        &req(),
+        Some(&resp(b"")),
+        &with_http(Arc::clone(&store), seen),
+    )
+    .unwrap();
+    assert!(String::from_utf8(out.body.unwrap())
+        .unwrap()
+        .starts_with("bytes "));
+    let out = run(
+        r#"$httpClient.get('https://x/', (e) => $done({ body: String(e) }));"#,
+        &req(),
+        Some(&resp(b"")),
+        &opts(false, store),
+    )
+    .unwrap();
+    assert_eq!(out.body.unwrap(), b"scripts may not use the network here");
+}
+
+#[test]
+fn timers_wait_for_real_and_intervals_stop() {
+    let store = Arc::new(Store::new(None));
+    let start = std::time::Instant::now();
+    let out = run(
+        r#"
+        const order = [];
+        setTimeout(() => order.push('b'), 120);
+        setTimeout(() => order.push('a'), 30);
+        const gone = setTimeout(() => order.push('never'), 10);
+        clearTimeout(gone);
+        let n = 0;
+        const iv = setInterval(() => { if (++n === 3) clearInterval(iv); }, 20);
+        setTimeout(() => $done({ body: order.join('') + n }), 200);
+        "#,
+        &req(),
+        Some(&resp(b"")),
+        &opts(false, store),
+    )
+    .unwrap();
+    assert_eq!(out.body.unwrap(), b"ab3");
+    assert!(start.elapsed() >= Duration::from_millis(190));
+}
+
+#[test]
+fn utils_ungzip() {
+    use std::io::Write as _;
+    let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(b"plain words").unwrap();
+    let store = Arc::new(Store::new(None));
+    let out = run(
+        r#"$done({ body: $utils.ungzip($response.body) });"#,
+        &req(),
+        Some(&resp(&z.finish().unwrap())),
+        &opts(true, store),
+    )
+    .unwrap();
+    assert_eq!(out.body.unwrap(), b"plain words");
 }

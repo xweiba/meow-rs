@@ -763,7 +763,7 @@ fn parse_mitm(
             let rule_name = str_of("name").unwrap_or_else(|| format!("script{i}"));
             let pattern =
                 str_of("pattern").ok_or(format!("mitm[{name}] {rule_name}: missing pattern"))?;
-            let pattern = regex::Regex::new(&pattern)
+            let pattern = meow_proxy::mitm::Pattern::new(&pattern)
                 .map_err(|e| format!("mitm[{name}] {rule_name}: pattern: {e}"))?;
             let kind = str_of("type").unwrap_or_else(|| "http-response".into());
             let response = match kind.as_str() {

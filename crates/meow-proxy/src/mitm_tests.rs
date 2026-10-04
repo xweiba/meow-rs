@@ -91,6 +91,13 @@ h['X-Arg'] = $argument;
 $done({ body: $response.body + ' +script', headers: h });
 "#;
 
+/// Asks the server itself (through the proxy) and answers with that.
+const SCRIPT_FETCH: &str = r#"
+$httpClient.post({ url: 'https://example.test/from-script', body: 'q' }, (err, resp, data) => {
+  $done({ response: { status: 200, body: err ? 'error ' + err : resp.status + ' ' + data } });
+});
+"#;
+
 const SCRIPT_REQUEST: &str = r#"
 if ($request.url.endsWith('/answer')) {
   $done({ response: { status: 200, headers: { 'X-Local': '1' }, body: 'from script' } });
@@ -102,7 +109,7 @@ if ($request.url.endsWith('/answer')) {
 fn rule(name: &str, pattern: &str, response: bool, path: &str) -> ScriptRule {
     ScriptRule {
         name: name.into(),
-        pattern: regex::Regex::new(pattern).unwrap(),
+        pattern: Pattern::new(pattern).unwrap(),
         response,
         path: path.into(),
         argument: "lat=1".into(),
@@ -115,6 +122,7 @@ fn rule(name: &str, pattern: &str, response: bool, path: &str) -> ScriptRule {
 async fn adapter(dir: &Path, up: SocketAddr) -> (MitmAdapter, String) {
     std::fs::write(dir.join("resp.js"), SCRIPT_RESPONSE).unwrap();
     std::fs::write(dir.join("req.js"), SCRIPT_REQUEST).unwrap();
+    std::fs::write(dir.join("fetch.js"), SCRIPT_FETCH).unwrap();
     let (cert, key) = load_or_create_ca(&dir.join("ca.pem"), &dir.join("ca-key.pem")).unwrap();
     let a = MitmAdapter::new(
         "mitm",
@@ -132,6 +140,12 @@ async fn adapter(dir: &Path, up: SocketAddr) -> (MitmAdapter, String) {
                 r"^https://example\.test/(old|answer)",
                 false,
                 "req.js",
+            ),
+            rule(
+                "fetch",
+                r"^https://example\.test/ask(?!-not)",
+                false,
+                "fetch.js",
             ),
         ],
         dir.to_path_buf(),
@@ -212,6 +226,13 @@ async fn scripts_rewrite_through_the_users_ca() {
     assert_eq!(String::from_utf8_lossy(&r.body), "from script");
     assert_eq!(meow_script::header(&r.headers, "x-local"), Some("1"));
 
+    // A script asking the network itself ($httpClient), through the proxy.
+    let r = get(&mut s, &mut buf, "GET", "/ask", "").await;
+    assert_eq!(String::from_utf8_lossy(&r.body), "200 POST /from-script q");
+    // JavaScript-style look-ahead in the pattern.
+    let r = get(&mut s, &mut buf, "GET", "/ask-not", "").await;
+    assert_eq!(String::from_utf8_lossy(&r.body), "GET /ask-not ");
+
     // No rule: passed through untouched.
     let r = get(&mut s, &mut buf, "GET", "/plain", "").await;
     assert_eq!(String::from_utf8_lossy(&r.body), "GET /plain ");
@@ -267,4 +288,26 @@ async fn bodies_by_length_chunks_and_eof() {
         .unwrap();
     assert_eq!(r.body, b"all of it");
     assert!(r.close);
+}
+
+#[test]
+fn urls_split_and_join() {
+    assert_eq!(
+        split_url("https://a.b:8443/x?y=1"),
+        Some((true, "a.b".into(), 8443, "/x?y=1".into()))
+    );
+    assert_eq!(
+        split_url("http://a.b?q"),
+        Some((false, "a.b".into(), 80, "/?q".into()))
+    );
+    assert_eq!(
+        split_url("https://[::1]/"),
+        Some((true, "::1".into(), 443, "/".into()))
+    );
+    assert_eq!(split_url("ftp://a"), None);
+    assert_eq!(join_url("https://a.b/x/y", "/z"), "https://a.b/z");
+    assert_eq!(join_url("https://a.b/x/y", "z"), "https://a.b/x/z");
+    assert_eq!(join_url("https://a.b/x", "//c.d/e"), "https://c.d/e");
+    assert_eq!(join_url("https://a.b", "z"), "https://a.b/z");
+    assert_eq!(join_url("https://a.b/x", "http://c/"), "http://c/");
 }

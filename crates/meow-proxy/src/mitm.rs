@@ -21,7 +21,7 @@ use boring::x509::X509;
 use meow_common::{
     AdapterType, MeowError, Metadata, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn, Result,
 };
-use meow_script::{Message, Options as ScriptOptions, Store};
+use meow_script::{HttpFn, HttpRequest, HttpResponse, Message, Options as ScriptOptions, Store};
 use parking_lot::Mutex;
 use smol_str::SmolStr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -29,12 +29,30 @@ use tracing::{debug, info, warn};
 
 use crate::stream_conn::StreamConn;
 
+/// A URL pattern as the clients read it: JavaScript-style regular
+/// expressions (look-arounds and back-references allowed).
+#[derive(Clone, Debug)]
+pub struct Pattern(fancy_regex::Regex);
+
+impl Pattern {
+    pub fn new(s: &str) -> std::result::Result<Self, String> {
+        fancy_regex::Regex::new(s)
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// A pattern too costly to decide counts as no match.
+    pub fn is_match(&self, s: &str) -> bool {
+        self.0.is_match(s).unwrap_or(false)
+    }
+}
+
 /// One script rule (`scripts:` entry).
 #[derive(Clone, Debug)]
 pub struct ScriptRule {
     pub name: String,
     /// Matched against `https://host[:port]/path?query`.
-    pub pattern: regex::Regex,
+    pub pattern: Pattern,
     /// http-response (else http-request).
     pub response: bool,
     /// Path of the script, relative to the meow home directory.
@@ -190,7 +208,7 @@ impl Shared {
 
     /// Runs `rule` off the async workers (QuickJS blocks).
     async fn run_script(
-        &self,
+        self: &Arc<Self>,
         rule: &ScriptRule,
         request: &Message,
         response: Option<&Message>,
@@ -202,6 +220,7 @@ impl Shared {
             binary_body: rule.binary_body,
             timeout: rule.timeout,
             store: Arc::clone(&self.store),
+            http: Some(self.http_fn()),
         };
         let (mut req, mut resp) = (request.clone(), response.cloned());
         if !rule.requires_body {
@@ -341,6 +360,90 @@ impl Shared {
         }
     }
 
+    /// Scripts' `$httpClient` / `$task.fetch`: sent the way the MITM
+    /// proxy sends everything (back into the core, routed by the rules),
+    /// from the script's own thread.
+    fn http_fn(self: &Arc<Self>) -> HttpFn {
+        let shared = Arc::clone(self);
+        let handle = tokio::runtime::Handle::current();
+        Arc::new(move |req: HttpRequest| handle.block_on(shared.fetch(req)))
+    }
+
+    async fn fetch(&self, req: HttpRequest) -> std::result::Result<HttpResponse, String> {
+        let deadline = tokio::time::Instant::now() + req.timeout;
+        let (mut url, mut method, mut body) =
+            (req.url.clone(), req.method.clone(), req.body.clone());
+        for hop in 0..6 {
+            let (https, host, port, target) = split_url(&url).ok_or(format!("bad url: {url}"))?;
+            let mut headers: Vec<(String, String)> = req
+                .headers
+                .iter()
+                .filter(|(k, _)| !k.eq_ignore_ascii_case("host") && forwarded(k))
+                .cloned()
+                .collect();
+            let default_port = if https { 443 } else { 80 };
+            headers.insert(
+                0,
+                (
+                    "Host".into(),
+                    if port == default_port {
+                        host.clone()
+                    } else {
+                        format!("{host}:{port}")
+                    },
+                ),
+            );
+            if find(&headers, "user-agent").is_none() {
+                headers.push(("User-Agent".into(), "PaoPao".into()));
+            }
+            headers.push(("Connection".into(), "close".into()));
+            let request = Request {
+                method: method.clone(),
+                target,
+                headers,
+                body: body.clone(),
+                close: true,
+            };
+            let once = async {
+                let mut s: Box<dyn meow_transport::Stream> = if https {
+                    self.connect(&host, port).await?
+                } else {
+                    self.dialer.dial(&host, port, false).await?
+                };
+                write_request(&mut s, &request).await?;
+                read_response(&mut s, &mut Vec::new(), &request.method).await
+            };
+            let r = tokio::time::timeout_at(deadline, once)
+                .await
+                .map_err(|_| "timed out".to_string())?
+                .map_err(|e| e.to_string())?;
+            let location = find(&r.headers, "location").map(str::to_string);
+            if req.follow_redirects && hop < 5 && matches!(r.status, 301 | 302 | 303 | 307 | 308) {
+                if let Some(loc) = location {
+                    url = join_url(&url, &loc);
+                    if r.status == 303 || (matches!(r.status, 301 | 302) && method == "POST") {
+                        method = "GET".into();
+                        body.clear();
+                    }
+                    continue;
+                }
+            }
+            let mut m = Message {
+                status: r.status,
+                headers: r.headers,
+                body: Some(r.body),
+                ..Message::default()
+            };
+            decode_body(&mut m);
+            return Ok(HttpResponse {
+                status: m.status,
+                headers: m.headers,
+                body: m.body.unwrap_or_default(),
+            });
+        }
+        Err("too many redirects".into())
+    }
+
     async fn connect(&self, host: &str, port: u16) -> io::Result<Box<dyn meow_transport::Stream>> {
         use meow_transport::Transport as _;
         let tcp = self.dialer.dial(host, port, false).await?;
@@ -355,6 +458,62 @@ impl Shared {
 }
 
 // ---------------------------------------------------------------- HTTP/1.1
+
+/// `http(s)://host[:port]/path?query` → (https, host, port, target).
+fn split_url(url: &str) -> Option<(bool, String, u16, String)> {
+    let (https, rest) = match url.strip_prefix("https://") {
+        Some(r) => (true, r),
+        None => (false, url.strip_prefix("http://")?),
+    };
+    let (authority, target) = match rest.find(['/', '?']) {
+        Some(i) if rest.as_bytes()[i] == b'/' => (&rest[..i], rest[i..].to_string()),
+        Some(i) => (&rest[..i], format!("/{}", &rest[i..])),
+        None => (rest, "/".to_string()),
+    };
+    let authority = authority.rsplit('@').next()?;
+    let default_port = if https { 443 } else { 80 };
+    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
+        let (h, p) = v6.split_once(']')?;
+        (
+            h.to_string(),
+            p.strip_prefix(':')
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(default_port),
+        )
+    } else if let Some((h, p)) = authority.rsplit_once(':') {
+        (h.to_string(), p.parse().ok()?)
+    } else {
+        (authority.to_string(), default_port)
+    };
+    (!host.is_empty()).then_some((https, host, port, target))
+}
+
+/// A `Location` against the URL it came from.
+fn join_url(base: &str, location: &str) -> String {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return location.to_string();
+    }
+    let scheme_end = base.find("://").map_or(0, |i| i + 3);
+    let origin_end = base[scheme_end..]
+        .find('/')
+        .map_or(base.len(), |i| scheme_end + i);
+    if let Some(rest) = location.strip_prefix("//") {
+        return format!("{}{rest}", &base[..scheme_end]);
+    }
+    if location.starts_with('/') {
+        return format!("{}{location}", &base[..origin_end]);
+    }
+    let dir_end = base
+        .rfind('/')
+        .filter(|&i| i >= origin_end)
+        .map_or(base.len(), |i| i + 1);
+    let dir = if dir_end == base.len() && dir_end == origin_end {
+        format!("{}/", &base[..origin_end])
+    } else {
+        base[..dir_end].to_string()
+    };
+    format!("{dir}{location}")
+}
 
 struct Request {
     method: String,

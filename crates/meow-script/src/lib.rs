@@ -9,7 +9,13 @@
 //!   setValueForKey` (Quantumult X) over one JSON store file;
 //! - `$notification.post` / `$notify`, `console.log`, `$argument`,
 //!   `$environment`, `$script`;
-//! - with `binary-body-mode` bodies are `Uint8Array`s, otherwise strings.
+//! - with `binary-body-mode` bodies are `Uint8Array`s, otherwise strings;
+//! - `$httpClient.get/post/put/delete/head/patch/options` (Surge / Loon /
+//!   Stash, callbacks) and `$task.fetch` (Quantumult X, a promise), sent by
+//!   the embedder's [`Options::http`] (meow sends them through itself, so
+//!   the rules route them);
+//! - `setTimeout` / `setInterval` with real delays (within the deadline);
+//! - `$utils.ungzip`.
 //!
 //! Every run gets a fresh QuickJS runtime with a memory cap and a deadline:
 //! a broken or hostile script cannot hold a connection or the process.
@@ -105,7 +111,34 @@ pub struct Options {
     pub binary_body: bool,
     pub timeout: Duration,
     pub store: Arc<Store>,
+    /// Sends the script's HTTP requests; without it they fail.
+    pub http: Option<HttpFn>,
 }
+
+/// A request a script sends (`$httpClient`, `$task.fetch`).
+#[derive(Clone, Debug, Default)]
+pub struct HttpRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    /// What the script allows; never past the script's own deadline.
+    pub timeout: Duration,
+    /// Follow redirects (the clients do unless told not to).
+    pub follow_redirects: bool,
+}
+
+/// The answer, body decoded (gzip / deflate undone), as clients hand it
+/// to scripts.
+#[derive(Clone, Debug, Default)]
+pub struct HttpResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// Blocking: scripts run on a thread of their own.
+pub type HttpFn = Arc<dyn Fn(HttpRequest) -> Result<HttpResponse, String> + Send + Sync>;
 
 #[derive(Debug)]
 pub enum Error {
@@ -147,8 +180,75 @@ var console = {
   warn: function () { __paopao_log('warn', Array.prototype.join.call(arguments, ' ')); },
   error: function () { __paopao_log('error', Array.prototype.join.call(arguments, ' ')); },
 };
-var setTimeout = function (f) { var a = Array.prototype.slice.call(arguments, 2); Promise.resolve().then(function () { f.apply(null, a); }); return 0; };
-var clearTimeout = function () {};
+// Timers: the run loop calls __paopao_tick when nothing else is pending.
+var __paopao_timers = [];
+var __paopao_timer_id = 0;
+var __paopao_add_timer = function (f, ms, args, every) {
+  var id = ++__paopao_timer_id;
+  ms = Math.max(0, +ms || 0);
+  __paopao_timers.push({ id: id, due: Date.now() + ms, f: f, a: args, every: every ? Math.max(1, ms) : 0 });
+  return id;
+};
+var setTimeout = function (f, ms) { return __paopao_add_timer(f, ms, Array.prototype.slice.call(arguments, 2), false); };
+var setInterval = function (f, ms) { return __paopao_add_timer(f, ms, Array.prototype.slice.call(arguments, 2), true); };
+var clearTimeout = function (id) { __paopao_timers = __paopao_timers.filter(function (t) { return t.id !== id; }); };
+var clearInterval = clearTimeout;
+var __paopao_tick = function () {
+  var now = Date.now();
+  var due = __paopao_timers.filter(function (t) { return t.due <= now; });
+  __paopao_timers = __paopao_timers.filter(function (t) { return t.due > now; });
+  due.forEach(function (t) {
+    if (t.every) { t.due = now + t.every; __paopao_timers.push(t); }
+    if (typeof t.f === 'function') t.f.apply(null, t.a);
+  });
+  if (!__paopao_timers.length) return -1;
+  return Math.max(0, Math.min.apply(null, __paopao_timers.map(function (t) { return t.due; })) - Date.now());
+};
+// HTTP: queued here, sent by the run loop, answered through the callback.
+var __paopao_http = [];
+var __paopao_http_cbs = {};
+var __paopao_http_id = 0;
+var __paopao_http_send = function (method, o, cb) {
+  if (typeof o === 'string') o = { url: o };
+  o = o || {};
+  var id = ++__paopao_http_id;
+  __paopao_http_cbs[id] = { cb: cb, binary: !!(o['binary-mode'] || o.binaryMode) };
+  var body = o.body !== undefined && o.body !== null ? o.body : (o.bodyBytes !== undefined ? o.bodyBytes : '');
+  if (body instanceof ArrayBuffer) body = new Uint8Array(body);
+  if (typeof body === 'object' && !(body instanceof Uint8Array)) body = JSON.stringify(body);
+  __paopao_http.push({
+    id: id,
+    method: String(o.method || method || 'GET').toUpperCase(),
+    url: String(o.url || ''),
+    headers: o.headers || {},
+    body: body,
+    timeout: +o.timeout || 0,
+    redirect: !(o['auto-redirect'] === false || (o.opts && o.opts.redirection === false)),
+  });
+  return id;
+};
+var __paopao_http_finish = function (id, err, status, headers, text, bytes) {
+  var h = __paopao_http_cbs[id];
+  delete __paopao_http_cbs[id];
+  if (!h || typeof h.cb !== 'function') return;
+  if (err) { h.cb(err, null, null); return; }
+  var resp = { status: status, statusCode: status, headers: headers, body: h.binary ? bytes : text, bodyBytes: bytes.buffer };
+  h.cb(null, resp, h.binary ? bytes : text);
+};
+var $httpClient = {};
+['get', 'post', 'put', 'delete', 'head', 'patch', 'options'].forEach(function (m) {
+  $httpClient[m] = function (o, cb) { __paopao_http_send(m, o, cb); };
+});
+var $task = {
+  fetch: function (o) {
+    return new Promise(function (resolve, reject) {
+      __paopao_http_send((o && o.method) || 'GET', o, function (err, resp) {
+        if (err) reject({ error: String(err) }); else resolve(resp);
+      });
+    });
+  },
+};
+var $utils = { ungzip: function (b) { return new Uint8Array(__paopao_ungzip(b)); } };
 // Surge: seconds since the epoch.
 $script.startTime = Date.now() / 1000;
 "#;
@@ -230,6 +330,80 @@ fn read_body(v: &Value<'_>) -> Option<Vec<u8>> {
     None
 }
 
+/// Takes the requests scripts queued.
+fn take_http(ctx: &Ctx<'_>) -> Vec<(u32, HttpRequest)> {
+    let g = ctx.globals();
+    let Ok(queue) = g.get::<_, rquickjs::Array<'_>>("__paopao_http") else {
+        return Vec::new();
+    };
+    if queue.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for item in queue.iter::<Object<'_>>().flatten() {
+        let id = item.get::<_, u32>("id").unwrap_or(0);
+        let text = |k: &str| item.get::<_, String>(k).unwrap_or_default();
+        let body = item
+            .get::<_, Value<'_>>("body")
+            .ok()
+            .and_then(|v| read_body(&v))
+            .unwrap_or_default();
+        let headers = item
+            .get::<_, Value<'_>>("headers")
+            .ok()
+            .and_then(|v| read_headers(&v))
+            .unwrap_or_default();
+        let secs = item.get::<_, f64>("timeout").unwrap_or(0.0);
+        out.push((
+            id,
+            HttpRequest {
+                method: text("method"),
+                url: text("url"),
+                headers,
+                body,
+                timeout: if secs > 0.0 {
+                    Duration::from_secs_f64(secs)
+                } else {
+                    Duration::ZERO
+                },
+                follow_redirects: item.get::<_, bool>("redirect").unwrap_or(true),
+            },
+        ));
+    }
+    let _ = g.set("__paopao_http", rquickjs::Array::new(ctx.clone()));
+    out
+}
+
+fn finish_http(
+    ctx: &Ctx<'_>,
+    id: u32,
+    answer: Result<HttpResponse, String>,
+) -> rquickjs::Result<()> {
+    let finish: Function<'_> = ctx.globals().get("__paopao_http_finish")?;
+    match answer {
+        Ok(r) => {
+            let text = String::from_utf8_lossy(&r.body).into_owned();
+            let bytes = TypedArray::<u8>::new(ctx.clone(), r.body)?;
+            finish.call::<_, ()>((
+                id,
+                Value::new_null(ctx.clone()),
+                r.status,
+                headers_obj(ctx, &r.headers)?,
+                text,
+                bytes,
+            ))
+        }
+        Err(e) => finish.call::<_, ()>((
+            id,
+            e,
+            0,
+            Value::new_null(ctx.clone()),
+            "",
+            Value::new_null(ctx.clone()),
+        )),
+    }
+}
+
 fn read_headers(v: &Value<'_>) -> Option<Vec<(String, String)>> {
     let o = v.as_object()?;
     let mut out = Vec::new();
@@ -306,6 +480,16 @@ pub fn run(
                     }
                 })?,
             )?;
+            g.set(
+                "__paopao_ungzip",
+                Function::new(ctx.clone(), |v: Value<'_>| {
+                    use std::io::Read as _;
+                    let input = read_body(&v).unwrap_or_default();
+                    let mut out = Vec::new();
+                    let _ = flate2::read::MultiGzDecoder::new(&input[..]).read_to_end(&mut out);
+                    out
+                })?,
+            )?;
             g.set("$argument", opts.argument.as_str())?;
             let script = Object::new(ctx.clone())?;
             script.set("name", opts.name.as_str())?;
@@ -344,7 +528,8 @@ pub fn run(
         }
     })?;
 
-    // Promises / setTimeout: run queued jobs until $done is called.
+    // The event loop: promise jobs, then the script's HTTP requests, then
+    // timers, until $done is called (or nothing is left to wait for).
     loop {
         let called = ctx.with(|ctx| {
             ctx.globals()
@@ -358,11 +543,55 @@ pub fn run(
             return Err(Error::Timeout);
         }
         match rt.execute_pending_job() {
-            Ok(true) => {}
-            // Nothing left to run and no $done: the script left things as
-            // they were.
-            Ok(false) => return Ok(Outcome::default()),
+            Ok(true) => continue,
+            Ok(false) => {}
             Err(e) => return Err(Error::Js(e.to_string())),
+        }
+        let sends = ctx.with(|ctx| take_http(&ctx));
+        if !sends.is_empty() {
+            for (id, mut req) in sends {
+                let left = deadline.saturating_duration_since(Instant::now());
+                req.timeout = if req.timeout.is_zero() {
+                    left
+                } else {
+                    req.timeout.min(left)
+                };
+                let answer = match &opts.http {
+                    Some(f) => f(req),
+                    None => Err("scripts may not use the network here".into()),
+                };
+                ctx.with(|ctx| finish_http(&ctx, id, answer).map_err(|e| js_err(&ctx, &e)))?;
+            }
+            continue;
+        }
+        let next = ctx.with(|ctx| -> Result<f64, Error> {
+            let tick: Function<'_> = ctx
+                .globals()
+                .get("__paopao_tick")
+                .map_err(|e| js_err(&ctx, &e))?;
+            tick.call::<_, f64>(()).map_err(|e| js_err(&ctx, &e))
+        })?;
+        if next < 0.0 {
+            // A timer that just ran may have called $done, queued jobs or
+            // requests: look again before calling it a day.
+            let more = ctx.with(|ctx| {
+                let g = ctx.globals();
+                g.get::<_, Value>("__paopao_done")
+                    .is_ok_and(|v| !v.is_undefined())
+                    || g.get::<_, rquickjs::Array<'_>>("__paopao_http")
+                        .is_ok_and(|q| !q.is_empty())
+            }) || rt.is_job_pending();
+            if more {
+                continue;
+            }
+            // Nothing left to wait for and no $done: the script left
+            // things as they were.
+            return Ok(Outcome::default());
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        let wait = Duration::from_millis(next as u64);
+        if !wait.is_zero() {
+            std::thread::sleep(wait.min(left));
         }
     }
 

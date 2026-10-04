@@ -12,6 +12,7 @@ rquickjs = { version = "0.14", features = ["array-buffer"] }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
 tracing = { workspace = true }
+flate2 = "1"
 
 # rquickjs ships pre-generated bindings for desktop targets only; Android
 # (and other targets) generate them at build time.
