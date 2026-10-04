@@ -8,6 +8,17 @@
 #[cfg(any(target_os = "linux", test))]
 pub mod arp;
 pub mod geodata_fetch;
+
+// The binary's startup path, reused when embedded in an app (`embed`):
+// main.rs names this crate `meow_app`, so the lib answers to it too.
+#[cfg(feature = "embed")]
+extern crate self as meow_app;
+#[cfg(feature = "embed")]
+#[path = "main.rs"]
+#[allow(dead_code, unused_imports, reason = "the binary's CLI paths stay unused here")]
+mod app_main;
+#[cfg(feature = "embed")]
+pub mod embed;
 pub mod subscription_refresh;
 
 /// launchd label for the macOS user agent plist.

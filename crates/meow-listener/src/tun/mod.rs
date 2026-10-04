@@ -60,6 +60,11 @@ mod dns;
 #[cfg(target_os = "windows")]
 mod local_dns;
 mod outbound_binding;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod route;
+// Phones: the platform VPN owns the device's routes.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[path = "route_platform.rs"]
 mod route;
 mod udp;
 #[cfg(any(test, target_os = "windows"))]
@@ -213,6 +218,11 @@ pub struct TunListenerConfig {
     /// Cap on concurrent TUN TCP handler tasks. Inherited from the
     /// top-level `max-connections` key (default 256; `0` = unlimited).
     pub max_connections: usize,
+    /// mihomo `file-descriptor`: an already-open TUN fd handed over by the
+    /// platform VPN (Android `VpnService`, iOS packet tunnel). The device,
+    /// its addresses and its routes belong to the platform: nothing is
+    /// created or routed here.
+    pub file_descriptor: Option<i32>,
 }
 
 /// Which routes `auto_route` installs (#375).
@@ -425,7 +435,35 @@ impl TunListener {
         let mut used_addr = base_addr;
         let mut last_err: Option<String>;
 
-        for attempt in 0..MAX_TUN_RETRIES {
+        #[cfg(unix)]
+        if let Some(fd) = cfg.file_descriptor {
+            // SAFETY: the platform VPN hands this fd over for our exclusive
+            // use for as long as the listener runs.
+            let d = unsafe { tun_rs::AsyncDevice::from_fd(fd) }?;
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            {
+                dev_name = d.name().unwrap_or_else(|_| "vpn".to_string());
+            }
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            {
+                dev_name = "vpn".to_string();
+            }
+            info!("TUN listener '{}' using the platform's device (fd {fd})", self.name);
+            device = Some(d);
+        }
+        // Phones create no device of their own: the VPN hands one over.
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if device.is_none() {
+            return Err(Box::new(io::Error::other(
+                "tun on this platform needs the VPN's file-descriptor",
+            )));
+        }
+
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let () = for attempt in 0..MAX_TUN_RETRIES {
+            if device.is_some() {
+                break;
+            }
             let name = device_name_for_attempt(cfg.device.as_deref(), attempt);
 
             // Rotate IP after the first retry fails (attempt >= 2).
@@ -509,7 +547,7 @@ impl TunListener {
             // cleanup they exist to wait for. Bounded by TUN_STARTUP_TIMEOUT
             // (issue #641).
             tokio::time::sleep(TUN_CREATE_RETRY_DELAY).await;
-        }
+        };
         // SAFETY: the loop either breaks with `device = Some(...)` and
         // `dev_name` set, or returns `Err` above.
         let device = device.unwrap();
@@ -518,7 +556,16 @@ impl TunListener {
         info!("TUN device '{dev_name}' created in {tun_create_ms:.0}ms");
 
         // Obtain the interface index before moving `device` into `TunDevice`.
-        let if_index = device.if_index()?;
+        // A platform-owned device may not expose one (and needs none: no
+        // routes are installed for it).
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let if_index = if cfg.file_descriptor.is_some() {
+            device.if_index().unwrap_or(0)
+        } else {
+            device.if_index()?
+        };
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let if_index = 0u32;
 
         // Global route scope (#375): before any routes go in, the
         // outbound-interface binding must be installed so meow's own dials

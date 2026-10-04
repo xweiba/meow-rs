@@ -49,7 +49,6 @@ smol_str = { workspace = true }
 tun-rs = { workspace = true, optional = true }
 lwip = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
-route_manager = { workspace = true, optional = true }
 meow-dns = { workspace = true, optional = true }
 ipnet = { workspace = true, optional = true }
 # listener-shadowsocks
@@ -75,3 +74,8 @@ required-features = ["listener-shadowsocks"]
 
 [lints]
 workspace = true
+
+# Phones: the platform VPN owns the routes (`tun.file-descriptor`), and
+# route_manager does not build there.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+route_manager = { workspace = true, optional = true }

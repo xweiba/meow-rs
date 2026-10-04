@@ -1,0 +1,23 @@
+[package]
+name = "meow-mobile"
+description = "meow-rs as a library for phone apps: Android JNI (VpnService) entry points"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+meow-app = { path = "../meow-app", features = ["embed"] }
+meow-common = { workspace = true }
+anyhow = { workspace = true }
+parking_lot = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+[lints]
+workspace = true

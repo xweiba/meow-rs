@@ -27,6 +27,9 @@ boring-tls = []
 external-ui-download = ["meow-config/external-ui-download"]
 # Heap profiling via dhat crate — swaps global allocator; never enable in production.
 dhat-heap = ["dhat"]
+# Library entry for apps embedding the core (Android / iOS VPN): `embed::run`
+# with the platform's TUN fd, `embed::stop`.
+embed = []
 
 # Protocol features — forwarded to meow-proxy and meow-config
 ss = ["meow-config/ss", "meow-proxy/ss"]

@@ -308,6 +308,10 @@ pub struct RawTun {
     /// `auto-route: global` into IPv6 capture (#375); ignored with a
     /// warning in every other mode. Default: none (IPv4 only).
     pub inet6_address: Option<serde_yaml::Value>,
+    /// mihomo `file-descriptor`: use this already-open TUN fd from the
+    /// platform VPN (Android `VpnService`, iOS packet tunnel) instead of
+    /// creating a device; the platform owns its addresses and routes.
+    pub file_descriptor: Option<i32>,
     // Upstream-only fields accepted for forward-compat; warn and ignore.
     pub stack: Option<serde_yaml::Value>,
     pub strict_route: Option<serde_yaml::Value>,

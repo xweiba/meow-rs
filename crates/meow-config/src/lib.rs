@@ -287,6 +287,9 @@ pub struct TunConfig {
     /// loop has no listen-queue back-pressure of its own — this is what
     /// stops a reconnect storm from spawning unbounded `handle_tcp` tasks.
     pub max_connections: usize,
+    /// `file-descriptor`: the platform VPN's TUN fd (no device / routes
+    /// of our own).
+    pub file_descriptor: Option<i32>,
 }
 
 /// Scope of the routes `tun.auto-route` installs (#375).
@@ -318,6 +321,7 @@ impl Default for TunConfig {
             dns_hijack: false,
             udp_timeout: std::time::Duration::from_secs(60),
             max_connections: 256,
+            file_descriptor: None,
         }
     }
 }
@@ -441,7 +445,14 @@ pub fn parse_tun_config(
     }
     let inet6_address = inet6_address.filter(|_| global);
 
+    // A platform-owned device comes with its routes: never install ours.
+    let file_descriptor = r.file_descriptor.filter(|fd| *fd >= 0);
+    if file_descriptor.is_some() && auto_route {
+        warn!("tun.file-descriptor: the platform owns the routes; auto-route ignored");
+    }
+    let auto_route = auto_route && file_descriptor.is_none();
     Ok(TunConfig {
+        file_descriptor,
         enable: r.enable,
         device: r.device.clone().filter(|s| !s.is_empty()),
         mtu,

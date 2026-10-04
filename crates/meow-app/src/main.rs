@@ -38,7 +38,7 @@ const SERVICE_NAME: &str = "meow";
 
 #[derive(Parser)]
 #[command(name = "meow", version = env!("MEOW_VERSION"), about = "A rule-based tunnel in Rust")]
-struct Args {
+pub(crate) struct Args {
     /// Path to configuration file
     #[arg(short = 'f', long = "config", default_value = "config.yaml")]
     config: String,
@@ -133,16 +133,19 @@ enum Command {
     RunService,
 }
 
-enum LogTarget {
+pub(crate) enum LogTarget {
     Console,
     #[cfg(target_os = "windows")]
     WindowsService(std::path::PathBuf),
 }
 
-enum ShutdownSignal {
+pub(crate) enum ShutdownSignal {
     Console,
     #[cfg(target_os = "windows")]
     WindowsService(tokio::sync::oneshot::Receiver<()>),
+    /// Embedded in an app (Android / iOS VPN): the host says when to stop.
+    #[allow(dead_code, reason = "constructed by the embed module only")]
+    Embedded(tokio::sync::oneshot::Receiver<()>),
 }
 
 impl ShutdownSignal {
@@ -168,6 +171,11 @@ impl ShutdownSignal {
             Self::WindowsService(receiver) => receiver
                 .await
                 .map_err(|_| anyhow::anyhow!("Windows service shutdown channel closed")),
+            // A dropped sender also means stop.
+            Self::Embedded(receiver) => {
+                let _ = receiver.await;
+                Ok(())
+            }
         }
     }
 }
@@ -178,7 +186,7 @@ struct Logging {
     _file_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
 }
 
-type ReadyCallback = Box<dyn FnOnce() -> Result<()> + Send>;
+pub(crate) type ReadyCallback = Box<dyn FnOnce() -> Result<()> + Send>;
 
 fn main() -> Result<()> {
     // dhat profiler guard — must be the first local, lives for the duration of main().
@@ -330,7 +338,7 @@ fn init_logging(target: &LogTarget) -> Result<Logging> {
     }
 }
 
-fn run_application(
+pub(crate) fn run_application(
     args: Args,
     log_target: &LogTarget,
     shutdown: ShutdownSignal,
@@ -1008,6 +1016,23 @@ fn service_status() -> Result<()> {
 }
 
 // --- Windows Service Control Manager ---
+
+// Elsewhere (phones, other unixes) there is no system service to manage:
+// the app embedding the core starts and stops it.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn install_service(_config: Option<&str>, _args: &Args) -> Result<()> {
+    anyhow::bail!("system services are not supported on this platform")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn uninstall_service() -> Result<()> {
+    anyhow::bail!("system services are not supported on this platform")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn service_status() -> Result<()> {
+    anyhow::bail!("system services are not supported on this platform")
+}
 
 #[cfg(target_os = "windows")]
 fn install_service(config: Option<&str>, args: &Args) -> Result<()> {
@@ -1874,7 +1899,7 @@ mod tests {
     /// `tun.enable`.
     #[cfg(feature = "listener-tun")]
     mod tun_startup {
-        use crate::{publish_tun_if_committed, rollback_tun_enable};
+        use super::super::{publish_tun_if_committed, rollback_tun_enable};
         use meow_common::DnsMode;
         use meow_config::raw::RawConfig;
         use meow_dns::Resolver;
@@ -2125,7 +2150,7 @@ mod tests {
         any(target_os = "linux", target_os = "macos")
     ))]
     mod early_outbound_binding {
-        use crate::preinstall_global_route_binding;
+        use super::super::preinstall_global_route_binding;
         use meow_config::raw::RawConfig;
 
         /// Loopback exists on every host.
