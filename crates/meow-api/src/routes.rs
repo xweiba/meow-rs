@@ -3438,6 +3438,8 @@ fn subscribe_memory_feed() -> broadcast::Receiver<Arc<str>> {
     *guard = Some(tx.clone());
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
+        // CPU use is measured between two looks: one System kept across ticks.
+        let sys = Arc::new(std::sync::Mutex::new(sysinfo::System::new()));
         loop {
             interval.tick().await;
             if tx.receiver_count() == 0 {
@@ -3450,9 +3452,13 @@ fn subscribe_memory_feed() -> broadcast::Receiver<Arc<str>> {
                     break;
                 }
             }
-            let inuse = read_rss_bytes().await;
+            let (inuse, cpu) = sample_process(Arc::clone(&sys)).await;
             let oslimit = read_os_memory_limit().await;
-            let msg: Arc<str> = Arc::from(format!("{{\"inuse\":{inuse},\"oslimit\":{oslimit}}}"));
+            // PaoPao: `cpu` is this process's CPU use in percent of one core
+            // (as Activity Monitor shows it).
+            let msg: Arc<str> = Arc::from(format!(
+                "{{\"inuse\":{inuse},\"oslimit\":{oslimit},\"cpu\":{cpu:.1}}}"
+            ));
             let _ = tx.send(msg);
         }
     });
@@ -3516,6 +3522,24 @@ async fn get_memory(
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from_stream(stream))
         .expect("valid memory stream response")
+}
+
+/// This process's resident memory and CPU use since the last look.
+async fn sample_process(sys: Arc<std::sync::Mutex<sysinfo::System>>) -> (u64, f32) {
+    tokio::task::spawn_blocking(move || {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate};
+        let pid = Pid::from_u32(std::process::id());
+        let mut sys = sys.lock().expect("sysinfo lock poisoned");
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            false,
+            ProcessRefreshKind::new().with_cpu().with_memory(),
+        );
+        sys.process(pid)
+            .map_or((0, 0.0), |p| (p.memory(), p.cpu_usage()))
+    })
+    .await
+    .unwrap_or((0, 0.0))
 }
 
 async fn read_rss_bytes() -> u64 {
