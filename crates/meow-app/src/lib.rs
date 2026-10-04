@@ -8,6 +8,9 @@
 #[cfg(any(target_os = "linux", test))]
 pub mod arp;
 pub mod geodata_fetch;
+/// The privileged helper (`meow service` / `meow service-call`).
+#[cfg(unix)]
+pub mod helper;
 
 // The binary's startup path, reused when embedded in an app (`embed`):
 // main.rs names this crate `meow_app`, so the lib answers to it too.

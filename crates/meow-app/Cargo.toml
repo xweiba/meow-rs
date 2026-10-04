@@ -110,6 +110,7 @@ serde_yaml = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
 libc = "0.2"
+serde_json = { workspace = true }
 dhat = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]

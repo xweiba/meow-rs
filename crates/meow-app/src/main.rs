@@ -131,6 +131,28 @@ enum Command {
     #[cfg(target_os = "windows")]
     #[command(hide = true)]
     RunService,
+    /// The privileged helper an app installs (root): runs the core for one
+    /// user, who asks over a Unix socket
+    #[cfg(unix)]
+    Service {
+        #[arg(long)]
+        socket: String,
+        /// The only user it answers (besides root)
+        #[arg(long)]
+        uid: u32,
+    },
+    /// Asks the privileged helper: start (with --config / --dir), stop, status
+    #[cfg(unix)]
+    ServiceCall {
+        #[arg(long)]
+        socket: String,
+        #[arg(long)]
+        op: String,
+        #[arg(long)]
+        config: Option<String>,
+        #[arg(long)]
+        dir: Option<String>,
+    },
 }
 
 pub(crate) enum LogTarget {
@@ -735,6 +757,15 @@ fn handle_service_command(cmd: &Command, args: &Args) -> Result<()> {
         Command::Status => service_status(),
         #[cfg(target_os = "windows")]
         Command::RunService => windows_service::dispatch(),
+        #[cfg(unix)]
+        Command::Service { socket, uid } => meow_app::helper::serve(socket, *uid),
+        #[cfg(unix)]
+        Command::ServiceCall {
+            socket,
+            op,
+            config,
+            dir,
+        } => meow_app::helper::call(socket, op, config.as_deref(), dir.as_deref()),
     }
 }
 

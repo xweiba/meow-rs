@@ -2777,6 +2777,7 @@ dependencies = [
  "meow-trie",
  "meow-tunnel",
  "parking_lot",
+ "serde_json",
  "serde_yaml",
  "smol_str",
  "tempfile",
