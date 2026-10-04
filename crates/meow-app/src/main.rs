@@ -141,6 +141,15 @@ enum Command {
         #[arg(long)]
         uid: u32,
     },
+    /// Makes the MITM certificate authority (if missing) and prints its path,
+    /// so an app can have it trusted before the core first runs
+    #[cfg(feature = "mitm")]
+    MitmCa {
+        #[arg(long)]
+        cert: String,
+        #[arg(long)]
+        key: String,
+    },
     /// Asks the privileged helper: start (with --config / --dir), stop, status
     #[cfg(unix)]
     ServiceCall {
@@ -757,6 +766,16 @@ fn handle_service_command(cmd: &Command, args: &Args) -> Result<()> {
         Command::Status => service_status(),
         #[cfg(target_os = "windows")]
         Command::RunService => windows_service::dispatch(),
+        #[cfg(feature = "mitm")]
+        Command::MitmCa { cert, key } => {
+            meow_proxy::mitm::load_or_create_ca(
+                std::path::Path::new(cert),
+                std::path::Path::new(key),
+            )
+            .map_err(|e| anyhow::anyhow!(e))?;
+            println!("{cert}");
+            Ok(())
+        }
         #[cfg(unix)]
         Command::Service { socket, uid } => meow_app::helper::serve(socket, *uid),
         #[cfg(unix)]
