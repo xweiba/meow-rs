@@ -8,7 +8,9 @@
 //!
 //! - `{"op":"start","config":"/abs/config.json","dir":"/abs/dir"}` runs
 //!   this binary as the core (`-f config -d dir`), replacing a running one;
-//! - `{"op":"stop"}`; `{"op":"status"}` (`running`).
+//! - `{"op":"stop"}`; `{"op":"status"}` (`running`);
+//! - `{"op":"relocate"}` (macOS): restarts `locationd`, so the system asks
+//!   for its location again (virtual location takes effect at once).
 //!
 //! `meow service-call --socket PATH --op start --config … --dir …` is the
 //! client: prints the reply, exits non-zero only when the helper can't be
@@ -172,11 +174,25 @@ fn handle(core: &mut Core, stream: UnixStream, uid: u32) -> Result<()> {
             json!({"ok": true})
         }
         "status" => json!({"ok": true, "running": core.running()}),
+        "relocate" => relocate(),
         other => json!({"ok": false, "error": format!("unknown op '{other}'")}),
     };
     let mut s = stream;
     writeln!(s, "{reply}")?;
     Ok(())
+}
+
+/// macOS: `locationd` restarted (launchd brings it back); it then looks up
+/// where it is again instead of using what it had.
+fn relocate() -> Value {
+    if !cfg!(target_os = "macos") {
+        return json!({"ok": false, "error": "macOS only"});
+    }
+    match Command::new("/usr/bin/killall").arg("locationd").status() {
+        Ok(s) if s.success() => json!({"ok": true}),
+        Ok(s) => json!({"ok": false, "error": format!("killall locationd: {s}")}),
+        Err(e) => json!({"ok": false, "error": e.to_string()}),
+    }
 }
 
 /// `meow service`: serves [`uid`] on [`socket`] until killed.
