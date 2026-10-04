@@ -739,7 +739,7 @@ fn parse_mitm(
     config: &HashMap<String, serde_yaml::Value>,
     dialer: &Arc<dyn meow_proxy::dialer::TcpDialer>,
 ) -> std::result::Result<meow_proxy::mitm::MitmAdapter, String> {
-    use meow_proxy::mitm::{load_or_create_ca, MitmAdapter, ScriptRule};
+    use meow_proxy::mitm::{load_or_create_ca, Cron, MitmAdapter, MitmExtras, Pattern, ScriptRule};
     let home = meow_common::home_dir::resolved_home_dir();
     let text = |k: &str| config.get(k).and_then(|v| v.as_str()).map(str::to_string);
     let path = |k: &str, default: &str| {
@@ -761,15 +761,25 @@ fn parse_mitm(
             let get = |k: &str| s.get(k);
             let str_of = |k: &str| get(k).and_then(|v| v.as_str()).map(str::to_string);
             let rule_name = str_of("name").unwrap_or_else(|| format!("script{i}"));
-            let pattern =
-                str_of("pattern").ok_or(format!("mitm[{name}] {rule_name}: missing pattern"))?;
-            let pattern = meow_proxy::mitm::Pattern::new(&pattern)
-                .map_err(|e| format!("mitm[{name}] {rule_name}: pattern: {e}"))?;
             let kind = str_of("type").unwrap_or_else(|| "http-response".into());
-            let response = match kind.as_str() {
-                "http-response" => true,
-                "http-request" => false,
+            let (response, cron) = match kind.as_str() {
+                "http-response" => (true, None),
+                "http-request" => (false, None),
+                "cron" => {
+                    let expr =
+                        str_of("cron").ok_or(format!("mitm[{name}] {rule_name}: missing cron"))?;
+                    let c =
+                        Cron::parse(&expr).map_err(|e| format!("mitm[{name}] {rule_name}: {e}"))?;
+                    (false, Some(c))
+                }
                 other => return Err(format!("mitm[{name}] {rule_name}: unknown type {other}")),
+            };
+            let pattern = match (str_of("pattern"), &cron) {
+                (Some(p), _) => Pattern::new(&p)
+                    .map_err(|e| format!("mitm[{name}] {rule_name}: pattern: {e}"))?,
+                // Never matches: cron scripts are not tied to requests.
+                (None, Some(_)) => Pattern::new("(?!)").map_err(|e| format!("mitm: {e}"))?,
+                (None, None) => return Err(format!("mitm[{name}] {rule_name}: missing pattern")),
             };
             let script = str_of("script-path")
                 .ok_or(format!("mitm[{name}] {rule_name}: missing script-path"))?;
@@ -787,6 +797,7 @@ fn parse_mitm(
                         .and_then(serde_yaml::Value::as_u64)
                         .unwrap_or(10),
                 ),
+                cron,
             });
         }
     }
@@ -803,6 +814,14 @@ fn parse_mitm(
             .and_then(serde_yaml::Value::as_bool)
             .unwrap_or(false),
         Arc::clone(dialer),
+        MitmExtras {
+            notifications: text("notifications").map(|_| path("notifications", "")),
+            utc_offset_minutes: config
+                .get("utc-offset")
+                .and_then(serde_yaml::Value::as_i64)
+                .and_then(|v| i32::try_from(v).ok())
+                .unwrap_or(0),
+        },
     )
     .map_err(|e| format!("mitm[{name}]: {e}"))
 }

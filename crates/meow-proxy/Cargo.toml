@@ -124,6 +124,7 @@ ctr = { workspace = true, optional = true }
 psl = "=2.1.232"
 
 [dev-dependencies]
+time = { workspace = true, features = ["macros"] }
 tokio = { workspace = true, features = ["test-util"] }
 # Loopback anytls *server* for the integration tests (rustls-based, test-only).
 meow-anytls = { workspace = true, features = ["server"] }

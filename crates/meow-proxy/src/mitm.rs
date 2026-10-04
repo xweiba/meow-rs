@@ -47,6 +47,102 @@ impl Pattern {
     }
 }
 
+/// A cron schedule: `minute hour day-of-month month day-of-week`, or six
+/// fields with seconds first (ignored: runs are per minute). `*`, lists,
+/// ranges, steps and month / weekday names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cron {
+    minute: u64,
+    hour: u64,
+    dom: u64,
+    month: u64,
+    dow: u64,
+    dom_any: bool,
+    dow_any: bool,
+}
+
+impl Cron {
+    pub fn parse(expr: &str) -> std::result::Result<Self, String> {
+        let mut f: Vec<&str> = expr.split_whitespace().collect();
+        if f.len() == 6 {
+            f.remove(0);
+        }
+        if f.len() != 5 {
+            return Err(format!("cron '{expr}': five fields expected"));
+        }
+        const MONTHS: [&str; 12] = [
+            "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+        ];
+        const DAYS: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+        let field = |s: &str, lo: u32, hi: u32, names: &[&str], base: u32| {
+            let mut bits = 0u64;
+            for part in s.split(',') {
+                let (range, step) = match part.split_once('/') {
+                    Some((r, st)) => (
+                        r,
+                        st.parse::<u32>()
+                            .map_err(|_| format!("cron step '{part}'"))?,
+                    ),
+                    None => (part, 1),
+                };
+                let num = |v: &str| -> std::result::Result<u32, String> {
+                    let l = v.to_ascii_lowercase();
+                    if let Some(i) = names.iter().position(|n| *n == l) {
+                        return Ok(u32::try_from(i).unwrap_or(0) + base);
+                    }
+                    v.parse::<u32>().map_err(|_| format!("cron value '{v}'"))
+                };
+                let (a, b) = if range == "*" {
+                    (lo, hi)
+                } else if let Some((a, b)) = range.split_once('-') {
+                    (num(a)?, num(b)?)
+                } else {
+                    let a = num(range)?;
+                    (a, if part.contains('/') { hi } else { a })
+                };
+                if step == 0 || a < lo || b > hi || a > b {
+                    return Err(format!("cron '{part}' out of range"));
+                }
+                let mut v = a;
+                while v <= b {
+                    bits |= 1 << v;
+                    v += step;
+                }
+            }
+            Ok::<u64, String>(bits)
+        };
+        let mut dow = field(f[4], 0, 7, &DAYS, 0)?;
+        if dow & (1 << 7) != 0 {
+            dow |= 1; // 7 is Sunday too
+        }
+        Ok(Self {
+            minute: field(f[0], 0, 59, &[], 0)?,
+            hour: field(f[1], 0, 23, &[], 0)?,
+            dom: field(f[2], 1, 31, &[], 0)?,
+            month: field(f[3], 1, 12, &MONTHS, 1)?,
+            dow,
+            dom_any: f[2] == "*",
+            dow_any: f[4] == "*",
+        })
+    }
+
+    /// Whether it fires in the minute `t` (local time) falls in.
+    pub fn matches(&self, t: time::OffsetDateTime) -> bool {
+        let bit = |set: u64, v: u8| set & (1 << v) != 0;
+        let dom = bit(self.dom, t.day());
+        let dow = bit(self.dow, t.weekday().number_days_from_sunday());
+        // Both day fields restricted: either may match (as cron does).
+        let day = match (self.dom_any, self.dow_any) {
+            (false, false) => dom || dow,
+            _ => dom && dow,
+        };
+        bit(self.minute, t.minute())
+            && bit(self.hour, t.hour())
+            && bit(self.month, u8::from(t.month()))
+            && day
+    }
+}
+
 /// One script rule (`scripts:` entry).
 #[derive(Clone, Debug)]
 pub struct ScriptRule {
@@ -61,6 +157,17 @@ pub struct ScriptRule {
     pub binary_body: bool,
     pub requires_body: bool,
     pub timeout: Duration,
+    /// `type: cron`: runs on this schedule (the pattern is unused).
+    pub cron: Option<Cron>,
+}
+
+/// Where scripts' notifications are kept for the app (one JSON object a
+/// line, newest last), and how cron reads the local clock.
+#[derive(Clone, Debug, Default)]
+pub struct MitmExtras {
+    pub notifications: Option<PathBuf>,
+    /// Minutes east of UTC (the app's time zone).
+    pub utc_offset_minutes: i32,
 }
 
 pub struct MitmAdapter {
@@ -78,6 +185,7 @@ struct Shared {
     home: PathBuf,
     skip_cert_verify: bool,
     dialer: Arc<dyn crate::dialer::TcpDialer>,
+    extras: MitmExtras,
 }
 
 fn err(e: impl std::fmt::Display) -> MeowError {
@@ -134,6 +242,7 @@ impl MitmAdapter {
         store_path: Option<PathBuf>,
         skip_cert_verify: bool,
         dialer: Arc<dyn crate::dialer::TcpDialer>,
+        extras: MitmExtras,
     ) -> std::result::Result<Self, String> {
         let ca_key = rcgen::KeyPair::from_pem(ca_key_pem).map_err(|e| format!("ca-key: {e}"))?;
         let params = rcgen::CertificateParams::from_ca_cert_pem(ca_cert_pem)
@@ -141,20 +250,52 @@ impl MitmAdapter {
         let ca_cert = params
             .self_signed(&ca_key)
             .map_err(|e| format!("ca-cert: {e}"))?;
+        let shared = Arc::new(Shared {
+            ca_cert,
+            ca_key,
+            leaves: Mutex::new(HashMap::new()),
+            scripts,
+            store: Arc::new(Store::new(store_path)),
+            home,
+            skip_cert_verify,
+            dialer,
+            extras,
+        });
+        if shared.scripts.iter().any(|r| r.cron.is_some()) {
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                rt.spawn(cron_loop(Arc::downgrade(&shared)));
+            }
+        }
         Ok(Self {
             name: SmolStr::from(name),
-            shared: Arc::new(Shared {
-                ca_cert,
-                ca_key,
-                leaves: Mutex::new(HashMap::new()),
-                scripts,
-                store: Arc::new(Store::new(store_path)),
-                home,
-                skip_cert_verify,
-                dialer,
-            }),
+            shared,
             health: ProxyHealth::new(),
         })
+    }
+}
+
+/// Runs the cron scripts while the adapter lives (a reload drops it and
+/// the loop ends).
+async fn cron_loop(shared: std::sync::Weak<Shared>) {
+    loop {
+        let now = time::OffsetDateTime::now_utc();
+        let wait = 60 - u64::from(now.second()) % 60;
+        tokio::time::sleep(Duration::from_secs(wait)).await;
+        let Some(sh) = shared.upgrade() else { return };
+        let offset = time::UtcOffset::from_whole_seconds(sh.extras.utc_offset_minutes * 60)
+            .unwrap_or(time::UtcOffset::UTC);
+        let local = time::OffsetDateTime::now_utc().to_offset(offset);
+        for rule in sh
+            .scripts
+            .iter()
+            .filter(|r| r.cron.as_ref().is_some_and(|c| c.matches(local)))
+        {
+            let (sh, rule) = (Arc::clone(&sh), rule.clone());
+            tokio::spawn(async move {
+                info!("mitm: cron script {}", rule.name);
+                let _ = sh.run_script(&rule, &Message::default(), None).await;
+            });
+        }
     }
 }
 
@@ -221,6 +362,8 @@ impl Shared {
             timeout: rule.timeout,
             store: Arc::clone(&self.store),
             http: Some(self.http_fn()),
+            cron: rule.cron.is_some(),
+            notify: Some(self.notify_fn(&rule.name)),
         };
         let (mut req, mut resp) = (request.clone(), response.cloned());
         if !rule.requires_body {
@@ -283,7 +426,7 @@ impl Shared {
             let rules: Vec<&ScriptRule> = self
                 .scripts
                 .iter()
-                .filter(|r| !r.response && r.pattern.is_match(&msg.url))
+                .filter(|r| r.cron.is_none() && !r.response && r.pattern.is_match(&msg.url))
                 .collect();
             for rule in rules {
                 if let Some(out) = self.run_script(rule, &msg, None).await {
@@ -332,7 +475,7 @@ impl Shared {
                 let rules: Vec<&ScriptRule> = self
                     .scripts
                     .iter()
-                    .filter(|r| r.response && r.pattern.is_match(&msg.url))
+                    .filter(|r| r.cron.is_none() && r.response && r.pattern.is_match(&msg.url))
                     .collect();
                 if !rules.is_empty() {
                     decode_body(&mut resp);
@@ -358,6 +501,40 @@ impl Shared {
                 return Ok(());
             }
         }
+    }
+
+    /// Notifications go to [MitmExtras::notifications] (the app shows
+    /// them), the last 100 kept.
+    fn notify_fn(self: &Arc<Self>, script: &str) -> meow_script::NotifyFn {
+        let path = self.extras.notifications.clone();
+        let script = script.to_string();
+        Arc::new(move |n: meow_script::Notification| {
+            info!("script {script}: {} | {} | {}", n.title, n.subtitle, n.body);
+            let Some(path) = &path else { return };
+            let line = serde_json::json!({
+                "time": time::OffsetDateTime::now_utc().unix_timestamp(),
+                "script": script,
+                "title": n.title,
+                "subtitle": n.subtitle,
+                "body": n.body,
+                "url": n.url,
+            })
+            .to_string();
+            let mut lines: Vec<String> = std::fs::read_to_string(path)
+                .map(|t| t.lines().map(str::to_string).collect())
+                .unwrap_or_default();
+            lines.push(line);
+            let keep = lines.len().saturating_sub(100);
+            let mut text = lines[keep..].join("\n");
+            text.push('\n');
+            let tmp = path.with_extension("tmp");
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if std::fs::write(&tmp, text).is_ok() {
+                let _ = std::fs::rename(&tmp, path);
+            }
+        })
     }
 
     /// Scripts' `$httpClient` / `$task.fetch`: sent the way the MITM

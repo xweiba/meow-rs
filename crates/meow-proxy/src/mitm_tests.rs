@@ -86,6 +86,7 @@ async fn upstream() -> SocketAddr {
 }
 
 const SCRIPT_RESPONSE: &str = r#"
+$notification.post('mitm', $request.url, 'seen', { url: 'https://example.test/' });
 const h = $response.headers;
 h['X-Arg'] = $argument;
 $done({ body: $response.body + ' +script', headers: h });
@@ -116,6 +117,7 @@ fn rule(name: &str, pattern: &str, response: bool, path: &str) -> ScriptRule {
         binary_body: false,
         requires_body: true,
         timeout: Duration::from_secs(3),
+        cron: None,
     }
 }
 
@@ -152,6 +154,10 @@ async fn adapter(dir: &Path, up: SocketAddr) -> (MitmAdapter, String) {
         None,
         true,
         Arc::new(To(up)),
+        MitmExtras {
+            notifications: Some(dir.join("notes.jsonl")),
+            utc_offset_minutes: 480,
+        },
     )
     .unwrap();
     (a, cert)
@@ -233,6 +239,14 @@ async fn scripts_rewrite_through_the_users_ca() {
     let r = get(&mut s, &mut buf, "GET", "/ask-not", "").await;
     assert_eq!(String::from_utf8_lossy(&r.body), "GET /ask-not ");
 
+    // Notifications land where the app reads them.
+    let notes = std::fs::read_to_string(dir.path().join("notes.jsonl")).unwrap();
+    let first: serde_json::Value = serde_json::from_str(notes.lines().next().unwrap()).unwrap();
+    assert_eq!(first["title"], "mitm");
+    assert_eq!(first["body"], "seen");
+    assert_eq!(first["url"], "https://example.test/");
+    assert_eq!(first["script"], "resp");
+
     // No rule: passed through untouched.
     let r = get(&mut s, &mut buf, "GET", "/plain", "").await;
     assert_eq!(String::from_utf8_lossy(&r.body), "GET /plain ");
@@ -310,4 +324,27 @@ fn urls_split_and_join() {
     assert_eq!(join_url("https://a.b/x", "//c.d/e"), "https://c.d/e");
     assert_eq!(join_url("https://a.b", "z"), "https://a.b/z");
     assert_eq!(join_url("https://a.b/x", "http://c/"), "http://c/");
+}
+
+#[test]
+fn cron_schedules() {
+    use time::macros::datetime;
+    let at = |c: &Cron, t| c.matches(t);
+    let daily = Cron::parse("0 8 * * *").unwrap();
+    assert!(at(&daily, datetime!(2026-10-05 08:00 +8)));
+    assert!(!at(&daily, datetime!(2026-10-05 08:01 +8)));
+    let steps = Cron::parse("*/15 9-17 * * mon-fri").unwrap();
+    assert!(at(&steps, datetime!(2026-10-05 09:45 +8)), "a Monday");
+    assert!(!at(&steps, datetime!(2026-10-04 09:45 +8)), "a Sunday");
+    let seconds = Cron::parse("30 0 12 1,15 * *").unwrap();
+    assert!(at(&seconds, datetime!(2026-10-15 12:00 +8)));
+    // Both day fields restricted: either.
+    let either = Cron::parse("0 0 1 * 0").unwrap();
+    assert!(at(&either, datetime!(2026-10-04 00:00 +8)), "Sunday");
+    assert!(at(&either, datetime!(2026-10-01 00:00 +8)), "the 1st");
+    assert!(Cron::parse("0 8 * *").is_err());
+    assert!(Cron::parse("61 8 * * *").is_err());
+    assert!(Cron::parse("0 8 * * 7")
+        .unwrap()
+        .matches(datetime!(2026-10-04 08:00 +8)));
 }

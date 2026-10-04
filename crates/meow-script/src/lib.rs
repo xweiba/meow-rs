@@ -113,7 +113,40 @@ pub struct Options {
     pub store: Arc<Store>,
     /// Sends the script's HTTP requests; without it they fail.
     pub http: Option<HttpFn>,
+    /// A scheduled run (`type=cron`): no `$request` / `$response`.
+    pub cron: bool,
+    /// Where `$notification.post` / `$notify` go (else the log).
+    pub notify: Option<NotifyFn>,
 }
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            argument: String::new(),
+            binary_body: false,
+            timeout: Duration::from_secs(10),
+            store: Arc::new(Store::new(None)),
+            http: None,
+            cron: false,
+            notify: None,
+        }
+    }
+}
+
+/// What a script tells the user (`$notification.post(title, subtitle,
+/// body, options)`, `$notify` …).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Notification {
+    pub title: String,
+    pub subtitle: String,
+    pub body: String,
+    /// Opened when the notification is tapped (`url`, `open-url`,
+    /// `openUrl`, or Loon's plain string).
+    pub url: Option<String>,
+}
+
+pub type NotifyFn = Arc<dyn Fn(Notification) + Send + Sync>;
 
 /// A request a script sends (`$httpClient`, `$task.fetch`).
 #[derive(Clone, Debug, Default)]
@@ -172,8 +205,13 @@ var $prefs = {
   setValueForKey: function (v, k) { return $persistentStore.write(v, k); },
   removeValueForKey: function (k) { return __paopao_store_write(String(k), null); },
 };
-var $notification = { post: function (t, s, b) { __paopao_log('notify', [t, s, b].filter(Boolean).join(' | ')); } };
-var $notify = function (t, s, b) { $notification.post(t, s, b); };
+var $notification = {
+  post: function (t, s, b, o) {
+    var url = typeof o === 'string' ? o : (o && (o.url || o['open-url'] || o.openUrl || o['open-url'])) || '';
+    __paopao_notify(String(t === undefined || t === null ? '' : t), String(s === undefined || s === null ? '' : s), String(b === undefined || b === null ? '' : b), String(url));
+  },
+};
+var $notify = function (t, s, b, o) { $notification.post(t, s, b, o); };
 var console = {
   log: function () { __paopao_log('log', Array.prototype.join.call(arguments, ' ')); },
   info: function () { __paopao_log('log', Array.prototype.join.call(arguments, ' ')); },
@@ -495,7 +533,9 @@ pub fn run(
             script.set("name", opts.name.as_str())?;
             script.set(
                 "type",
-                if response.is_some() {
+                if opts.cron {
+                    "cron"
+                } else if response.is_some() {
                     "http-response"
                 } else {
                     "http-request"
@@ -507,13 +547,40 @@ pub fn run(
             env.set("surge-version", "5.0")?;
             env.set("language", "zh-Hans")?;
             g.set("$environment", env)?;
-            g.set(
-                "$request",
-                message_obj(&ctx, request, false, opts.binary_body)?,
-            )?;
-            if let Some(r) = response {
-                g.set("$response", message_obj(&ctx, r, true, opts.binary_body)?)?;
+            if !opts.cron {
+                g.set(
+                    "$request",
+                    message_obj(&ctx, request, false, opts.binary_body)?,
+                )?;
+                if let Some(r) = response {
+                    g.set("$response", message_obj(&ctx, r, true, opts.binary_body)?)?;
+                }
             }
+            let notify = opts.notify.clone();
+            let n = name.clone();
+            g.set(
+                "__paopao_notify",
+                Function::new(
+                    ctx.clone(),
+                    move |title: String, subtitle: String, body: String, url: String| {
+                        let note = Notification {
+                            title,
+                            subtitle,
+                            body,
+                            url: (!url.is_empty()).then_some(url),
+                        };
+                        match &notify {
+                            Some(f) => f(note),
+                            None => tracing::info!(
+                                "script {n}: notify {} | {} | {}",
+                                note.title,
+                                note.subtitle,
+                                note.body
+                            ),
+                        }
+                    },
+                )?,
+            )?;
             ctx.eval::<(), _>(PRELUDE)?;
             Ok(())
         };

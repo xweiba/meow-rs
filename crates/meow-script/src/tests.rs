@@ -10,7 +10,7 @@ fn opts(binary: bool, store: Arc<Store>) -> Options {
         binary_body: binary,
         timeout: Duration::from_secs(2),
         store,
-        http: None,
+        ..Options::default()
     }
 }
 
@@ -346,4 +346,42 @@ fn quantumult_x_requests_are_answered_with_a_status() {
     assert_eq!(r.status, 200);
     assert_eq!(r.body.unwrap(), br#"{"ok":true}"#);
     assert!(out.status.is_none());
+}
+
+#[test]
+fn cron_runs_have_no_request_and_notifications_reach_the_embedder() {
+    let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let o = Options {
+        name: "checkin".into(),
+        cron: true,
+        notify: Some(Arc::new(move |n| sink.lock().push(n))),
+        ..Options::default()
+    };
+    let out = run(
+        r#"
+        if (typeof $request !== 'undefined') throw new Error('cron has no request');
+        if ($script.type !== 'cron') throw new Error($script.type);
+        $notification.post('签到', '成功', '+1', { 'open-url': 'https://example.com/' });
+        $notify('QX', '', 'plain');
+        $done();
+        "#,
+        &Message::default(),
+        None,
+        &o,
+    )
+    .unwrap();
+    assert_eq!(out, Outcome::default());
+    let seen = seen.lock();
+    assert_eq!(
+        seen[0],
+        Notification {
+            title: "签到".into(),
+            subtitle: "成功".into(),
+            body: "+1".into(),
+            url: Some("https://example.com/".into()),
+        }
+    );
+    assert_eq!(seen[1].body, "plain");
+    assert_eq!(seen[1].url, None);
 }

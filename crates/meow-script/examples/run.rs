@@ -56,7 +56,7 @@ fn main() {
         binary_body: binary,
         timeout: Duration::from_secs(10),
         store: Arc::new(Store::new(store)),
-        http: None,
+        ..Options::default()
     };
     let response = (!as_request).then_some(response);
     match run(&source, &request, response.as_ref(), &opts) {
