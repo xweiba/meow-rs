@@ -127,7 +127,9 @@ impl std::error::Error for Error {}
 /// The script API in JavaScript, over a few native hooks.
 const PRELUDE: &str = r#"
 var __paopao_done = undefined;
-var $done = function (v) { __paopao_done = (v === undefined || v === null) ? {} : v; };
+// The first $done counts (as in Surge): scripts often end with a bare
+// $done() in a finally after answering.
+var $done = function (v) { if (__paopao_done === undefined) __paopao_done = (v === undefined || v === null) ? {} : v; };
 var $persistentStore = {
   read: function (k) { var v = __paopao_store_read(String(k || '')); return v === undefined ? null : v; },
   write: function (v, k) { return __paopao_store_write(String(k || ''), v === undefined || v === null ? null : String(v)); },
@@ -147,6 +149,8 @@ var console = {
 };
 var setTimeout = function (f) { var a = Array.prototype.slice.call(arguments, 2); Promise.resolve().then(function () { f.apply(null, a); }); return 0; };
 var clearTimeout = function () {};
+// Surge: seconds since the epoch.
+$script.startTime = Date.now() / 1000;
 "#;
 
 fn js_err(ctx: &Ctx<'_>, e: &rquickjs::Error) -> Error {
@@ -370,6 +374,15 @@ pub fn run(
         let Some(o) = done.as_object() else {
             return Ok(Outcome::default());
         };
+        // Response scripts may also hand the changed response back as
+        // `$done({response: {...}})` (Surge / Shadowrocket accept it; the
+        // common script framework does it): read the fields from there.
+        let nested = response
+            .is_some()
+            .then(|| o.get::<_, Value>("response").ok())
+            .flatten()
+            .and_then(Value::into_object);
+        let o = nested.as_ref().unwrap_or(o);
         let mut out = Outcome::default();
         if let Ok(v) = o.get::<_, Value>("url") {
             out.url = v.as_string().and_then(|s| s.to_string().ok());

@@ -18,5 +18,8 @@ tracing = { workspace = true }
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 rquickjs = { version = "0.14", features = ["array-buffer", "bindgen"] }
 
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+
 [lints]
 workspace = true

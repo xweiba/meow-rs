@@ -159,3 +159,45 @@ fn no_done_leaves_things_alone_errors_and_runaways_are_reported() {
         Err(Error::Timeout)
     ));
 }
+
+#[test]
+fn the_first_done_counts_and_start_time_is_in_seconds() {
+    let store = Arc::new(Store::new(None));
+    let out = run(
+        r#"
+        const age = Date.now() / 1000 - $script.startTime;
+        if (!(age >= 0 && age < 60)) throw new Error('startTime ' + $script.startTime);
+        try {
+            $done({ body: 'patched' });
+        } finally {
+            $done();
+        }
+        "#,
+        &req(),
+        Some(&resp(b"original")),
+        &opts(false, store),
+    )
+    .unwrap();
+    assert_eq!(out.body.unwrap(), b"patched");
+}
+
+#[test]
+fn response_scripts_may_answer_with_a_response_object() {
+    let store = Arc::new(Store::new(None));
+    let out = run(
+        r#"
+        const r = $response;
+        r.body = new Uint8Array([7, 8]);
+        r.bodyBytes = r.body;
+        r.headers['X-B'] = '1';
+        $done({ response: r });
+        "#,
+        &req(),
+        Some(&resp(&[1, 2, 3])),
+        &opts(true, store),
+    )
+    .unwrap();
+    assert_eq!(out.body.unwrap(), vec![7, 8]);
+    assert!(out.headers.unwrap().contains(&("X-B".into(), "1".into())));
+    assert!(out.response.is_none());
+}
