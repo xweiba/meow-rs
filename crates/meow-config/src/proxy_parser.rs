@@ -368,6 +368,13 @@ pub fn parse_proxy_with_dialer(
         }
         #[cfg(not(feature = "ssh"))]
         "ssh" => Err(feature_gated_proxy_type("ssh")),
+        #[cfg(feature = "mitm")]
+        "mitm" => {
+            let adapter = parse_mitm(name, config, dialer)?;
+            Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
+        }
+        #[cfg(not(feature = "mitm"))]
+        "mitm" => Err(feature_gated_proxy_type("mitm")),
         "direct" => {
             reject_unthreaded_dialer(name, "direct", dialer)?;
             let adapter = parse_direct(name, config, ipv6)?;
@@ -718,6 +725,86 @@ fn parse_ssh(
         host_keys,
         Arc::clone(dialer),
     ))
+}
+
+/// `type: mitm`: `ca-cert` / `ca-key` (PEM files, relative to the home
+/// directory; made on first use), `skip-cert-verify`, `store` (the
+/// scripts' `$persistentStore` file), and `scripts:` entries in Surge
+/// terms — `name`, `type` (http-request | http-response), `pattern`,
+/// `script-path`, `argument`, `binary-body-mode`, `requires-body`,
+/// `timeout` (seconds).
+#[cfg(feature = "mitm")]
+fn parse_mitm(
+    name: &str,
+    config: &HashMap<String, serde_yaml::Value>,
+    dialer: &Arc<dyn meow_proxy::dialer::TcpDialer>,
+) -> std::result::Result<meow_proxy::mitm::MitmAdapter, String> {
+    use meow_proxy::mitm::{load_or_create_ca, MitmAdapter, ScriptRule};
+    let home = meow_common::home_dir::resolved_home_dir();
+    let text = |k: &str| config.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    let path = |k: &str, default: &str| {
+        let p = std::path::PathBuf::from(text(k).unwrap_or_else(|| default.to_string()));
+        if p.is_absolute() {
+            p
+        } else {
+            home.join(p)
+        }
+    };
+    let (cert, key) = load_or_create_ca(
+        &path("ca-cert", "mitm-ca.pem"),
+        &path("ca-key", "mitm-ca-key.pem"),
+    )
+    .map_err(|e| format!("mitm[{name}]: {e}"))?;
+    let mut scripts = Vec::new();
+    if let Some(serde_yaml::Value::Sequence(list)) = config.get("scripts") {
+        for (i, s) in list.iter().enumerate() {
+            let get = |k: &str| s.get(k);
+            let str_of = |k: &str| get(k).and_then(|v| v.as_str()).map(str::to_string);
+            let rule_name = str_of("name").unwrap_or_else(|| format!("script{i}"));
+            let pattern =
+                str_of("pattern").ok_or(format!("mitm[{name}] {rule_name}: missing pattern"))?;
+            let pattern = regex::Regex::new(&pattern)
+                .map_err(|e| format!("mitm[{name}] {rule_name}: pattern: {e}"))?;
+            let kind = str_of("type").unwrap_or_else(|| "http-response".into());
+            let response = match kind.as_str() {
+                "http-response" => true,
+                "http-request" => false,
+                other => return Err(format!("mitm[{name}] {rule_name}: unknown type {other}")),
+            };
+            let script = str_of("script-path")
+                .ok_or(format!("mitm[{name}] {rule_name}: missing script-path"))?;
+            let flag = |k: &str| get(k).and_then(serde_yaml::Value::as_bool).unwrap_or(false);
+            scripts.push(ScriptRule {
+                name: rule_name,
+                pattern,
+                response,
+                path: script.into(),
+                argument: str_of("argument").unwrap_or_default(),
+                binary_body: flag("binary-body-mode"),
+                requires_body: flag("requires-body"),
+                timeout: std::time::Duration::from_secs(
+                    get("timeout")
+                        .and_then(serde_yaml::Value::as_u64)
+                        .unwrap_or(10),
+                ),
+            });
+        }
+    }
+    let store = text("store").map(|_| path("store", ""));
+    MitmAdapter::new(
+        name,
+        &cert,
+        &key,
+        scripts,
+        home.clone(),
+        store,
+        config
+            .get("skip-cert-verify")
+            .and_then(serde_yaml::Value::as_bool)
+            .unwrap_or(false),
+        Arc::clone(dialer),
+    )
+    .map_err(|e| format!("mitm[{name}]: {e}"))
 }
 
 fn parse_http(

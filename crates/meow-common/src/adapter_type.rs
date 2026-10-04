@@ -24,6 +24,8 @@ pub enum AdapterType {
     Anytls,
     Snell,
     Ssh,
+    /// TLS opened with the user's CA for rewrite scripts (`type: mitm`).
+    Mitm,
     /// Built-in nop adapter (`PASS`) — a matched rule is skipped silently
     /// by the match loop (upstream `C.Pass`).
     Pass,
@@ -58,6 +60,7 @@ impl fmt::Display for AdapterType {
             AdapterType::Anytls => write!(f, "AnyTLS"),
             AdapterType::Snell => write!(f, "Snell"),
             AdapterType::Ssh => write!(f, "Ssh"),
+            AdapterType::Mitm => write!(f, "Mitm"),
             AdapterType::Pass => write!(f, "Pass"),
             AdapterType::PassRule => write!(f, "PassRule"),
             AdapterType::Compatible => write!(f, "Compatible"),

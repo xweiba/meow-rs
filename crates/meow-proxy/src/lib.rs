@@ -12,6 +12,8 @@ pub mod direct;
 pub mod group;
 pub mod health;
 pub mod http_adapter;
+#[cfg(feature = "mitm")]
+pub mod mitm;
 #[cfg(feature = "mux")]
 pub mod mux;
 pub mod reject;
