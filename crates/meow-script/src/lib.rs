@@ -638,10 +638,26 @@ pub fn run(
                     if let Ok(h) = r.get::<_, Value>("headers") {
                         m.headers = read_headers(&h).unwrap_or_default();
                     }
-                    if let Ok(b) = r.get::<_, Value>("body") {
-                        m.body = read_body(&b);
-                    }
+                    m.body = r
+                        .get::<_, Value>("bodyBytes")
+                        .ok()
+                        .and_then(|b| read_body(&b))
+                        .or_else(|| r.get::<_, Value>("body").ok().and_then(|b| read_body(&b)));
                     out.response = Some(m);
+                }
+            }
+            // Quantumult X answers a request with `$done({status, headers,
+            // body})` (status like "HTTP/1.1 200 OK"); scripts that take
+            // us for QX (we have $task) do so.
+            if out.response.is_none() {
+                if let Some(status) = out.status {
+                    out.response = Some(Message {
+                        status,
+                        headers: out.headers.take().unwrap_or_default(),
+                        body: out.body.take(),
+                        ..Message::default()
+                    });
+                    out.status = None;
                 }
             }
         }

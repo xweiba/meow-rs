@@ -328,3 +328,22 @@ fn utils_ungzip() {
     .unwrap();
     assert_eq!(out.body.unwrap(), b"plain words");
 }
+
+#[test]
+fn quantumult_x_requests_are_answered_with_a_status() {
+    let store = Arc::new(Store::new(None));
+    let out = run(
+        r#"
+        if (typeof $task === 'undefined') throw new Error('QX scripts look for $task');
+        $done({ status: 'HTTP/1.1 200 OK', headers: { 'Content-Type': 'application/json' }, body: '{"ok":true}' });
+        "#,
+        &req(),
+        None,
+        &opts(false, store),
+    )
+    .unwrap();
+    let r = out.response.unwrap();
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body.unwrap(), br#"{"ok":true}"#);
+    assert!(out.status.is_none());
+}
