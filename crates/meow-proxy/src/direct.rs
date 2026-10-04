@@ -32,6 +32,9 @@ pub struct DirectAdapter {
     /// SYN retransmit grid). `None` preserves the legacy unbounded
     /// behaviour for downstream consumers that haven't opted in.
     connect_timeout: Option<Duration>,
+    /// PaoPao: leave by this interface (`interface-name:`, e.g. another
+    /// VPN's `utun6`), whatever the global binding.
+    interface: Option<String>,
     health: ProxyHealth,
 }
 
@@ -42,7 +45,21 @@ impl DirectAdapter {
             routing_mark: None,
             resolver: None,
             connect_timeout: None,
+            interface: None,
             health: ProxyHealth::new(),
+        }
+    }
+
+    /// Leave by interface `name` (PaoPao's per-rule interfaces).
+    pub fn with_interface(mut self, name: impl Into<String>) -> Self {
+        self.interface = Some(name.into());
+        self
+    }
+
+    async fn bind_udp(&self, local: SocketAddr) -> std::io::Result<UdpSocket> {
+        match &self.interface {
+            Some(name) => meow_common::bind_udp_on(local, name),
+            None => meow_common::bind_udp(local).await,
         }
     }
 
@@ -337,13 +354,13 @@ impl ProxyAdapter for DirectAdapter {
         let mut last_err = None;
 
         for dest in dests {
-            match apply_connect_timeout(
-                connect_with_mark(dest, self.routing_mark),
-                self.connect_timeout,
-                dest,
-            )
-            .await
-            {
+            let connect = async {
+                match &self.interface {
+                    Some(name) => meow_common::connect_tcp_on(dest, name).await,
+                    None => connect_with_mark(dest, self.routing_mark).await,
+                }
+            };
+            match apply_connect_timeout(connect, self.connect_timeout, dest).await {
                 Ok(stream) => return Ok(Box::new(DirectConn(stream))),
                 // An errno-backed connect failure (e.g. EMFILE on
                 // socket()) outranks a later context-only error — the
@@ -381,7 +398,7 @@ impl ProxyAdapter for DirectAdapter {
                 } else {
                     "[::]:0".parse().expect("static")
                 };
-                let socket = match meow_common::bind_udp(bind).await {
+                let socket = match self.bind_udp(bind).await {
                     Ok(s) => s,
                     Err(e) => {
                         last_err = MeowError::prefer_errno_io(last_err, e);
@@ -418,7 +435,8 @@ impl ProxyAdapter for DirectAdapter {
             None => meow_common::metadata_ip_literal(&metadata.host).is_some_and(|ip| ip.is_ipv6()),
         };
         let bind_addr = if dst_is_v6 { "[::]:0" } else { "0.0.0.0:0" };
-        let socket = meow_common::bind_udp(bind_addr)
+        let socket = self
+            .bind_udp(bind_addr.parse().expect("static"))
             .await
             .map_err(MeowError::Io)?;
         Ok(Box::new(DirectPacketConn {
@@ -475,6 +493,40 @@ mod tests {
             dst_port: port,
             ..Default::default()
         }
+    }
+
+    /// The loopback interface's name here.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const LOOPBACK: &str = if cfg!(target_os = "macos") {
+        "lo0"
+    } else {
+        "lo"
+    };
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn interface_name_binds_the_dial_and_a_missing_one_fails() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let on_lo = DirectAdapter::new().with_interface(LOOPBACK);
+        on_lo
+            .dial_tcp(&tcp_metadata("127.0.0.1", port))
+            .await
+            .expect("dial through the loopback interface");
+        let _ = accept.await.unwrap();
+
+        let missing = DirectAdapter::new().with_interface("paopao-nope0");
+        let err = missing
+            .dial_tcp(&tcp_metadata("127.0.0.1", port))
+            .await
+            .err()
+            .expect("no such interface");
+        assert!(err.to_string().contains("paopao-nope0"), "{err}");
+        assert!(missing
+            .dial_udp(&udp_metadata(IpAddr::V4(Ipv4Addr::LOCALHOST)))
+            .await
+            .is_err());
     }
 
     #[tokio::test]

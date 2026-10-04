@@ -973,6 +973,16 @@ fn parse_direct(
 
     let mut adapter = DirectAdapter::new();
 
+    // PaoPao: `interface-name:` — leave by that interface (e.g. another
+    // VPN's tunnel, to reach what only it reaches).
+    if let Some(v) = config.get("interface-name") {
+        let iface = v
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("direct[{name}]: interface-name must be a name"))?;
+        adapter = adapter.with_interface(iface);
+    }
+
     // Optional `connect-timeout:` (seconds) — per-proxy counterpart of the
     // global `tcp-connect-timeout:` that covers the built-in DIRECT. Hard
     // error on a non-integer (Class A per ADR-0002): silently ignoring it
@@ -3813,6 +3823,14 @@ tls: true
     fn parse_direct_without_dns_ok() {
         let cfg = direct_config("name: my-direct\ntype: direct\n");
         assert!(parse_proxy(&cfg).is_ok());
+    }
+
+    #[test]
+    fn parse_direct_with_interface_name() {
+        let cfg = direct_config("name: vpn\ntype: direct\ninterface-name: utun6\n");
+        assert!(parse_proxy(&cfg).is_ok());
+        let bad = direct_config("name: vpn\ntype: direct\ninterface-name: \"\"\n");
+        assert!(parse_proxy(&bad).is_err());
     }
 
     #[test]

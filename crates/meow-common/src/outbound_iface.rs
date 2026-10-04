@@ -305,6 +305,77 @@ pub fn apply_outbound_interface(
     bind_socket(socket, domain, &name, index)
 }
 
+/// PaoPao: binds one socket to interface `name` (a per-outbound
+/// `interface-name:`, e.g. another VPN's `utun6`), whatever the global
+/// binding. Errors when the interface does not exist.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub fn bind_socket_to_interface(
+    socket: &socket2::Socket,
+    domain: socket2::Domain,
+    name: &str,
+) -> io::Result<()> {
+    let index = interface_index(name)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("interface '{name}' does not exist"),
+        )
+    })?;
+    bind_socket(socket, domain, name, index)
+}
+
+/// TCP dial with the socket bound to interface `name` before `connect()`.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub async fn connect_tcp_on(
+    addr: std::net::SocketAddr,
+    name: &str,
+) -> io::Result<tokio::net::TcpStream> {
+    let domain = if addr.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    bind_socket_to_interface(&socket, domain, name)?;
+    socket.set_nonblocking(true)?;
+    tokio::net::TcpSocket::from_std_stream(socket.into())
+        .connect(addr)
+        .await
+}
+
+/// UDP socket bound to `local` and to interface `name`.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub fn bind_udp_on(local: std::net::SocketAddr, name: &str) -> io::Result<tokio::net::UdpSocket> {
+    let domain = if local.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    bind_socket_to_interface(&socket, domain, name)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&local.into())?;
+    tokio::net::UdpSocket::from_std(socket.into())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+pub async fn connect_tcp_on(
+    _addr: std::net::SocketAddr,
+    name: &str,
+) -> io::Result<tokio::net::TcpStream> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("interface binding ('{name}') is not available on this platform"),
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+pub fn bind_udp_on(_local: std::net::SocketAddr, name: &str) -> io::Result<tokio::net::UdpSocket> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("interface binding ('{name}') is not available on this platform"),
+    ))
+}
+
 /// Linux: `SO_BINDTODEVICE`, by name — one option covers both families.
 #[cfg(target_os = "linux")]
 fn bind_socket(

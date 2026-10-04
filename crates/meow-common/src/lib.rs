@@ -51,6 +51,7 @@ pub use metadata::{metadata_ip_literal, AddrDisplay, Metadata};
 pub use network::Network;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use outbound_iface::apply_outbound_interface;
+pub use outbound_iface::{bind_udp_on, connect_tcp_on};
 pub use outbound_iface::{install_outbound_interface, outbound_interface, OutboundIfaceGuard};
 pub use process_lookup::{
     disable_socket_table_cache, find_process, find_process_async, ProcessInfo,
