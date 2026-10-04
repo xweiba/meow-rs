@@ -126,40 +126,27 @@ async fn handle_http_inner(
         }
     };
 
-    // Auth check: verify Proxy-Authorization before dispatching.
-    let in_user: Option<String> = if let Some(auth) = auth
-        .filter(|a| !a.credentials.is_empty())
-        .filter(|a| !a.should_skip(&src_addr.ip()))
-    {
-        match parse_proxy_authorization(&request.headers) {
-            None => {
-                stream
-                    .write_all(
-                        b"HTTP/1.1 407 Proxy Authentication Required\r\n\
-                          Proxy-Authenticate: Basic realm=\"meow-rs\"\r\n\
-                          Connection: close\r\n\
-                          Content-Length: 0\r\n\r\n",
-                    )
-                    .await?;
-                return Err("proxy authentication required".into());
-            }
-            Some((username, password)) => {
-                if !auth.credentials.verify(&username, &password) {
-                    stream
-                        .write_all(
-                            b"HTTP/1.1 407 Proxy Authentication Required\r\n\
-                              Proxy-Authenticate: Basic realm=\"meow-rs\"\r\n\
-                              Connection: close\r\n\
-                              Content-Length: 0\r\n\r\n",
-                        )
-                        .await?;
-                    return Err(format!("HTTP auth failed for user {username:?}").into());
-                }
+    // Auth check before dispatching. Addresses in skip-auth-prefixes need
+    // no credentials — but credentials they do send are still checked and
+    // name the user, so `IN-USER` rules route local programs that ask for a
+    // particular policy through their proxy URL.
+    let creds = parse_proxy_authorization(&request.headers);
+    let in_user: Option<String> = match auth.filter(|a| !a.credentials.is_empty()) {
+        None => None,
+        Some(auth) => match creds {
+            Some((username, password)) if auth.credentials.verify(&username, &password) => {
                 Some(username)
             }
-        }
-    } else {
-        None
+            Some((username, _)) => {
+                stream.write_all(PROXY_AUTH_REQUIRED).await?;
+                return Err(format!("HTTP auth failed for user {username:?}").into());
+            }
+            None if auth.should_skip(&src_addr.ip()) => None,
+            None => {
+                stream.write_all(PROXY_AUTH_REQUIRED).await?;
+                return Err("proxy authentication required".into());
+            }
+        },
     };
 
     let method = request.method;
@@ -1925,6 +1912,11 @@ fn extract_path_from_url(url: &str) -> &str {
 
 /// Parse `Proxy-Authorization: Basic <base64>` from parsed request headers.
 /// Returns `(username, password)` on success.
+const PROXY_AUTH_REQUIRED: &[u8] = b"HTTP/1.1 407 Proxy Authentication Required\r\n\
+    Proxy-Authenticate: Basic realm=\"meow-rs\"\r\n\
+    Connection: close\r\n\
+    Content-Length: 0\r\n\r\n";
+
 fn parse_proxy_authorization(headers: &[HeaderField<'_>]) -> Option<(String, String)> {
     for header in headers {
         if !header.name.eq_ignore_ascii_case(b"proxy-authorization") {

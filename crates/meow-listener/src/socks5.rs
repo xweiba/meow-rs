@@ -100,9 +100,13 @@ async fn handle_socks5_inner(
     read_exact_before(stream, &mut methods_buf[..nmethods], deadline).await?;
     let methods = &methods_buf[..nmethods];
 
-    let in_user: Option<String> = if let Some(auth) = auth
-        .filter(|a| !a.credentials.is_empty())
-        .filter(|a| !a.should_skip(&src_addr.ip()))
+    // Addresses in skip-auth-prefixes need no credentials, but a client
+    // there that offers username/password still gets to use them: the user
+    // names the policy (`IN-USER` rules) for local programs too.
+    let auth = auth.filter(|a| !a.credentials.is_empty());
+    let skipped = auth.is_some_and(|a| a.should_skip(&src_addr.ip()));
+    let in_user: Option<String> = if let Some(auth) =
+        auth.filter(|_| !skipped || methods.contains(&USER_PASS_AUTH))
     {
         if !methods.contains(&USER_PASS_AUTH) {
             stream
