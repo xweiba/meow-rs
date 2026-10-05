@@ -260,3 +260,45 @@ async fn the_close_report_leaves_out_what_samples_carried() {
     assert_eq!(s.0.len(), 1);
     assert_eq!(s.0[0].bytes + sampled, got, "every byte counted once");
 }
+
+#[test]
+fn video_is_slow_below_what_hd_needs() {
+    // 500 KiB/s: fine for a download, a stutter for video.
+    let run = |pace: &mut Pace| {
+        let mut ev = Vec::new();
+        stream(
+            pace,
+            Instant::now(),
+            50 * KIB,
+            Duration::from_millis(100),
+            12_000 * KIB,
+            &mut ev,
+        );
+        slow_count(&ev)
+    };
+    assert_eq!(run(&mut Pace::default()), 0);
+    let mut video = Pace {
+        slow_below: Some(VIDEO_SLOW_BPS),
+        ..Pace::default()
+    };
+    assert_eq!(run(&mut video), 1);
+    assert!(is_video_site("googlevideo.com"));
+    assert!(!is_video_site("github.com"));
+}
+
+#[tokio::test]
+async fn a_cut_stream_fails_at_once_reading_or_writing() {
+    let (c, mut far, _seen) = metered();
+    let cut = Arc::new(Cut::default());
+    let mut c = c.cuttable(Arc::clone(&cut));
+    far.write_all(b"data").await.unwrap();
+    let mut buf = [0u8; 4];
+    c.read_exact(&mut buf).await.unwrap();
+    // A read waiting for more ends as soon as it is cut.
+    let (r, _) = tokio::join!(c.read(&mut buf), async {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cut.cut();
+    });
+    assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::ConnectionAborted);
+    assert!(c.write_all(b"x").await.is_err());
+}

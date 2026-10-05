@@ -10,8 +10,12 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
+
+use futures::task::AtomicWaker;
 
 use meow_common::ProxyConn;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -27,6 +31,53 @@ const BURST_GAP: Duration = Duration::from_millis(300);
 const WINDOW: Duration = Duration::from_secs(5);
 /// A bulk transfer slower than this (bytes/s while flowing) is slow.
 pub const SLOW_BULK_BPS: f64 = 200.0 * 1024.0;
+/// A video stream slower than this while flowing is slow: below ~8 Mbit/s
+/// HD stutters (4K wants far more), though it is no crawl for a download.
+pub const VIDEO_SLOW_BPS: f64 = 1024.0 * 1024.0;
+
+/// Video CDNs whose players fetch in ranged segments and reconnect on
+/// their own: a slow stream there may be cut so it comes back on a faster
+/// line (see [`Cut`]). Sites by [`super::stats::site_key`].
+const VIDEO_SITES: &[&str] = &[
+    "googlevideo.com",
+    "nflxvideo.net",
+    "ttvnw.net",
+    "vimeocdn.com",
+    "bilivideo.com",
+    "bilivideo.cn",
+    "dmcdn.net",
+];
+
+/// Whether `site` streams video in resumable segments ([`VIDEO_SITES`]).
+pub fn is_video_site(site: &str) -> bool {
+    VIDEO_SITES.contains(&site)
+}
+
+/// Ends a running connection from outside: a video stream stuck on a slow
+/// line is cut once a faster one is known, so the player's next request
+/// goes there (it resumes where it was). Reads and writes fail from then.
+#[derive(Default)]
+pub struct Cut {
+    cut: AtomicBool,
+    waker: AtomicWaker,
+}
+
+impl Cut {
+    pub fn cut(&self) {
+        self.cut.store(true, Ordering::Release);
+        self.waker.wake();
+    }
+
+    pub(super) fn check(&self, cx: &Context<'_>) -> Option<std::io::Error> {
+        self.waker.register(cx.waker());
+        self.cut.load(Ordering::Acquire).then(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "moved to a faster line",
+            )
+        })
+    }
+}
 /// Slow windows in a row before the line is called slow for the site.
 const SLOW_WINDOWS: u32 = 2;
 /// Active time between interim throughput samples of a long transfer.
@@ -42,7 +93,8 @@ pub const STALL: Duration = Duration::from_secs(10);
 pub enum Live {
     /// Throughput of a long transfer so far (since the last sample).
     Sample { bytes: u64, active_ms: f64 },
-    /// Two windows in a row below [`SLOW_BULK_BPS`] (once per connection).
+    /// Two windows in a row below the connection's floor ([`SLOW_BULK_BPS`],
+    /// [`VIDEO_SLOW_BPS`] for video; once per connection).
     Slow { rate: f64 },
     /// No first byte in time, or a bulk transfer stopped while the client
     /// waits. Already reported as a failure.
@@ -52,6 +104,9 @@ pub enum Live {
 /// The pace of one connection's received data.
 #[derive(Default)]
 pub struct Pace {
+    /// Slower than this (bytes/s while flowing) is slow; none:
+    /// [`SLOW_BULK_BPS`].
+    slow_below: Option<f64>,
     received: u64,
     last_read: Option<Instant>,
     /// The client wrote after the last received byte: it waits for an
@@ -98,7 +153,7 @@ impl Pace {
             self.last_rate = Some(rate);
             self.win_active = Duration::ZERO;
             self.win_bytes = 0;
-            if rate < SLOW_BULK_BPS {
+            if rate < self.slow_below.unwrap_or(SLOW_BULK_BPS) {
                 self.slow_windows += 1;
             } else {
                 self.slow_windows = 0;
@@ -155,6 +210,7 @@ pub struct MeteredConn {
     sampled_at: Option<Instant>,
     live: Option<Box<dyn Fn(Live) + Send + Sync>>,
     stall: Option<Pin<Box<Sleep>>>,
+    cut: Option<Arc<Cut>>,
 }
 
 impl MeteredConn {
@@ -177,7 +233,20 @@ impl MeteredConn {
             sampled_at: None,
             live: None,
             stall: None,
+            cut: None,
         }
+    }
+
+    /// Calls the transfer slow below `bps` (bytes/s while flowing).
+    pub fn slow_below(mut self, bps: f64) -> Self {
+        self.pace.slow_below = Some(bps);
+        self
+    }
+
+    /// Can be ended through `cut`.
+    pub fn cuttable(mut self, cut: Arc<Cut>) -> Self {
+        self.cut = Some(cut);
+        self
     }
 
     /// Also counts received bytes into the line's load.
@@ -265,6 +334,9 @@ impl AsyncRead for MeteredConn {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
+        if let Some(e) = self.cut.as_ref().and_then(|c| c.check(cx)) {
+            return Poll::Ready(Err(e));
+        }
         let before = buf.filled().len();
         let res = Pin::new(&mut self.inner).poll_read(cx, buf);
         let n = (buf.filled().len() - before) as u64;
@@ -296,6 +368,9 @@ impl AsyncWrite for MeteredConn {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        if let Some(e) = self.cut.as_ref().and_then(|c| c.check(cx)) {
+            return Poll::Ready(Err(e));
+        }
         if !buf.is_empty() && self.wrote_at.is_none() {
             self.wrote_at = Some(Instant::now());
         }

@@ -153,9 +153,11 @@ fn group(lines: &[Arc<Line>]) -> SmartGroup {
             loads: Loads::default(),
             started: std::sync::atomic::AtomicBool::new(true),
             // Echo lines answer a GET with the GET: a quick failed test.
-            speed_url: "http://127.0.0.1:9/__down".into(),
+            speed_urls: vec!["http://127.0.0.1:9/__down".into()],
             speed_tests: Arc::new(Semaphore::new(SPEED_PROBE_CONCURRENCY)),
             sticky: AtomicBool::new(false),
+            streams: parking_lot::Mutex::new(Vec::new()),
+            cut_at: parking_lot::Mutex::new(std::collections::HashMap::new()),
         }),
     }
 }
@@ -392,4 +394,27 @@ async fn sticky_keeps_every_site_on_one_line_and_moves_them_together() {
     a.down.store(true, Ordering::Relaxed);
     assert_eq!(roundtrip(&g, "chatgpt.com").await.unwrap(), "b");
     assert_eq!(g.unwrap_proxy(&helper, false).unwrap().name(), "b");
+}
+
+#[tokio::test]
+async fn slow_video_streams_are_cut_over_once_per_cooldown() {
+    let a = Line::new("a", 1);
+    let b = Line::new("b", 1);
+    let g = group(&[Arc::clone(&a), Arc::clone(&b)]);
+    let me = &g.shared;
+    let slow = me.stream("googlevideo.com", "a");
+    let other_line = me.stream("googlevideo.com", "b");
+    let other_site = me.stream("example.com", "a");
+    me.cut_over("googlevideo.com", "a", "b", 30.0);
+    let is_cut = |c: &Arc<Cut>| {
+        let w = futures::task::noop_waker();
+        c.check(&std::task::Context::from_waker(&w)).is_some()
+    };
+    assert!(is_cut(&slow));
+    assert!(!is_cut(&other_line), "only the slow line's streams");
+    assert!(!is_cut(&other_site), "only the site's streams");
+    // Again within the cooldown: left alone (no flapping).
+    let again = me.stream("googlevideo.com", "a");
+    me.cut_over("googlevideo.com", "a", "b", 30.0);
+    assert!(!is_cut(&again));
 }

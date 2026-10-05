@@ -43,7 +43,7 @@ use tokio::sync::{watch, Semaphore};
 use tracing::{debug, info, warn};
 
 use self::load::Loads;
-use self::metered::{Live, MeteredConn};
+use self::metered::{is_video_site, Cut, Live, MeteredConn, VIDEO_SLOW_BPS};
 use self::stats::{site_key, Exit, Outcome, Store};
 use super::UsageTracker;
 
@@ -66,8 +66,28 @@ const SPEED_PROBE_CONCURRENCY: usize = 2;
 const SPEED_PROBE_BYTES: u64 = 2 << 20;
 /// … for at most this long.
 const SPEED_PROBE_TIME: Duration = Duration::from_secs(8);
-/// A large file served close to every line's exit.
-const SPEED_URL: &str = "https://speed.cloudflare.com/__down?bytes=2097152";
+/// Large files served close to every line's exit, tried in order: the next
+/// one when a server answers with an error status (moved, refused), not
+/// when the line fails. Google's download CDN first (one hop from where
+/// video comes from; long-lived paths, no redirects; several, should one
+/// move); a GitHub raw file next (under 1 MB: a rougher figure);
+/// Cloudflare's speed endpoint last: it answered 403 through many lines
+/// and crawled through others.
+const SPEED_URLS: &[&str] = &[
+    "https://dl.google.com/chrome/mac/universal/stable/googlechrome.dmg",
+    "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb",
+    "https://dl.google.com/chrome/install/googlechromestandaloneenterprise64.msi",
+    "https://dl.google.com/android/repository/platform-tools-latest-darwin.zip",
+    "https://dl.google.com/android/repository/platform-tools-latest-linux.zip",
+    "https://dl.google.com/go/go1.22.0.src.tar.gz",
+    "https://raw.githubusercontent.com/torvalds/linux/master/MAINTAINERS",
+    "https://speed.cloudflare.com/__down?bytes=2097152",
+];
+/// A faster line must be this many times the slow one before a video
+/// stream is cut over to it.
+const CUT_GAIN: f64 = 2.0;
+/// A site's streams are cut at most once this often (no flapping).
+const CUT_COOLDOWN: Duration = Duration::from_secs(180);
 
 /// Answers with the caller's address and country (`ip=…`, `loc=…`);
 /// reachable through practically every line.
@@ -92,13 +112,17 @@ struct Shared {
     loads: Loads,
     /// Upkeep (probes, the load sampler) runs: from the first dial on.
     started: std::sync::atomic::AtomicBool,
-    /// Where speed tests download from.
-    speed_url: String,
+    /// Where speed tests download from ([`SPEED_URLS`]).
+    speed_urls: Vec<String>,
     /// Bounds the speed tests running at once.
     speed_tests: Arc<Semaphore>,
     /// `strategy: sticky` (PaoPao): every site shares one line, so a
     /// service and its helpers (sign-in, captcha, telemetry) see one exit.
     sticky: std::sync::atomic::AtomicBool,
+    /// Running video streams (site, line) that may be cut over.
+    streams: parking_lot::Mutex<Vec<(String, String, Weak<Cut>)>>,
+    /// When each site's streams were cut last.
+    cut_at: parking_lot::Mutex<std::collections::HashMap<String, Instant>>,
 }
 
 impl Drop for Shared {
@@ -157,9 +181,11 @@ impl SmartGroup {
             reprobe: AtomicI64::new(0),
             loads: Loads::default(),
             started: std::sync::atomic::AtomicBool::new(false),
-            speed_url: SPEED_URL.to_string(),
+            speed_urls: SPEED_URLS.iter().map(|u| u.to_string()).collect(),
             speed_tests: Arc::new(Semaphore::new(SPEED_PROBE_CONCURRENCY)),
             sticky: std::sync::atomic::AtomicBool::new(false),
+            streams: parking_lot::Mutex::new(Vec::new()),
+            cut_at: parking_lot::Mutex::new(std::collections::HashMap::new()),
         });
         Self { shared }
     }
@@ -460,14 +486,68 @@ impl Shared {
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             let me = Arc::clone(self);
             let (site, line) = (site.to_string(), line.to_string());
-            rt.spawn(async move { me.speed_probe(&site, &line).await });
+            rt.spawn(async move { me.speed_probe(&site, &line, rate).await });
+        }
+    }
+
+    /// `line`'s download speed from the first of [`SPEED_URLS`] that serves
+    /// (a server's error status tries the next; the line's own failure
+    /// ends it).
+    async fn download_rate(&self, line: &dyn ProxyAdapter) -> std::result::Result<f64, String> {
+        let mut last = "no speed test url".to_string();
+        for url in &self.speed_urls {
+            match crate::health::download_rate(line, url, SPEED_PROBE_BYTES, SPEED_PROBE_TIME).await
+            {
+                Err(e) if e.starts_with("unexpected status") => last = format!("{url}: {e}"),
+                r => return r,
+            }
+        }
+        Err(last)
+    }
+
+    /// A video stream of `site` on `line`, to cut over later if needed.
+    fn stream(&self, site: &str, line: &str) -> Arc<Cut> {
+        let cut = Arc::new(Cut::default());
+        let mut all = self.streams.lock();
+        all.retain(|(_, _, c)| c.strong_count() > 0);
+        all.push((site.to_string(), line.to_string(), Arc::downgrade(&cut)));
+        cut
+    }
+
+    /// Ends `site`'s running streams on `line` (a line `gain` times faster
+    /// is known): the players reconnect, and their new connections plan
+    /// afresh, away from the slow line. At most once per [`CUT_COOLDOWN`].
+    fn cut_over(&self, site: &str, line: &str, to: &str, gain: f64) {
+        {
+            let mut at = self.cut_at.lock();
+            let now = Instant::now();
+            at.retain(|_, t| now.duration_since(*t) < CUT_COOLDOWN);
+            if at.contains_key(site) {
+                return;
+            }
+            at.insert(site.to_string(), now);
+        }
+        let mut n = 0;
+        for (s, l, c) in self.streams.lock().iter() {
+            if s == site && l == line {
+                if let Some(c) = c.upgrade() {
+                    c.cut();
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            info!(
+                "{}: cutting {n} {site} stream(s) off {line}: {to} is {gain:.1}x faster",
+                self.name
+            );
         }
     }
 
     /// Downloads a test file through the best few lines for `site` other
     /// than `slow`; their speeds go into the records, and the fastest
     /// becomes the site's line if it hasn't settled on another meanwhile.
-    async fn speed_probe(self: &Arc<Self>, site: &str, slow: &str) {
+    async fn speed_probe(self: &Arc<Self>, site: &str, slow: &str, slow_rate: f64) {
         let mut others = self.candidates(false);
         others.retain(|l| l != slow);
         let mut lines = self.store.plan(site, &others).lines;
@@ -483,13 +563,7 @@ impl Shared {
                     return None;
                 };
                 let start = Instant::now();
-                let r = crate::health::download_rate(
-                    p.as_ref(),
-                    &me.speed_url,
-                    SPEED_PROBE_BYTES,
-                    SPEED_PROBE_TIME,
-                )
-                .await;
+                let r = me.download_rate(p.as_ref()).await;
                 match r {
                     Ok(rate) => Some((line, rate, start.elapsed())),
                     Err(e) => {
@@ -528,6 +602,13 @@ impl Shared {
                 rate / 1024.0
             );
             self.store.adopt(site, &line);
+            // A video stream stays on its line for as long as it lasts:
+            // cut it, so the player comes back on the faster one (the
+            // records now rank it first).
+            let gain = rate / slow_rate.max(1.0);
+            if is_video_site(site) && rate >= VIDEO_SLOW_BPS && gain >= CUT_GAIN {
+                self.cut_over(site, slow, &line, gain);
+            }
         }
     }
 
@@ -729,13 +810,18 @@ impl ProxyAdapter for SmartGroup {
                     let live_owner = Arc::clone(me);
                     let load = me.loads.of(&line);
                     let (live_site, live_line) = (site.clone(), line.clone());
-                    return Ok(Box::new(
-                        MeteredConn::new(conn, connect, move |r| {
-                            store_owner.store.report(&site, &line, &r);
-                        })
-                        .counting(load)
-                        .watching(move |ev| live_owner.live(&live_site, &live_line, ev)),
-                    ));
+                    let stream = is_video_site(&site).then(|| me.stream(&site, &line));
+                    let mut conn = MeteredConn::new(conn, connect, move |r| {
+                        store_owner.store.report(&site, &line, &r);
+                    })
+                    .counting(load)
+                    .watching(move |ev| live_owner.live(&live_site, &live_line, ev));
+                    // Video: slow below what HD needs, and cut over to a
+                    // faster line once one is known.
+                    if let Some(cut) = stream {
+                        conn = conn.slow_below(VIDEO_SLOW_BPS).cuttable(cut);
+                    }
+                    return Ok(Box::new(conn));
                 }
                 Err(e) => errs.push(e.to_string()),
             }
