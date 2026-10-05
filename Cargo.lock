@@ -2876,6 +2876,7 @@ dependencies = [
  "meow-trie",
  "parking_lot",
  "rand 0.9.4",
+ "regex",
  "serde",
  "serde_json",
  "smallvec",

@@ -38,6 +38,7 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 smol_str = { workspace = true }
+regex = { workspace = true }
 # Used by `host_resolver_hook` on Android. The module is
 # `#[cfg(target_os = "android")]` so this dep is dead weight on
 # iOS/desktop, but moving it under `target.'cfg(target_os = "android")'`

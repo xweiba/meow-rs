@@ -191,6 +191,20 @@ impl DnsServer {
             .await;
         }
 
+        // `paopao-hosts:` (ordered, first match wins) decides before the
+        // hosts trie and fake-IP. A pinned address of the other family is an
+        // empty NOERROR; a pass-through entry continues below unchanged.
+        if let Some(addr) = resolver.paopao_hosts_address(&domain) {
+            return Ok(Self::build_pinned_answer(
+                id,
+                data,
+                flags,
+                question_len,
+                qtype,
+                addr,
+            ));
+        }
+
         // Check hosts trie first. If the domain is present in the hosts table
         // but has no IPs of the queried family, return NOERROR with zero answers
         // rather than NXDOMAIN — clients may retry on NXDOMAIN but not on an
@@ -323,7 +337,17 @@ impl DnsServer {
             // `ipv6: false`. (The resolver-internal `lookup_ipv6_local`
             // suppresses v6 first, which is correct for name resolution but
             // not on the wire.)
-            if let Some(all_ips) = resolver.lookup_hosts_all(&domain) {
+            if let Some(addr) = resolver.paopao_hosts_address(&domain) {
+                // Same as handle_query: `paopao-hosts:` decides first.
+                LocalAnswer::Answer(Self::build_pinned_answer(
+                    id,
+                    data,
+                    flags,
+                    question_len,
+                    qtype,
+                    addr,
+                ))
+            } else if let Some(all_ips) = resolver.lookup_hosts_all(&domain) {
                 let ip = if qtype == 1 {
                     all_ips.iter().find(|ip| ip.is_ipv4()).copied()
                 } else {
@@ -542,7 +566,11 @@ impl DnsServer {
                     if !matches!(&rec.data, RData::HTTPS(_) | RData::SVCB(_)) {
                         continue;
                     }
-                    let strip_v4_hint = resolver.fake_ip_active_for(&record_owner_text(&rec.name));
+                    // A `paopao-hosts:` pin rewrites the name's address;
+                    // the record's real-address hints would bypass it.
+                    let owner = record_owner_text(&rec.name);
+                    let pinned = resolver.paopao_hosts_address(&owner).is_some();
+                    let strip_v4_hint = pinned || resolver.fake_ip_active_for(&owner);
                     let strip_v6_hint = strip_v4_hint || strip_ipv6_hint;
                     if strip_v6_hint {
                         *rec = strip_svc_ip_hints(rec, strip_v4_hint, strip_v6_hint);
@@ -676,6 +704,31 @@ impl DnsServer {
         buf[header_pos + 11] = 0x01;
         buf.extend_from_slice(OPT_RECORD);
         debug_assert_eq!(buf.len(), len + OPT_RECORD.len());
+    }
+
+    /// Answer for a `paopao-hosts:` pin: the address when its family matches
+    /// the query (A = 1, AAAA = 28), otherwise NOERROR with zero answers.
+    fn build_pinned_answer(
+        id: u16,
+        query: &[u8],
+        flags: u16,
+        question_len: usize,
+        qtype: u16,
+        addr: std::net::IpAddr,
+    ) -> Vec<u8> {
+        if (qtype == 1) == addr.is_ipv4() {
+            Self::build_response(
+                id,
+                query,
+                flags,
+                question_len,
+                qtype,
+                addr,
+                DEFAULT_ANSWER_TTL_SECS,
+            )
+        } else {
+            Self::build_noerror_empty(id, query, flags, question_len)
+        }
     }
 
     fn build_response(
@@ -2774,6 +2827,98 @@ mod tests {
         let resp = answered(DnsServer::try_answer_local(&q, &resolver));
         assert_eq!(&resp[0..2], &[0x12, 0x34], "ID echoed");
         assert_eq!(&resp[resp.len() - 4..], &[10, 0, 0, 7], "hosts A record");
+    }
+
+    /// `paopao-hosts:` beats the classic `hosts:` trie and fake-IP; a family
+    /// mismatch is an empty NOERROR; a pass-through entry falls back to the
+    /// classic hosts trie. Both the inline probe and the task path agree.
+    #[tokio::test]
+    async fn paopao_hosts_answers_before_hosts_and_fake_ip() {
+        use crate::paopao_hosts::{PaopaoHostRule, PaopaoHosts};
+        let mut hosts = meow_trie::DomainTrie::new();
+        let classic = std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7));
+        hosts.insert(
+            "node1.weiba.pp.ua",
+            crate::resolver::HostEntry::Addresses(vec![classic]),
+        );
+        hosts.insert(
+            "pve.weiba.pp.ua",
+            crate::resolver::HostEntry::Addresses(vec![classic]),
+        );
+        let mut resolver = crate::resolver::Resolver::new(
+            vec!["192.0.2.1:53".parse().unwrap()],
+            Vec::new(),
+            DnsMode::FakeIp,
+            hosts,
+            true,
+            true,
+        );
+        resolver.set_fakeip_v4(std::sync::Arc::new(
+            crate::fakeip::Pool::new(
+                "198.18.0.0/16".parse().unwrap(),
+                std::sync::Arc::new(crate::fakeip::MemoryStore::new(1024)),
+            )
+            .unwrap(),
+        ));
+        let mut list = PaopaoHosts::new();
+        list.push(PaopaoHostRule::new("wildcard", "node*.weiba.pp.ua", None).unwrap());
+        list.push(
+            PaopaoHostRule::new(
+                "exact",
+                "pve.weiba.pp.ua",
+                Some("192.168.186.215".parse().unwrap()),
+            )
+            .unwrap(),
+        );
+        list.push(
+            PaopaoHostRule::new(
+                "wildcard",
+                "*.weiba.pp.ua",
+                Some("192.168.186.230".parse().unwrap()),
+            )
+            .unwrap(),
+        );
+        resolver.set_paopao_hosts(Some(std::sync::Arc::new(list)));
+
+        // Pinned A beats the classic hosts entry for the same name.
+        let q = query_named(1, "pve.weiba.pp.ua", 1);
+        let resp = answered(DnsServer::try_answer_local(&q, &resolver));
+        assert_eq!(&resp[resp.len() - 4..], &[192, 168, 186, 215]);
+        let resp = DnsServer::handle_query(&q, &resolver).await.unwrap();
+        assert_eq!(&resp[resp.len() - 4..], &[192, 168, 186, 215]);
+
+        // Pinned A beats fake-IP synthesis.
+        let q = query_named(2, "a.b.weiba.pp.ua", 1);
+        let resp = answered(DnsServer::try_answer_local(&q, &resolver));
+        assert_eq!(&resp[resp.len() - 4..], &[192, 168, 186, 230]);
+
+        // AAAA for an IPv4 pin: NOERROR, zero answers.
+        let q = query_named(3, "x.weiba.pp.ua", 28);
+        for resp in [
+            answered(DnsServer::try_answer_local(&q, &resolver)),
+            DnsServer::handle_query(&q, &resolver).await.unwrap(),
+        ] {
+            let msg = Message::from_vec(&resp).unwrap();
+            assert_eq!(msg.metadata.response_code, ResponseCode::NoError);
+            assert!(msg.answers.is_empty());
+        }
+
+        // Pass-through: the classic hosts entry still answers.
+        let q = query_named(4, "node1.weiba.pp.ua", 1);
+        let resp = answered(DnsServer::try_answer_local(&q, &resolver));
+        assert_eq!(&resp[resp.len() - 4..], &[10, 0, 0, 7]);
+
+        // Pass-through without a hosts entry: fake-IP as usual.
+        let q = query_named(5, "node2.weiba.pp.ua", 1);
+        let resp = answered(DnsServer::try_answer_local(&q, &resolver));
+        assert_eq!(&resp[resp.len() - 4..resp.len() - 2], &[198, 18]);
+        assert!(resolver.fake_ip_active_for("node2.weiba.pp.ua"));
+        assert!(!resolver.fake_ip_active_for("x.weiba.pp.ua"));
+
+        // No match (the apex): unchanged, fake-IP.
+        let q = query_named(6, "weiba.pp.ua", 1);
+        let resp = answered(DnsServer::try_answer_local(&q, &resolver));
+        assert_eq!(&resp[resp.len() - 4..resp.len() - 2], &[198, 18]);
     }
 
     #[test]

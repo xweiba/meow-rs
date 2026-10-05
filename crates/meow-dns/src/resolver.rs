@@ -260,6 +260,10 @@ pub struct Resolver {
     /// Whether IPv6 resolution is enabled. Driven by the top-level `ipv6`
     /// config flag and fixed at construction time.
     ipv6: bool,
+    /// PaoPao ordered hosts (`paopao-hosts:`): consulted before the `hosts:`
+    /// trie and fake-IP. `None` when the list is empty, so the common case
+    /// costs one branch.
+    paopao_hosts: Option<Arc<crate::paopao_hosts::PaopaoHosts>>,
 }
 
 impl Resolver {
@@ -730,6 +734,7 @@ impl Resolver {
             fakeip_skipper: None,
             fakeip_ttl: DEFAULT_FAKE_IP_TTL,
             ipv6,
+            paopao_hosts: None,
         }
     }
 
@@ -1001,6 +1006,7 @@ impl Resolver {
             fakeip_skipper: None,
             fakeip_ttl: DEFAULT_FAKE_IP_TTL,
             ipv6,
+            paopao_hosts: None,
         })
     }
 
@@ -1107,6 +1113,9 @@ impl Resolver {
     /// `is_local_resource_error` intact instead of decaying into a
     /// "host unresolvable" member-health failure (#682).
     pub async fn resolve_ips(&self, host: &str) -> io::Result<Option<Vec<IpAddr>>> {
+        if let Some(ip) = self.paopao_enabled_address(host) {
+            return Ok(Some(vec![ip]));
+        }
         let lookup_host = if self.use_hosts {
             match self.lookup_hosts_entry(host) {
                 Some(HostsLookup::Addresses(ips)) => {
@@ -1227,6 +1236,9 @@ impl Resolver {
     /// known keeps `hosts:` mappings and warm cache entries authoritative
     /// for proxy-server hostnames even on that path.
     pub fn resolve_ips_local(&self, host: &str) -> Option<Vec<IpAddr>> {
+        if let Some(ip) = self.paopao_enabled_address(host) {
+            return Some(vec![ip]);
+        }
         let lookup_host = if self.use_hosts {
             match self.lookup_hosts_entry(host) {
                 Some(HostsLookup::Addresses(ips)) => {
@@ -1294,6 +1306,14 @@ impl Resolver {
     /// serve loop uses this to answer warm queries inline instead of
     /// queueing them behind slow upstream lookups (issue #515).
     pub(crate) fn lookup_ipv4_local<'a>(&'a self, host: &'a str) -> LocalLookup<'a> {
+        // `paopao-hosts:` decides first; a family mismatch is NODATA.
+        if let Some(ip) = self.paopao_hosts_address(host) {
+            return LocalLookup::Decided(if ip.is_ipv4() {
+                AddressLookupResult::Answer(ip, HOSTS_ANSWER_TTL)
+            } else {
+                AddressLookupResult::NoData
+            });
+        }
         if self.use_hosts {
             match self.lookup_hosts_entry(host) {
                 Some(HostsLookup::Addresses(ips)) => {
@@ -1359,6 +1379,13 @@ impl Resolver {
     pub(crate) fn lookup_ipv6_local<'a>(&'a self, host: &'a str) -> LocalLookup<'a> {
         if !self.ipv6 {
             return LocalLookup::Decided(AddressLookupResult::NoData);
+        }
+        if let Some(ip) = self.paopao_hosts_address(host) {
+            return LocalLookup::Decided(if ip.is_ipv6() {
+                AddressLookupResult::Answer(ip, HOSTS_ANSWER_TTL)
+            } else {
+                AddressLookupResult::NoData
+            });
         }
         if self.use_hosts {
             match self.lookup_hosts_entry(host) {
@@ -1501,6 +1528,14 @@ impl Resolver {
             Some(FamilyAnswer::NxDomain(_)) => AddressLookupResult::NxDomain,
             Some(FamilyAnswer::Failed) | None => AddressLookupResult::Failed,
         }
+    }
+
+    /// `paopao-hosts:` address for `host` when its family is enabled. A
+    /// pinned address of the disabled family falls through to the normal
+    /// path, same as a `hosts:` entry (review issue E).
+    fn paopao_enabled_address(&self, host: &str) -> Option<IpAddr> {
+        self.paopao_hosts_address(host)
+            .filter(|ip| self.ipv6 || ip.is_ipv4())
     }
 
     fn skipper_bypasses(&self, host: &str) -> bool {
@@ -1883,8 +1918,12 @@ impl Resolver {
         if self.mode != DnsMode::FakeIp {
             return false;
         }
-        // Explicit hosts-trie mappings are never rewritten to fake IPs.
+        // Explicit hosts-trie / `paopao-hosts:` mappings are never
+        // rewritten to fake IPs.
         if self.use_hosts && self.hosts.search(host).is_some() {
+            return false;
+        }
+        if self.paopao_hosts_address(host).is_some() {
             return false;
         }
         (self.fakeip_v4.is_some() || self.fakeip_v6.is_some()) && !self.skipper_bypasses(host)
@@ -1991,6 +2030,24 @@ impl Resolver {
         self.fakeip_v6 = Some(pool);
     }
     /// Install a bypass skipper.
+    /// Install the PaoPao ordered hosts list (`paopao-hosts:`). An empty
+    /// list is stored as `None` so lookups skip it with one branch.
+    pub fn set_paopao_hosts(&mut self, hosts: Option<Arc<crate::paopao_hosts::PaopaoHosts>>) {
+        self.paopao_hosts = hosts.filter(|h| !h.is_empty());
+    }
+
+    /// The installed PaoPao ordered hosts list, if any.
+    pub fn paopao_hosts(&self) -> Option<&Arc<crate::paopao_hosts::PaopaoHosts>> {
+        self.paopao_hosts.as_ref()
+    }
+
+    /// The address `paopao-hosts:` rewrites `host` to — `None` when the
+    /// first matching entry is a pass-through or nothing matches (the
+    /// caller then behaves exactly as without `paopao-hosts:`).
+    pub fn paopao_hosts_address(&self, host: &str) -> Option<IpAddr> {
+        self.paopao_hosts.as_ref()?.address_for(host)
+    }
+
     pub fn set_fakeip_skipper(&mut self, skipper: Skipper) {
         self.fakeip_skipper = Some(skipper);
     }
@@ -2225,6 +2282,94 @@ mod tests {
         let client = Resolver::build_single_resolver(&url, &resolved);
 
         assert_eq!(client.upstream_label(), "tls://8.8.8.8#dns.google");
+    }
+
+    fn weiba_paopao_hosts() -> Arc<crate::paopao_hosts::PaopaoHosts> {
+        use crate::paopao_hosts::{PaopaoHostRule, PaopaoHosts};
+        let mut list = PaopaoHosts::new();
+        list.push(PaopaoHostRule::new("wildcard", "node*.weiba.pp.ua", None).unwrap());
+        list.push(
+            PaopaoHostRule::new(
+                "exact",
+                "pve.weiba.pp.ua",
+                Some("192.168.186.215".parse().unwrap()),
+            )
+            .unwrap(),
+        );
+        list.push(
+            PaopaoHostRule::new(
+                "wildcard",
+                "*.weiba.pp.ua",
+                Some("192.168.186.230".parse().unwrap()),
+            )
+            .unwrap(),
+        );
+        list.push(
+            PaopaoHostRule::new("exact", "v6.test", Some("fd00::5".parse().unwrap())).unwrap(),
+        );
+        Arc::new(list)
+    }
+
+    #[tokio::test]
+    async fn paopao_hosts_answers_before_classic_hosts() {
+        let classic = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7));
+        let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
+        hosts.insert("pve.weiba.pp.ua", vec![classic].into());
+        hosts.insert("node1.weiba.pp.ua", vec![classic].into());
+        let mut resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true, true);
+        resolver.set_paopao_hosts(Some(weiba_paopao_hosts()));
+
+        let pve = IpAddr::V4(Ipv4Addr::new(192, 168, 186, 215));
+        let star = IpAddr::V4(Ipv4Addr::new(192, 168, 186, 230));
+        assert_eq!(resolver.lookup_ipv4("pve.weiba.pp.ua").await, Some(pve));
+        assert_eq!(
+            resolver.resolve_ips("pve.weiba.pp.ua").await.unwrap(),
+            Some(vec![pve])
+        );
+        assert_eq!(
+            resolver.resolve_ips_local("x.weiba.pp.ua"),
+            Some(vec![star])
+        );
+        assert_eq!(resolver.lookup_ipv4("a.b.weiba.pp.ua").await, Some(star));
+        // Family mismatch: NODATA, not a fall-through to upstream/hosts.
+        assert!(matches!(
+            resolver.lookup_ipv6_result("x.weiba.pp.ua").await,
+            AddressLookupResult::NoData
+        ));
+        assert!(matches!(
+            resolver.lookup_ipv4_result("v6.test").await,
+            AddressLookupResult::NoData
+        ));
+        assert_eq!(
+            resolver.lookup_ipv6("v6.test").await,
+            Some("fd00::5".parse().unwrap())
+        );
+        // Pass-through: the classic hosts trie answers as before.
+        assert_eq!(
+            resolver.lookup_ipv4("node1.weiba.pp.ua").await,
+            Some(classic)
+        );
+        assert_eq!(
+            resolver.resolve_ips("node1.weiba.pp.ua").await.unwrap(),
+            Some(vec![classic])
+        );
+        // No match (apex): unchanged — no hosts entry, no upstream → None.
+        assert_eq!(resolver.resolve_ips_local("weiba.pp.ua"), None);
+        assert_eq!(resolver.paopao_hosts_address("weiba.pp.ua"), None);
+    }
+
+    #[test]
+    fn paopao_hosts_empty_list_is_not_installed() {
+        let mut resolver = Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::Normal,
+            DomainTrie::new(),
+            true,
+            true,
+        );
+        resolver.set_paopao_hosts(Some(Arc::new(crate::paopao_hosts::PaopaoHosts::new())));
+        assert!(resolver.paopao_hosts().is_none());
     }
 
     #[test]

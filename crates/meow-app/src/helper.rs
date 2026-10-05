@@ -10,7 +10,11 @@
 //!   this binary as the core (`-f config -d dir`), replacing a running one;
 //! - `{"op":"stop"}`; `{"op":"status"}` (`running`);
 //! - `{"op":"relocate"}` (macOS): restarts `locationd`, so the system asks
-//!   for its location again (virtual location takes effect at once).
+//!   for its location again (virtual location takes effect at once);
+//! - `{"op":"wifi"}` (macOS): the current Wi-Fi network name, read as root
+//!   with `wdutil info` (recent macOS redacts it for apps without Location
+//!   permission) — `{"ok":true,"ssid":"Name"}`, or `"ssid":null` when not
+//!   on Wi-Fi / not found; `{"ok":false}` on other systems.
 //!
 //! `meow service-call --socket PATH --op start --config … --dir …` is the
 //! client: prints the reply, exits non-zero only when the helper can't be
@@ -175,6 +179,7 @@ fn handle(core: &mut Core, stream: UnixStream, uid: u32) -> Result<()> {
         }
         "status" => json!({"ok": true, "running": core.running()}),
         "relocate" => relocate(),
+        "wifi" => wifi(),
         other => json!({"ok": false, "error": format!("unknown op '{other}'")}),
     };
     let mut s = stream;
@@ -193,6 +198,59 @@ fn relocate() -> Value {
         Ok(s) => json!({"ok": false, "error": format!("killall locationd: {s}")}),
         Err(e) => json!({"ok": false, "error": e.to_string()}),
     }
+}
+
+/// macOS: the current Wi-Fi SSID from `wdutil info` (needs root, which the
+/// helper is). Never fails the service: anything unexpected is `null`.
+fn wifi() -> Value {
+    #[cfg(target_os = "macos")]
+    {
+        let ssid = Command::new("/usr/bin/wdutil")
+            .arg("info")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .and_then(|o| parse_wdutil_ssid(&String::from_utf8_lossy(&o.stdout)));
+        json!({"ok": true, "ssid": ssid})
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        json!({"ok": false, "error": "macOS only"})
+    }
+}
+
+/// The `SSID : <name>` line of the `WIFI` section of `wdutil info`. `None`
+/// when there is no such section/line, or the value says there is no
+/// network (`None`, empty) or is redacted (`<redacted>`).
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    allow(dead_code, reason = "only the macOS wifi op calls it")
+)]
+fn parse_wdutil_ssid(text: &str) -> Option<String> {
+    let mut in_wifi = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = t.split_once(':') else {
+            // A section title (`WIFI`, `BLUETOOTH`, …) or a rule line made
+            // of dashes: only titles switch sections.
+            if t.chars().any(char::is_alphabetic) {
+                in_wifi = t.eq_ignore_ascii_case("WIFI") || t.eq_ignore_ascii_case("WI-FI");
+            }
+            continue;
+        };
+        if in_wifi && key.trim() == "SSID" {
+            let v = value.trim();
+            return match v {
+                "" | "None" | "<redacted>" | "<SSID Redacted>" => None,
+                v => Some(v.to_owned()),
+            };
+        }
+    }
+    None
 }
 
 /// `meow service`: serves [`uid`] on [`socket`] until killed.
@@ -253,6 +311,54 @@ mod tests {
         );
     }
 
+    const WDUTIL_SAMPLE: &str = "\
+————————————————————————————————————————————————————————————————————————
+NETWORK
+————————————————————————————————————————————————————————————————————————
+    Primary IPv4         : en0 (Wi-Fi / 0F3A9B2C-1D2E-4F50-8A6B-7C8D9E0F1A2B)
+                         : 192.168.186.42
+    DNS                  : 192.168.186.1
+————————————————————————————————————————————————————————————————————————
+WIFI
+————————————————————————————————————————————————————————————————————————
+    MAC Address          : 3c:22:fb:00:11:22 (hw=3c:22:fb:00:11:22)
+    Interface Name       : en0
+    Power                : On [On]
+    Op Mode              : STA
+    SSID                 : Home Net: 5G
+    BSSID                : a0:b1:c2:d3:e4:f5
+    RSSI                 : -51 dBm
+    Noise                : -94 dBm
+    Tx Rate              : 866.0 Mbps
+    Security             : WPA2 Personal
+    Channel              : 5g149/80
+————————————————————————————————————————————————————————————————————————
+BLUETOOTH
+————————————————————————————————————————————————————————————————————————
+    Power                : On
+    SSID                 : not-wifi
+";
+
+    #[test]
+    fn wdutil_ssid_is_read_from_the_wifi_section() {
+        assert_eq!(
+            parse_wdutil_ssid(WDUTIL_SAMPLE).as_deref(),
+            Some("Home Net: 5G")
+        );
+        let off = WDUTIL_SAMPLE.replace(
+            "SSID                 : Home Net: 5G",
+            "SSID                 : None",
+        );
+        assert_eq!(parse_wdutil_ssid(&off), None, "not associated");
+        let redacted = WDUTIL_SAMPLE.replace("Home Net: 5G", "<redacted>");
+        assert_eq!(parse_wdutil_ssid(&redacted), None);
+        // No WIFI section: the BLUETOOTH `SSID` line is not taken.
+        let no_wifi = WDUTIL_SAMPLE.replace("\nWIFI\n", "\nOTHER\n");
+        assert_eq!(parse_wdutil_ssid(&no_wifi), None);
+        assert_eq!(parse_wdutil_ssid(""), None);
+        assert_eq!(parse_wdutil_ssid("garbage\n:::\n"), None);
+    }
+
     #[test]
     fn serves_the_owner_and_answers_each_op() {
         let dir = tempfile::tempdir().unwrap();
@@ -285,6 +391,13 @@ mod tests {
             "relative paths refused"
         );
         assert_eq!(ask(r#"{"op":"nope"}"#)["ok"], json!(false));
+        let wifi = ask(r#"{"op":"wifi"}"#);
+        if cfg!(target_os = "macos") {
+            assert_eq!(wifi["ok"], json!(true));
+            assert!(wifi["ssid"].is_null() || wifi["ssid"].is_string());
+        } else {
+            assert_eq!(wifi["ok"], json!(false));
+        }
         assert_eq!(ask(r#"{"op":"stop"}"#), json!({"ok": true}));
         assert_eq!(
             std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777,

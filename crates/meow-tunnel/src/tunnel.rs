@@ -11,6 +11,7 @@ use meow_proxy::DirectAdapter;
 use parking_lot::{Mutex, RwLock};
 use smol_str::SmolStr;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use tracing::{debug, info, warn};
@@ -259,7 +260,25 @@ impl TunnelInner {
     ///   re-runs `TCPSniff` on exactly this failure; promoting the
     ///   observed name matches that rescue and additionally clears the
     ///   stale `dst_ip` upstream would keep.
+    ///
+    /// Last, a `paopao-hosts:` entry with an address for the (possibly
+    /// just recovered) host rewrites `dst_ip` to that address, so rules see
+    /// it and a DIRECT dial connects to it instead of re-resolving the
+    /// name. LAN addresses are then routed DIRECT by
+    /// [`Self::resolve_proxy`] / [`Self::resolve_proxy_lazy`].
     pub fn pre_handle_metadata(&self, metadata: &mut Metadata) -> PreHandleVerdict {
+        let resolver = self.resolver();
+        let verdict = Self::pre_handle_fake_ip(&resolver, metadata);
+        if verdict == PreHandleVerdict::Continue && !metadata.host.is_empty() {
+            if let Some(ip) = resolver.paopao_hosts_address(&metadata.host) {
+                debug!("paopao-hosts: {} → {ip}", metadata.host);
+                metadata.dst_ip = Some(ip);
+            }
+        }
+        verdict
+    }
+
+    fn pre_handle_fake_ip(resolver: &Resolver, metadata: &mut Metadata) -> PreHandleVerdict {
         // `fixMetadata` parity: an IP literal in `host` IS the
         // destination, not a name — fold it into `dst_ip` so a
         // domain-typed literal cannot slip past the range check below.
@@ -278,7 +297,6 @@ impl TunnelInner {
             return PreHandleVerdict::Continue;
         };
         metadata.dst_ip = Some(ip);
-        let resolver = self.resolver();
         if resolver.in_fake_ip_range(ip) {
             match resolver.reverse_lookup(ip) {
                 Some(host) => {
@@ -358,6 +376,9 @@ impl TunnelInner {
     /// on the blocking pool — keeping it synchronous here would stall the
     /// calling worker on hosts with large socket tables (issue #515).
     pub async fn resolve_proxy(&self, metadata: &Metadata) -> Option<ResolvedTarget> {
+        if let Some((target, _)) = self.paopao_lan_direct(metadata) {
+            return Some(target);
+        }
         let mode = *self.mode.read();
         match mode {
             TunnelMode::Direct => Some(ResolvedTarget {
@@ -418,6 +439,12 @@ impl TunnelInner {
     /// UDP paths must keep calling `pre_resolve`: their NAT session key
     /// requires a resolved `dst_ip` regardless of what the rules demand.
     pub async fn resolve_proxy_lazy(&self, metadata: &mut Metadata) -> Option<ResolvedTarget> {
+        if let Some((target, ip)) = self.paopao_lan_direct(metadata) {
+            // Normally already set by `pre_handle_metadata`; make sure the
+            // DIRECT dial connects to the pinned address either way.
+            metadata.dst_ip = Some(ip);
+            return Some(target);
+        }
         let mode = *self.mode.read();
         if mode != TunnelMode::Rule {
             return self.resolve_proxy(metadata).await;
@@ -465,6 +492,29 @@ impl TunnelInner {
                 Some(self.materialize_rule_match(&route, result))
             }
         }
+    }
+
+    /// `paopao-hosts:` pins the host to a LAN address (private, loopback,
+    /// link-local, CGNAT, ULA): route DIRECT in every mode, ahead of the
+    /// rules — a LAN address must never be sent to a remote proxy.
+    /// Returns the target and the pinned address.
+    fn paopao_lan_direct(&self, metadata: &Metadata) -> Option<(ResolvedTarget, IpAddr)> {
+        if metadata.host.is_empty() {
+            return None;
+        }
+        let ip = self.resolver().paopao_hosts_address(&metadata.host)?;
+        if !meow_dns::is_lan_address(ip) {
+            return None;
+        }
+        Some((
+            ResolvedTarget {
+                adapter: Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>,
+                rule_name: SmolStr::new_static("PaoPaoHosts"),
+                rule_payload: metadata.host.clone(),
+                route: self.route(),
+            },
+            ip,
+        ))
     }
 
     /// Registry probe for the match engines — upstream `match()`'s three
@@ -1705,6 +1755,199 @@ mod tests {
             AdapterType::PassRule,
             "top-level PASS-RULE must materialize as its own adapter"
         );
+    }
+
+    fn paopao_tunnel(fake_ip: bool) -> Tunnel {
+        use meow_dns::{PaopaoHostRule, PaopaoHosts};
+        let mut resolver = Resolver::new(
+            vec![],
+            vec![],
+            if fake_ip {
+                DnsMode::FakeIp
+            } else {
+                DnsMode::Normal
+            },
+            DomainTrie::new(),
+            false,
+            true,
+        );
+        if fake_ip {
+            resolver.set_fakeip_v4(Arc::new(
+                meow_dns::Pool::new(
+                    "198.18.0.0/16".parse().unwrap(),
+                    Arc::new(meow_dns::MemoryStore::new(1024)),
+                )
+                .unwrap(),
+            ));
+        }
+        let mut list = PaopaoHosts::new();
+        let rule = |kind, value, addr: Option<&str>| {
+            PaopaoHostRule::new(kind, value, addr.map(|a| a.parse().unwrap())).unwrap()
+        };
+        list.push(rule("wildcard", "node*.weiba.pp.ua", None));
+        list.push(rule("exact", "pve.weiba.pp.ua", Some("192.168.186.215")));
+        list.push(rule("wildcard", "*.weiba.pp.ua", Some("192.168.186.230")));
+        list.push(rule("exact", "pub.test", Some("1.2.3.4")));
+        list.push(rule("exact", "loop.test", Some("127.0.0.1")));
+        resolver.set_paopao_hosts(Some(Arc::new(list)));
+        let tunnel = Tunnel::new(Arc::new(resolver));
+        let proxies = meow_config::rebuild_from_raw(&Default::default())
+            .unwrap()
+            .proxies;
+        tunnel.update_routing(
+            proxies,
+            vec![
+                Box::new(
+                    meow_rules::ipcidr::IpCidrRule::new("1.2.3.0/24", "COMPATIBLE", false, true)
+                        .unwrap(),
+                ),
+                Box::new(meow_rules::final_rule::FinalRule::new("REJECT")),
+            ],
+            Default::default(),
+        );
+        tunnel
+    }
+
+    fn host_meta(host: &str) -> Metadata {
+        Metadata {
+            host: host.into(),
+            dst_port: 443,
+            ..Default::default()
+        }
+    }
+
+    /// A `paopao-hosts:` LAN pin routes DIRECT ahead of every rule (the
+    /// final rule here is REJECT) and in every mode, with `dst_ip` set to
+    /// the pinned address.
+    #[tokio::test]
+    async fn paopao_hosts_lan_address_routes_direct_with_rewritten_ip() {
+        let tunnel = paopao_tunnel(false);
+        let inner = tunnel.inner();
+        for (host, ip) in [
+            ("pve.weiba.pp.ua", [192, 168, 186, 215]),
+            ("a.b.weiba.pp.ua", [192, 168, 186, 230]),
+        ] {
+            let want = Some(IpAddr::from(ip));
+            let mut meta = host_meta(host);
+            assert_eq!(
+                inner.pre_handle_metadata(&mut meta),
+                PreHandleVerdict::Continue
+            );
+            assert_eq!(meta.dst_ip, want, "{host}: dst_ip rewritten");
+            let target = inner.resolve_proxy_lazy(&mut meta).await.unwrap();
+            assert_eq!(target.adapter.adapter_type(), AdapterType::Direct, "{host}");
+            assert_eq!(target.rule_name, "PaoPaoHosts");
+            assert_eq!(target.rule_payload, host);
+            assert_eq!(meta.dst_ip, want);
+
+            // Without pre_handle (lazy path sets dst_ip itself).
+            let mut bare = host_meta(host);
+            let target = inner.resolve_proxy_lazy(&mut bare).await.unwrap();
+            assert_eq!(target.adapter.adapter_type(), AdapterType::Direct);
+            assert_eq!(bare.dst_ip, want);
+        }
+        // Global mode would pick GLOBAL; the LAN pin still wins.
+        tunnel.set_mode(TunnelMode::Global);
+        let target = inner
+            .resolve_proxy(&host_meta("pve.weiba.pp.ua"))
+            .await
+            .unwrap();
+        assert_eq!(target.adapter.adapter_type(), AdapterType::Direct);
+    }
+
+    /// A public pin is not forced DIRECT: rules run and see the pinned IP.
+    #[tokio::test]
+    async fn paopao_hosts_public_address_is_seen_by_rules() {
+        let tunnel = paopao_tunnel(false);
+        let inner = tunnel.inner();
+        let mut meta = host_meta("pub.test");
+        assert_eq!(
+            inner.pre_handle_metadata(&mut meta),
+            PreHandleVerdict::Continue
+        );
+        assert_eq!(meta.dst_ip, Some(IpAddr::from([1, 2, 3, 4])));
+        let target = inner.resolve_proxy_lazy(&mut meta).await.unwrap();
+        assert_eq!(
+            target.adapter.adapter_type(),
+            AdapterType::Compatible,
+            "IP-CIDR 1.2.3.0/24 must match the pinned address"
+        );
+        assert_eq!(target.rule_name, "IP-CIDR");
+    }
+
+    /// Pass-through and unmatched names are untouched.
+    #[tokio::test]
+    async fn paopao_hosts_pass_through_is_unchanged() {
+        let tunnel = paopao_tunnel(false);
+        let inner = tunnel.inner();
+        for host in ["node1.weiba.pp.ua", "weiba.pp.ua"] {
+            let mut meta = host_meta(host);
+            assert_eq!(
+                inner.pre_handle_metadata(&mut meta),
+                PreHandleVerdict::Continue
+            );
+            assert_eq!(meta.dst_ip, None, "{host}");
+            let target = inner.resolve_proxy(&meta).await.unwrap();
+            assert_eq!(target.adapter.name(), "REJECT", "{host}: normal rules");
+        }
+    }
+
+    /// A fake-IP destination whose recovered domain is pinned gets the
+    /// pinned address (and DIRECT for a LAN pin).
+    #[tokio::test]
+    async fn paopao_hosts_applies_to_fake_ip_recovered_domain() {
+        let tunnel = paopao_tunnel(true);
+        let inner = tunnel.inner();
+        // Pass-through names still get fake IPs from the resolver.
+        let fake = inner
+            .resolver()
+            .lookup_ipv4("node2.weiba.pp.ua")
+            .await
+            .unwrap();
+        assert!(inner.resolver().in_fake_ip_range(fake));
+        // A pinned name's fake IP (allocated before the pin, e.g. by an
+        // earlier config generation) is recovered and rewritten.
+        let pool_fake = inner
+            .resolver()
+            .fakeip_pool_over("198.18.0.0/16".parse().unwrap())
+            .unwrap()
+            .lookup("x.weiba.pp.ua");
+        let mut meta = Metadata {
+            dst_ip: Some(pool_fake),
+            dst_port: 443,
+            ..Default::default()
+        };
+        assert_eq!(
+            inner.pre_handle_metadata(&mut meta),
+            PreHandleVerdict::Continue
+        );
+        assert_eq!(meta.host, "x.weiba.pp.ua");
+        assert_eq!(meta.dst_ip, Some(IpAddr::from([192, 168, 186, 230])));
+        let target = inner.resolve_proxy_lazy(&mut meta).await.unwrap();
+        assert_eq!(target.adapter.adapter_type(), AdapterType::Direct);
+    }
+
+    /// The DIRECT dial for a pinned name connects to the pinned address.
+    #[tokio::test]
+    async fn paopao_hosts_direct_dial_connects_to_pinned_ip() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept = tokio::spawn(async move { listener.accept().await.map(|_| ()) });
+        let tunnel = paopao_tunnel(false);
+        let inner = tunnel.inner();
+        let mut meta = Metadata {
+            host: "loop.test".into(),
+            dst_port: port,
+            ..Default::default()
+        };
+        assert_eq!(
+            inner.pre_handle_metadata(&mut meta),
+            PreHandleVerdict::Continue
+        );
+        let target = inner.resolve_proxy_lazy(&mut meta).await.unwrap();
+        assert_eq!(target.adapter.adapter_type(), AdapterType::Direct);
+        let _conn = target.adapter.dial_tcp(&meta).await.unwrap();
+        accept.await.unwrap().unwrap();
     }
 
     /// COMPATIBLE resolves like any real target and buckets its stats as

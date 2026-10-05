@@ -221,6 +221,10 @@ pub struct RawConfig {
     /// Static host mappings, preferred over upstream DNS lookups. Values may
     /// be a single IP, a list of IPs, or one domain-name alias.
     pub hosts: Option<HashMap<String, HostsValue>>,
+    /// PaoPao extension: ordered hosts, first match wins (see
+    /// `meow_dns::paopao_hosts`). Checked before `hosts:` and fake-IP by the
+    /// DNS resolver, and by the tunnel before rule matching.
+    pub paopao_hosts: Option<Vec<RawPaopaoHost>>,
     pub sniffer: Option<RawSniffer>,
     /// Named listener array. Each entry defines an explicitly-named proxy
     /// listener instance. Merged with the shorthand port fields at parse time.
@@ -244,6 +248,20 @@ pub struct RawConfig {
     /// tproxy entry; `udp-timeout` on `listeners:`/`tun:`, issue #564).
     pub udp: Option<serde_yaml::Value>,
     pub udp_timeout: Option<serde_yaml::Value>,
+}
+
+/// One `paopao-hosts:` entry: `{type, value, address?}`. Every field is
+/// optional at the serde level so a malformed entry is warned about and
+/// skipped (or rejected under `strict: true`) instead of failing the whole
+/// config.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct RawPaopaoHost {
+    /// `exact` | `suffix` | `keyword` | `regex` | `wildcard`.
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub value: Option<String>,
+    /// IPv4/IPv6 the name is rewritten to; absent = pass through.
+    pub address: Option<String>,
 }
 
 /// A `hosts:` map value: one IP/domain alias or a list of IP addresses.

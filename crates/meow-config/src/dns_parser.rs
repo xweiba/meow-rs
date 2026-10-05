@@ -1,4 +1,4 @@
-use crate::raw::{HostsValue, RawConfig};
+use crate::raw::{HostsValue, RawConfig, RawPaopaoHost};
 use crate::rule_provider::RuleProvider;
 use crate::DnsConfig;
 use meow_common::DnsMode;
@@ -37,6 +37,10 @@ pub async fn parse_dns(
     // `strict` (top-level `strict: true`, issue #533): static config defects
     // become hard errors; transient resolution failures stay lenient.
     let strict = raw.strict.unwrap_or(false);
+    // One ordered `paopao-hosts:` matcher per config generation, shared by
+    // every resolver built here (and, through the resolver slot, by the
+    // tunnel) — a reload rebuilds it with the resolver.
+    let paopao_hosts = build_paopao_hosts(raw.paopao_hosts.as_deref(), strict)?;
     let dns = match &raw.dns {
         Some(dns) if dns.enable.unwrap_or(false) => dns,
         _ => {
@@ -45,7 +49,7 @@ pub async fn parse_dns(
             }
             let hosts = build_hosts_trie(raw.hosts.as_ref(), strict)?;
             let use_hosts = raw.dns.as_ref().and_then(|d| d.use_hosts).unwrap_or(true);
-            let resolver = Resolver::new(
+            let mut resolver = Resolver::new(
                 vec!["8.8.8.8:53".parse().unwrap()],
                 vec![],
                 DnsMode::Normal,
@@ -53,6 +57,7 @@ pub async fn parse_dns(
                 use_hosts,
                 crate::effective_ipv6(raw.ipv6),
             );
+            resolver.set_paopao_hosts(paopao_hosts);
             let resolver = Arc::new(resolver);
             return Ok(DnsConfig {
                 resolver_slot: meow_dns::new_resolver_slot(Arc::clone(&resolver)),
@@ -117,23 +122,23 @@ pub async fn parse_dns(
         if use_hosts && use_system_hosts {
             merge_system_hosts(&mut proxy_hosts).await;
         }
-        Some(Arc::new(
-            Resolver::new_with_bootstrap_with_proxies(
-                proxy_ns_urls,
-                vec![],
-                default_ns_urls.clone(),
-                DnsMode::Normal,
-                proxy_hosts,
-                use_hosts,
-                crate::effective_ipv6(raw.ipv6),
-                None,
-                None,
-                proxy_registry,
-                crate::is_offline_validate(),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("proxy-server-nameserver: {e}"))?,
-        ))
+        let mut proxy_resolver = Resolver::new_with_bootstrap_with_proxies(
+            proxy_ns_urls,
+            vec![],
+            default_ns_urls.clone(),
+            DnsMode::Normal,
+            proxy_hosts,
+            use_hosts,
+            crate::effective_ipv6(raw.ipv6),
+            None,
+            None,
+            proxy_registry,
+            crate::is_offline_validate(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("proxy-server-nameserver: {e}"))?;
+        proxy_resolver.set_paopao_hosts(paopao_hosts.clone());
+        Some(Arc::new(proxy_resolver))
     };
 
     // Build nameserver-policy if configured.
@@ -196,6 +201,7 @@ pub async fn parse_dns(
     if mode == DnsMode::FakeIp {
         install_fakeip(&mut resolver, dns, cache_dir, prior).await?;
     }
+    resolver.set_paopao_hosts(paopao_hosts);
 
     let resolver = Arc::new(resolver);
     Ok(DnsConfig {
@@ -891,6 +897,42 @@ fn build_fallback_filter(
     })
 }
 
+/// Build the ordered `paopao-hosts:` matcher (PaoPao extension). Invalid
+/// entries (missing/unknown `type`, empty `value`, bad regex, unparseable
+/// `address`) are warned about and skipped, or rejected under `strict`.
+/// `None` when the list is absent or ends up empty.
+pub(crate) fn build_paopao_hosts(
+    entries: Option<&[RawPaopaoHost]>,
+    strict: bool,
+) -> Result<Option<Arc<meow_dns::PaopaoHosts>>, anyhow::Error> {
+    let Some(entries) = entries else {
+        return Ok(None);
+    };
+    let mut list = meow_dns::PaopaoHosts::new();
+    for (i, entry) in entries.iter().enumerate() {
+        let built = (|| {
+            let kind = entry.kind.as_deref().ok_or("missing `type`")?;
+            let value = entry.value.as_deref().ok_or("missing `value`")?;
+            let address = match entry.address.as_deref().map(str::trim) {
+                None | Some("") => None,
+                Some(a) => Some(
+                    a.parse::<IpAddr>()
+                        .map_err(|_| format!("invalid address '{a}'"))?,
+                ),
+            };
+            meow_dns::PaopaoHostRule::new(kind, value, address)
+        })();
+        match built {
+            Ok(rule) => list.push(rule),
+            Err(e) if strict => {
+                anyhow::bail!("paopao-hosts[{i}]: {e} (strict mode)");
+            }
+            Err(e) => warn!("paopao-hosts[{i}]: {e}; skipping"),
+        }
+    }
+    Ok((!list.is_empty()).then(|| Arc::new(list)))
+}
+
 /// Build the hosts trie from top-level mihomo-compatible `hosts:` entries.
 /// A single value may be an IP or domain alias; lists must contain only IPs.
 /// Malformed values and alias cycles are hard errors (Class A per ADR-0002).
@@ -1083,6 +1125,108 @@ mod tests {
         match entry {
             HostEntry::Addresses(ips) => ips,
             HostEntry::Alias(alias) => panic!("expected addresses, got alias {alias}"),
+        }
+    }
+
+    const PAOPAO_HOSTS_YAML: &str = r#"
+paopao-hosts:
+  - {type: wildcard, value: "node*.weiba.pp.ua"}
+  - {type: exact,    value: "pve.weiba.pp.ua", address: "192.168.186.215"}
+  - {type: wildcard, value: "*.weiba.pp.ua",   address: "192.168.186.230"}
+"#;
+
+    const PAOPAO_HOSTS_JSON: &str = r#"{
+  "paopao-hosts": [
+    {"type": "wildcard", "value": "node*.weiba.pp.ua"},
+    {"type": "exact", "value": "pve.weiba.pp.ua", "address": "192.168.186.215"},
+    {"type": "wildcard", "value": "*.weiba.pp.ua", "address": "192.168.186.230"}
+  ]
+}"#;
+
+    fn assert_weiba_paopao(hosts: &meow_dns::PaopaoHosts) {
+        let v4 = |a, b, c, d| Some(IpAddr::V4(Ipv4Addr::new(a, b, c, d)));
+        assert_eq!(hosts.len(), 3);
+        assert_eq!(hosts.address_for("node1.weiba.pp.ua"), None);
+        assert_eq!(
+            hosts.lookup("node1.weiba.pp.ua"),
+            Some(meow_dns::PaopaoHostsMatch::PassThrough)
+        );
+        assert_eq!(hosts.address_for("pve.weiba.pp.ua"), v4(192, 168, 186, 215));
+        assert_eq!(hosts.address_for("x.weiba.pp.ua"), v4(192, 168, 186, 230));
+        assert_eq!(hosts.address_for("a.b.weiba.pp.ua"), v4(192, 168, 186, 230));
+        assert_eq!(hosts.lookup("weiba.pp.ua"), None);
+    }
+
+    #[test]
+    fn paopao_hosts_parse_yaml_and_json() {
+        for doc in [PAOPAO_HOSTS_YAML, PAOPAO_HOSTS_JSON] {
+            let raw = crate::parse_raw_yaml(doc).unwrap();
+            let hosts = build_paopao_hosts(raw.paopao_hosts.as_deref(), false)
+                .unwrap()
+                .expect("three valid entries");
+            assert_weiba_paopao(&hosts);
+        }
+        // Also straight through serde (JSON is a YAML subset; the app
+        // writes JSON configs).
+        let raw: RawConfig = serde_yaml::from_str(PAOPAO_HOSTS_JSON).unwrap();
+        assert_eq!(raw.paopao_hosts.as_ref().map(Vec::len), Some(3));
+        assert_eq!(
+            raw.paopao_hosts.unwrap()[1].address.as_deref(),
+            Some("192.168.186.215")
+        );
+    }
+
+    #[test]
+    fn paopao_hosts_invalid_entries_skip_or_fail_strict() {
+        let doc = r#"
+paopao-hosts:
+  - {type: glob, value: "a.test", address: "10.0.0.1"}
+  - {type: exact, address: "10.0.0.1"}
+  - {type: exact, value: "b.test", address: "not-an-ip"}
+  - {type: regex, value: "(", address: "10.0.0.1"}
+  - {type: exact, value: "ok.test", address: "fd00::1"}
+"#;
+        let raw = crate::parse_raw_yaml(doc).unwrap();
+        let hosts = build_paopao_hosts(raw.paopao_hosts.as_deref(), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(
+            hosts.address_for("ok.test"),
+            Some("fd00::1".parse().unwrap())
+        );
+        let err = build_paopao_hosts(raw.paopao_hosts.as_deref(), true).unwrap_err();
+        assert!(err.to_string().contains("paopao-hosts[0]"), "{err}");
+
+        // Absent or all-invalid: nothing installed.
+        assert!(build_paopao_hosts(None, false).unwrap().is_none());
+        let empty = crate::parse_raw_yaml("paopao-hosts: []\n").unwrap();
+        assert!(build_paopao_hosts(empty.paopao_hosts.as_deref(), false)
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn paopao_hosts_installed_on_resolver_with_and_without_dns() {
+        for dns in ["", "dns:\n  enable: true\n  nameserver:\n    - 1.1.1.1\n"] {
+            let raw = crate::parse_raw_yaml(&format!("{dns}{PAOPAO_HOSTS_YAML}")).unwrap();
+            let cfg = parse_dns(
+                &raw,
+                None,
+                None,
+                &HashMap::new(),
+                None,
+                &HashMap::new(),
+                None,
+            )
+            .await
+            .unwrap();
+            let hosts = cfg.resolver.paopao_hosts().expect("installed");
+            assert_weiba_paopao(hosts);
+            assert_eq!(
+                cfg.resolver.resolve_ips_local("pve.weiba.pp.ua"),
+                Some(vec![IpAddr::V4(Ipv4Addr::new(192, 168, 186, 215))])
+            );
         }
     }
 

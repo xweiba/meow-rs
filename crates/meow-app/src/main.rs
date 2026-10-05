@@ -159,7 +159,8 @@ enum Command {
         #[arg(long)]
         key: String,
     },
-    /// Asks the privileged helper: start (with --config / --dir), stop, status
+    /// Asks the privileged helper: start (with --config / --dir), stop, status,
+    /// relocate, wifi
     #[cfg(unix)]
     ServiceCall {
         #[arg(long)]

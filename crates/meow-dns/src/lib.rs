@@ -7,6 +7,7 @@ pub mod cache;
 pub mod client;
 pub mod fakeip;
 pub mod host_resolver_hook;
+pub mod paopao_hosts;
 pub mod resolver;
 pub mod server;
 pub mod upstream;
@@ -17,6 +18,7 @@ pub use client::{
 };
 pub use fakeip::{FileStore, MemoryStore, Pool, PoolError, Skipper, SkipperMode, Store};
 pub use host_resolver_hook::ResolverHostHook;
+pub use paopao_hosts::{is_lan_address, PaopaoHostRule, PaopaoHosts, PaopaoHostsMatch};
 pub use resolver::{
     BootstrapError, FallbackFilter, HostEntry, NameserverPolicy, PolicyEntry, Resolver,
 };
