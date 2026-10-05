@@ -69,6 +69,29 @@ mod pss_tests {
     }
 }
 
+/// CPU time this process has used so far (user + system), from the OS's
+/// own accounting of this process: works where whole-system counters are
+/// closed to apps (Android forbids `/proc/stat`). `None` off Unix.
+pub fn cpu_time() -> Option<std::time::Duration> {
+    #[cfg(unix)]
+    {
+        let mut u = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // SAFETY: `u` is a `rusage` for the kernel to fill.
+        if unsafe { libc::getrusage(libc::RUSAGE_SELF, u.as_mut_ptr()) } == 0 {
+            // SAFETY: filled in by the successful call.
+            let u = unsafe { u.assume_init() };
+            let us = |t: libc::timeval| {
+                u64::try_from(t.tv_sec).unwrap_or(0) * 1_000_000
+                    + u64::try_from(t.tv_usec).unwrap_or(0)
+            };
+            return Some(std::time::Duration::from_micros(
+                us(u.ru_utime) + us(u.ru_stime),
+            ));
+        }
+    }
+    None
+}
+
 /// Global allocator for Apple platforms (PaoPao): large blocks are mapped
 /// straight from the kernel and unmapped on free, small ones go to the
 /// system allocator.
@@ -187,5 +210,20 @@ mod paged {
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod cpu_tests {
+    #[test]
+    fn cpu_time_grows_with_work() {
+        let a = super::cpu_time().unwrap();
+        let mut x = 0u64;
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(60);
+        while std::time::Instant::now() < until {
+            x = std::hint::black_box(x.wrapping_mul(31).wrapping_add(7));
+        }
+        let b = super::cpu_time().unwrap();
+        assert!(b > a, "{a:?} -> {b:?}");
     }
 }

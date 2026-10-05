@@ -3443,8 +3443,10 @@ fn subscribe_memory_feed() -> broadcast::Receiver<Arc<str>> {
     *guard = Some(tx.clone());
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
-        // CPU use is measured between two looks: one System kept across ticks.
+        // CPU use is measured between two looks: one System kept across ticks,
+        // and this process's own CPU time at the last look.
         let sys = Arc::new(std::sync::Mutex::new(sysinfo::System::new()));
+        let mut last_cpu = meow_common::memory::cpu_time().map(|t| (t, std::time::Instant::now()));
         loop {
             interval.tick().await;
             if tx.receiver_count() == 0 {
@@ -3457,7 +3459,24 @@ fn subscribe_memory_feed() -> broadcast::Receiver<Arc<str>> {
                     break;
                 }
             }
-            let (inuse, cpu) = sample_process(Arc::clone(&sys)).await;
+            let (inuse, mut cpu) = sample_process(Arc::clone(&sys)).await;
+            // PaoPao: from the process's own CPU time where the OS keeps it
+            // (sysinfo needs system-wide counters Android closes: always 0).
+            if let Some(now) = meow_common::memory::cpu_time() {
+                let at = std::time::Instant::now();
+                if let Some((then, was)) = last_cpu {
+                    let wall = at.duration_since(was).as_secs_f64();
+                    // A first look moments after the second: too short a
+                    // window to say anything (it read 70 % at start-up).
+                    if wall >= 0.5 {
+                        #[allow(clippy::cast_possible_truncation)]
+                        {
+                            cpu = (now.saturating_sub(then).as_secs_f64() / wall * 100.0) as f32;
+                        }
+                    }
+                }
+                last_cpu = Some((now, at));
+            }
             let oslimit = read_os_memory_limit().await;
             // PaoPao: `cpu` is this process's CPU use in percent of one core
             // (as Activity Monitor shows it).
