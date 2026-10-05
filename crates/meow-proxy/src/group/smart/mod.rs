@@ -96,6 +96,9 @@ struct Shared {
     speed_url: String,
     /// Bounds the speed tests running at once.
     speed_tests: Arc<Semaphore>,
+    /// `strategy: sticky` (PaoPao): every site shares one line, so a
+    /// service and its helpers (sign-in, captcha, telemetry) see one exit.
+    sticky: std::sync::atomic::AtomicBool,
 }
 
 impl Drop for Shared {
@@ -156,8 +159,17 @@ impl SmartGroup {
             started: std::sync::atomic::AtomicBool::new(false),
             speed_url: SPEED_URL.to_string(),
             speed_tests: Arc::new(Semaphore::new(SPEED_PROBE_CONCURRENCY)),
+            sticky: std::sync::atomic::AtomicBool::new(false),
         });
         Self { shared }
+    }
+
+    /// 固定出口: one line for every site of the group (AI services: the
+    /// page, its sign-in, its captcha and its telemetry from one address);
+    /// it moves only when that line fails or turns slow.
+    pub fn sticky(self) -> Self {
+        self.shared.sticky.store(true, Ordering::Relaxed);
+        self
     }
 
     /// 速度最快: always the line seen fastest on real downloads.
@@ -619,6 +631,18 @@ pub fn parse_trace(body: &str) -> Option<Exit> {
     (!e.ip.is_empty()).then_some(e)
 }
 
+/// The key the store learns and pins under: the site, or one key for the
+/// whole group when it is sticky.
+fn key_of(me: &Shared, metadata: &Metadata) -> String {
+    if me.sticky.load(Ordering::Relaxed) {
+        return STICKY_SITE.to_string();
+    }
+    site_of(metadata)
+}
+
+/// The one "site" of a sticky group.
+const STICKY_SITE: &str = "*";
+
 fn site_of(metadata: &Metadata) -> String {
     let host = if metadata.host.is_empty() {
         metadata.dst_ip.map(|ip| ip.to_string()).unwrap_or_default()
@@ -650,7 +674,7 @@ impl ProxyAdapter for SmartGroup {
         let me = &self.shared;
         me.start();
         me.usage.touch_user_traffic(metadata);
-        let site = site_of(metadata);
+        let site = key_of(me, metadata);
         let plan = me
             .store
             .plan_with(&site, &me.candidates(false), &me.loads.snapshot());
@@ -731,7 +755,7 @@ impl ProxyAdapter for SmartGroup {
         let me = &self.shared;
         me.start();
         me.usage.touch_user_traffic(metadata);
-        let site = site_of(metadata);
+        let site = key_of(me, metadata);
         let plan = me.store.plan(&site, &me.candidates(true));
         if plan.lines.is_empty() {
             return Err(me.no_line());
@@ -776,7 +800,9 @@ impl ProxyAdapter for SmartGroup {
             self.shared.usage.touch_user_traffic(metadata);
         }
         let me = &self.shared;
-        let line = me.store.peek(&site_of(metadata), &me.candidates(false))?;
+        let line = me
+            .store
+            .peek(&key_of(me, metadata), &me.candidates(false))?;
         me.member(&line).cloned()
     }
 

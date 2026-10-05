@@ -142,7 +142,7 @@ enum Command {
     RunService,
     /// The privileged helper an app installs (root): runs the core for one
     /// user, who asks over a Unix socket
-    #[cfg(unix)]
+    #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
     Service {
         #[arg(long)]
         socket: String,
@@ -161,7 +161,7 @@ enum Command {
     },
     /// Asks the privileged helper: start (with --config / --dir), stop, status,
     /// relocate, wifi
-    #[cfg(unix)]
+    #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
     ServiceCall {
         #[arg(long)]
         socket: String,
@@ -786,9 +786,9 @@ fn handle_service_command(cmd: &Command, args: &Args) -> Result<()> {
             println!("{cert}");
             Ok(())
         }
-        #[cfg(unix)]
+        #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
         Command::Service { socket, uid } => meow_app::helper::serve(socket, *uid),
-        #[cfg(unix)]
+        #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
         Command::ServiceCall {
             socket,
             op,

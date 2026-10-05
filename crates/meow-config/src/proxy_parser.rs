@@ -3173,14 +3173,13 @@ fn parse_proxy_group_inner(
                 balance,
                 true,
             );
-            // PaoPao's 速度最快: by real download speed, not latency.
-            Ok(Arc::new(
-                if config.strategy.as_deref() == Some("throughput") {
-                    group.fastest()
-                } else {
-                    group
-                },
-            ))
+            // PaoPao's 速度最快: by real download speed, not latency;
+            // 固定出口 (sticky): one line for every site of the group.
+            Ok(Arc::new(match config.strategy.as_deref() {
+                Some("throughput") => group.fastest(),
+                Some("sticky") => group.sticky(),
+                _ => group,
+            }))
         }
         "fallback" => {
             let group = FallbackGroup::new_with_providers(&config.name, proxies, slots)

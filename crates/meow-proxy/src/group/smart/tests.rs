@@ -155,6 +155,7 @@ fn group(lines: &[Arc<Line>]) -> SmartGroup {
             // Echo lines answer a GET with the GET: a quick failed test.
             speed_url: "http://127.0.0.1:9/__down".into(),
             speed_tests: Arc::new(Semaphore::new(SPEED_PROBE_CONCURRENCY)),
+            sticky: AtomicBool::new(false),
         }),
     }
 }
@@ -365,4 +366,30 @@ async fn a_slow_line_moves_the_site_and_tests_others_once() {
     // The family let go of a; its next connection goes elsewhere.
     assert_ne!(roundtrip(&g, "youtube.com").await.unwrap(), "a");
     assert!(g.bans().is_empty(), "slow is not banned");
+}
+
+#[tokio::test]
+async fn sticky_keeps_every_site_on_one_line_and_moves_them_together() {
+    let a = Line::new("a", 5);
+    let b = Line::new("b", 30);
+    let g = group(&[Arc::clone(&a), Arc::clone(&b)]).sticky();
+    assert_eq!(roundtrip(&g, "chatgpt.com").await.unwrap(), "a");
+    // A helper of another company (the captcha): on the same line, and
+    // dialed there alone (no race that could land it elsewhere).
+    let helper = site("challenges.cloudflare.com");
+    assert_eq!(g.unwrap_proxy(&helper, false).unwrap().name(), "a");
+    let before = b.dials.load(Ordering::Relaxed);
+    assert_eq!(
+        roundtrip(&g, "challenges.cloudflare.com").await.unwrap(),
+        "a"
+    );
+    assert_eq!(
+        b.dials.load(Ordering::Relaxed),
+        before,
+        "raced another line"
+    );
+    // The line fails: the whole group moves, together.
+    a.down.store(true, Ordering::Relaxed);
+    assert_eq!(roundtrip(&g, "chatgpt.com").await.unwrap(), "b");
+    assert_eq!(g.unwrap_proxy(&helper, false).unwrap().name(), "b");
 }

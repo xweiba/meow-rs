@@ -8,8 +8,9 @@
 #[cfg(any(target_os = "linux", test))]
 pub mod arp;
 pub mod geodata_fetch;
-/// The privileged helper (`meow service` / `meow service-call`).
-#[cfg(unix)]
+/// The privileged helper (`meow service` / `meow service-call`): desktops
+/// only — phones take the VPN through the system's own consent.
+#[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
 pub mod helper;
 
 // The binary's startup path, reused when embedded in an app (`embed`):
