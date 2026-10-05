@@ -38,7 +38,35 @@ pub fn footprint_bytes() -> Option<u64> {
             return Some(unsafe { info.assume_init() }.ri_phys_footprint);
         }
     }
+    // Android: the proportional set size (shared libraries split among the
+    // processes using them), the figure the system's own app settings show;
+    // RSS counts every shared library page in full.
+    #[cfg(target_os = "android")]
+    {
+        if let Ok(s) = std::fs::read_to_string("/proc/self/smaps_rollup") {
+            return pss_kib(&s).map(|k| k * 1024);
+        }
+    }
     None
+}
+
+/// `Pss:` of a `smaps_rollup`, in KiB.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn pss_kib(rollup: &str) -> Option<u64> {
+    rollup
+        .lines()
+        .find_map(|l| l.strip_prefix("Pss:"))
+        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+}
+
+#[cfg(test)]
+mod pss_tests {
+    #[test]
+    fn reads_pss_from_a_rollup() {
+        let s = "5578c000-7ffd mem\nRss:              180168 kB\nPss:              158464 kB\nPss_Dirty:         83628 kB\n";
+        assert_eq!(super::pss_kib(s), Some(158_464));
+        assert_eq!(super::pss_kib("Rss: 1 kB"), None);
+    }
 }
 
 /// Global allocator for Apple platforms (PaoPao): large blocks are mapped

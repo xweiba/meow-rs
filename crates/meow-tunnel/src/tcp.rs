@@ -365,6 +365,9 @@ pub async fn route_inbound_tcp<C>(
     // Track the connection — guard drops it on every exit path, including
     // the abort case where the manual close call below would never run.
     // API-only metadata and proxy-name ownership are built only when needed.
+    // For the dial-error line (PaoPao: the app shows a failing target's
+    // route): SmolStr clones, no allocation for short rule texts.
+    let (route_rule, route_payload) = (rule_name.clone(), rule_payload.clone());
     let Some(guard) = admission.track_resolved(&metadata, rule_name, rule_payload, proxy.as_ref())
     else {
         return;
@@ -448,10 +451,13 @@ pub async fn route_inbound_tcp<C>(
                 }
                 Err(e) => {
                     warn!(
-                        "{} {} dial error: {}",
+                        "{} {} dial error: {} [rule {}({}) using {}]",
                         metadata.conn_type,
                         metadata.remote_address(),
-                        e
+                        e,
+                        route_rule,
+                        route_payload,
+                        proxy.name()
                     );
                 }
             }

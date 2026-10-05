@@ -311,7 +311,22 @@ fn init_logging(target: &LogTarget) -> Result<Logging> {
 
     match target {
         LogTarget::Console => {
+            // Once per process: phones run the core inside the app, and a
+            // second start (after a stop, after the VPN consent) would set
+            // the global subscriber again — an abort. Later starts share
+            // the first one's log channel.
+            static CONSOLE: std::sync::OnceLock<
+                broadcast::Sender<meow_api::log_stream::LogMessage>,
+            > = std::sync::OnceLock::new();
+            if let Some(tx) = CONSOLE.get() {
+                return Ok(Logging {
+                    tx: tx.clone(),
+                    #[cfg(target_os = "windows")]
+                    _file_guard: None,
+                });
+            }
             let (tx, _) = broadcast::channel(128);
+            let _ = CONSOLE.set(tx.clone());
             let log_layer = LogBroadcastLayer { tx: tx.clone() }.with_filter(LevelFilter::TRACE);
             let (filter_layer, reload_handle) =
                 tracing_subscriber::reload::Layer::new(env_filter());
