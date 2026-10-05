@@ -428,3 +428,29 @@ async fn slow_video_streams_are_cut_over_once_per_cooldown() {
     me.cut_over("googlevideo.com", "a", "b", 30.0);
     assert!(!is_cut(&again));
 }
+
+#[test]
+fn video_speed_tests_mix_the_usual_lines_with_untried_ones() {
+    let planned: Vec<String> = (0..20).map(|i| format!("l{i}")).collect();
+    let mut known = std::collections::HashMap::new();
+    for l in ["l0", "l1", "l2", "l3", "l4", "l5"] {
+        known.insert(
+            l.to_string(),
+            stats::Record {
+                throughput: 100_000.0,
+                ..Default::default()
+            },
+        );
+    }
+    let a = probe_mix(&planned, &known, 0);
+    assert_eq!(a.len(), VIDEO_PROBE_LINES);
+    assert_eq!(&a[..4], &["l0", "l1", "l2", "l3"]);
+    // The rest never measured here.
+    assert!(a[4..].iter().all(|l| !known.contains_key(l)), "{a:?}");
+    // Another turn reaches other untried lines.
+    let b = probe_mix(&planned, &known, 5);
+    assert_ne!(a[4..], b[4..]);
+    // Few lines: all of them, once.
+    let few = probe_mix(&planned[..3], &known, 0);
+    assert_eq!(few, vec!["l0", "l1", "l2"]);
+}

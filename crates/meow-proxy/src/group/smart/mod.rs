@@ -60,6 +60,9 @@ const HEDGE_AFTER: Duration = Duration::from_millis(1500);
 const DEADLINE_MARGIN: Duration = Duration::from_millis(200);
 /// Lines speed-tested when a site's line turned out slow.
 const SPEED_PROBE_LINES: usize = 3;
+/// … for video: more, half of them lines never measured on the site (the
+/// usual few may all be slow while an untried one runs 80 Mbit/s).
+const VIDEO_PROBE_LINES: usize = 8;
 /// Speed tests running at once, per group.
 const SPEED_PROBE_CONCURRENCY: usize = 2;
 /// One speed test reads at most this much …
@@ -112,6 +115,41 @@ pub struct TuneEvent {
     /// `probe`: lines tested; `cut`: streams cut.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count: Option<usize>,
+}
+
+/// Video's speed-test lines: the first half of `planned` (the usual ones),
+/// then lines without a measured throughput on the site — starting at a
+/// place that moves with `turn`, so successive tests reach every line —
+/// then the rest of `planned`, [`VIDEO_PROBE_LINES`] in all.
+fn probe_mix(
+    planned: &[String],
+    known: &std::collections::HashMap<String, stats::Record>,
+    turn: i64,
+) -> Vec<String> {
+    let n = VIDEO_PROBE_LINES.min(planned.len());
+    let mut out: Vec<String> = planned.iter().take(n / 2).cloned().collect();
+    let untried: Vec<&String> = planned
+        .iter()
+        .filter(|l| !out.contains(l) && known.get(*l).is_none_or(|r| r.throughput <= 0.0))
+        .collect();
+    if !untried.is_empty() {
+        let start = turn.rem_euclid(untried.len() as i64) as usize;
+        for l in untried.iter().cycle().skip(start).take(untried.len()) {
+            if out.len() >= n {
+                break;
+            }
+            out.push((*l).clone());
+        }
+    }
+    for l in planned {
+        if out.len() >= n {
+            break;
+        }
+        if !out.contains(l) {
+            out.push(l.clone());
+        }
+    }
+    out
 }
 
 fn unix_ms() -> i64 {
@@ -618,7 +656,11 @@ impl Shared {
         let mut others = self.candidates(false);
         others.retain(|l| l != slow);
         let mut lines = self.store.plan(site, &others).lines;
-        lines.truncate(SPEED_PROBE_LINES);
+        if is_video_site(site) {
+            lines = probe_mix(&lines, &self.store.snapshot(site), unix_ms() / 1000);
+        } else {
+            lines.truncate(SPEED_PROBE_LINES);
+        }
         let mut tasks = Vec::new();
         for line in lines {
             let Some(p) = self.member(&line).cloned() else {
