@@ -10,6 +10,57 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
+/// The site (registrable domain, Public Suffix List) of `host`, for the app
+/// in this process (dart:ffi): rules and screens group by the core's own
+/// list. `host` NUL-terminated UTF-8; the site goes to `out` (`cap` bytes,
+/// NUL-terminated). Returns its length, or -1 (null / not UTF-8 / no room).
+///
+/// # Safety
+/// `host` must be NUL-terminated and `out` writable for `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn meow_site_of(
+    host: *const std::ffi::c_char,
+    out: *mut std::ffi::c_char,
+    cap: usize,
+) -> isize {
+    if host.is_null() || out.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller passes a NUL-terminated string.
+    let Ok(h) = unsafe { std::ffi::CStr::from_ptr(host) }.to_str() else {
+        return -1;
+    };
+    let site = meow_proxy::group::smart::stats::site_of_host(h);
+    let bytes = site.as_bytes();
+    if bytes.len() + 1 > cap {
+        return -1;
+    }
+    // SAFETY: `out` holds `cap` > len bytes; the regions do not overlap.
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast::<u8>(), bytes.len());
+        *out.add(bytes.len()) = 0;
+    }
+    isize::try_from(bytes.len()).unwrap_or(-1)
+}
+
+#[cfg(test)]
+mod site_tests {
+    use std::ffi::{CStr, CString};
+
+    #[test]
+    fn site_through_the_c_abi() {
+        let host = CString::new("api.weiba.pp.ua").unwrap();
+        let mut buf = [0 as std::ffi::c_char; 64];
+        let n = unsafe { super::meow_site_of(host.as_ptr(), buf.as_mut_ptr(), buf.len()) };
+        assert_eq!(n, 11);
+        let got = unsafe { CStr::from_ptr(buf.as_ptr()) };
+        assert_eq!(got.to_str().unwrap(), "weiba.pp.ua");
+        let mut small = [0 as std::ffi::c_char; 4];
+        let n = unsafe { super::meow_site_of(host.as_ptr(), small.as_mut_ptr(), small.len()) };
+        assert_eq!(n, -1);
+    }
+}
+
 /// Starts the core on its own thread; the error when it fails at once.
 pub fn start(home: String, config: String, fd: i32) -> Option<String> {
     if meow_app::embed::running() {

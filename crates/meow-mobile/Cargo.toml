@@ -13,6 +13,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 meow-app = { path = "../meow-app", features = ["embed"] }
 meow-common = { workspace = true }
+# The site of a host (Public Suffix List), exported to the app below.
+meow-proxy = { workspace = true, default-features = false }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
 

@@ -218,6 +218,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/traffic", get(get_traffic))
         .route("/logs", get(get_logs))
         .route("/memory", get(get_memory))
+        .route("/site", get(get_site))
         .route("/dns/results", get(get_dns_results))
         .route("/dns/query", get(dns_query_get).post(dns_query))
         .route("/cache/dns/flush", post(flush_dns_cache))
@@ -3467,6 +3468,24 @@ fn subscribe_memory_feed() -> broadcast::Receiver<Arc<str>> {
         }
     });
     rx
+}
+
+/// PaoPao: `GET /site?host=a,b` → `{"a": "site", …}`, each host's site
+/// (registrable domain, Public Suffix List) — one list for the core and the
+/// apps' rules and screens.
+async fn get_site(
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    let hosts: Vec<&str> = q
+        .get("host")
+        .map(|h| h.split(',').filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default();
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(meow_proxy::group::smart::stats::sites_json(
+            &hosts,
+        )))
+        .expect("valid site response")
 }
 
 async fn get_memory(

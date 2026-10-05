@@ -479,3 +479,21 @@ fn samples_update_speed_without_counting_a_connection() {
     s.sample("new.com", "a", 6 << 20, 3000.0);
     assert!(s.snapshot("new.com").is_empty());
 }
+
+#[test]
+fn sites_by_the_public_suffix_list() {
+    for (host, site) in [
+        ("api.weiba.pp.ua", "weiba.pp.ua"),
+        ("x.user.github.io", "user.github.io"),
+        ("a.b.example.co.uk", "example.co.uk"),
+        ("www.example.com.cn", "example.com.cn"),
+        ("Video.CDN.Example.com.", "example.com"),
+        ("pp.ua", "pp.ua"),
+        ("203.0.113.5", "203.0.113.5"),
+        ("[2001:db8::1]", "[2001:db8::1]"),
+    ] {
+        assert_eq!(site_of_host(host), site, "{host}");
+    }
+    let json: serde_json::Value = serde_json::from_str(&sites_json(&["api.weiba.pp.ua"])).unwrap();
+    assert_eq!(json["api.weiba.pp.ua"], "weiba.pp.ua");
+}

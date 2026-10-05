@@ -159,6 +159,10 @@ enum Command {
         #[arg(long)]
         key: String,
     },
+    /// The site (registrable domain, by the Public Suffix List) of each host,
+    /// as JSON `{"host": "site"}`: what apps show and write rules for
+    /// ("api.weiba.pp.ua" -> "weiba.pp.ua"). Needs no running core.
+    Site { hosts: Vec<String> },
     /// Asks the privileged helper: start (with --config / --dir), stop, status,
     /// relocate, wifi
     #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
@@ -791,6 +795,10 @@ fn handle_service_command(cmd: &Command, args: &Args) -> Result<()> {
         Command::Status => service_status(),
         #[cfg(target_os = "windows")]
         Command::RunService => windows_service::dispatch(),
+        Command::Site { hosts } => {
+            println!("{}", meow_proxy::group::smart::stats::sites_json(hosts));
+            Ok(())
+        }
         #[cfg(feature = "mitm")]
         Command::MitmCa { cert, key } => {
             meow_proxy::mitm::load_or_create_ca(

@@ -189,6 +189,33 @@ pub fn site_key(host: &str) -> String {
     psl::domain_str(&host).map_or(host.clone(), str::to_string)
 }
 
+/// The registrable domain of `host` by the Public Suffix List (the name a
+/// browser calls the site), `host` itself when there is none above a public
+/// suffix; IP addresses as they are. For apps: rules and screens group by it.
+pub fn site_of_host(host: &str) -> String {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host
+        .trim_matches(|c| c == '[' || c == ']')
+        .parse::<IpAddr>()
+        .is_ok()
+    {
+        return host;
+    }
+    psl::domain_str(&host).map_or(host.clone(), str::to_string)
+}
+
+/// `{"host": "site", …}` for each of `hosts` (`meow site`, the phone FFI).
+pub fn sites_json<S: AsRef<str>>(hosts: &[S]) -> String {
+    let map: serde_json::Map<String, serde_json::Value> = hosts
+        .iter()
+        .map(|h| {
+            let h = h.as_ref();
+            (h.to_string(), serde_json::Value::String(site_of_host(h)))
+        })
+        .collect();
+    serde_json::Value::Object(map).to_string()
+}
+
 /// A site family keeps one exit for a while.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Pin {
