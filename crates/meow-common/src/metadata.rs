@@ -240,6 +240,17 @@ impl Metadata {
         self.dst_ip.is_some()
     }
 
+    /// What the connections API shows: [`Self::pure`], but with the process
+    /// kept when it was looked up (`find-process-mode: always`: the app
+    /// shows and filters connections by it).
+    pub fn for_connections(&self) -> Self {
+        let mut m = self.pure();
+        m.process = self.process.clone();
+        m.process_path = self.process_path.clone();
+        m.uid = self.uid;
+        m
+    }
+
     pub fn pure(&self) -> Self {
         Self {
             network: self.network,

@@ -102,6 +102,9 @@ pub struct GeneralConfig {
     pub ipv6: bool,
     pub allow_lan: bool,
     pub bind_address: String,
+    /// `find-process-mode: always`: every connection's process is looked
+    /// up and recorded (not only for process rules).
+    pub find_process_always: bool,
 }
 
 /// Single source of truth for the effective `ipv6` setting of a config
@@ -3833,6 +3836,10 @@ async fn build_config_inner(
         ipv6: effective_ipv6(raw.ipv6),
         allow_lan: raw.allow_lan.unwrap_or(false),
         bind_address,
+        find_process_always: raw
+            .find_process_mode
+            .as_deref()
+            .is_some_and(|m| m.eq_ignore_ascii_case("always")),
     };
 
     // Registry the provider nodes' `dialer-proxy` targets resolve against

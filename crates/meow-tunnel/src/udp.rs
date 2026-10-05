@@ -241,6 +241,9 @@ pub async fn handle_udp(
         return;
     }
 
+    // `find-process-mode: always`: the app shows (and filters by) it.
+    tunnel.enrich_process(&mut metadata).await;
+
     // Slow path: all client UDP, including port 53, follows routing policy.
     // `_route` pins this generation's dialer registry across the dial
     // (issue #533 review).

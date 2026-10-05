@@ -69,7 +69,7 @@ impl<'a> ConnectionGuard<'a> {
             };
         }
         let (id, counters) = stats.track_connection_with_counters(
-            metadata.pure(),
+            metadata.for_connections(),
             rule,
             rule_payload,
             resolved_chain(proxy, metadata),
@@ -96,7 +96,7 @@ impl<'a> ConnectionGuard<'a> {
             };
         }
         let (id, counters) = stats.track_connection_with_counters(
-            metadata.pure(),
+            metadata.for_connections(),
             rule,
             rule_payload,
             smallvec![Arc::from(proxy_name)],
@@ -327,6 +327,9 @@ pub async fn route_inbound_tcp<C>(
     ) {
         return;
     }
+
+    // `find-process-mode: always`: the app shows (and filters by) it.
+    inner.enrich_process(&mut metadata).await;
 
     let admission = inner.tcp_admission();
 

@@ -473,3 +473,21 @@ fn test_error_from_io() {
 fn metadata_stays_272_bytes() {
     assert_eq!(std::mem::size_of::<meow_common::Metadata>(), 272);
 }
+
+#[test]
+fn connections_keep_the_looked_up_process() {
+    let m = Metadata {
+        host: "example.com".into(),
+        process: "curl".into(),
+        process_path: "/usr/bin/curl".into(),
+        uid: Some(501),
+        ..Default::default()
+    };
+    let shown = m.for_connections();
+    assert_eq!(shown.process, "curl");
+    assert_eq!(shown.process_path, "/usr/bin/curl");
+    assert_eq!(shown.uid, Some(501));
+    assert_eq!(shown.host, "example.com");
+    // pure() still clears them (rule-matching parity).
+    assert!(m.pure().process.is_empty());
+}

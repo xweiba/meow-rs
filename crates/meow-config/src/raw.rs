@@ -171,6 +171,10 @@ pub struct RawConfig {
     pub mode: Option<String>,
     pub log_level: Option<String>,
     pub ipv6: Option<bool>,
+    /// mihomo's `find-process-mode`: `always` looks up the process of every
+    /// connection (shown with it: the app filters connections by it);
+    /// otherwise only when a rule needs it (`strict`, the default) .
+    pub find_process_mode: Option<String>,
     pub external_controller: Option<String>,
     /// Path to a directory of static files for a third-party web dashboard
     /// (e.g. metacubexd, yacd). When set, it is served at `/ui` instead of the

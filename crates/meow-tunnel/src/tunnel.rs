@@ -137,6 +137,10 @@ pub struct TunnelInner {
     /// PROCESS-PATH / UID). Recomputed by `Tunnel::update_rules`. Avoids an
     /// O(n) virtual-dispatch scan of the rule list on every connection.
     pub needs_process_lookup: AtomicBool,
+    /// `find-process-mode: always`: every connection's process is looked up
+    /// up front and kept in its metadata (shown by the API), not only for
+    /// the rules that need it.
+    pub find_process_always: AtomicBool,
     /// Handle to the running TUN listener (if any). Abort + await it to
     /// stop TUN. Stored so `put_configs` can start/stop TUN at runtime.
     pub tun_handle: RwLock<Option<TunHandle>>,
@@ -266,6 +270,18 @@ impl TunnelInner {
     /// it and a DIRECT dial connects to it instead of re-resolving the
     /// name. LAN addresses are then routed DIRECT by
     /// [`Self::resolve_proxy`] / [`Self::resolve_proxy_lazy`].
+    /// `find-process-mode: always`: records the connection's process in its
+    /// metadata (the socket scan runs on the blocking pool). A no-op
+    /// otherwise, or when already known.
+    pub async fn enrich_process(&self, metadata: &mut Metadata) {
+        if !self.find_process_always.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(e) = match_engine::maybe_enrich_with_process_async(metadata).await {
+            *metadata = e;
+        }
+    }
+
     pub fn pre_handle_metadata(&self, metadata: &mut Metadata) -> PreHandleVerdict {
         let resolver = self.resolver();
         let verdict = Self::pre_handle_fake_ip(&resolver, metadata);
@@ -734,6 +750,7 @@ impl Tunnel {
                 health_checks: Mutex::new(crate::health_check::HealthCheckSupervisor::default()),
                 needs_ip_resolution: AtomicBool::new(false),
                 needs_process_lookup: AtomicBool::new(false),
+                find_process_always: AtomicBool::new(false),
                 tun_handle: RwLock::new(None),
                 dialer_registry: std::sync::OnceLock::new(),
                 udp_flush: tokio::sync::watch::Sender::new(0),
@@ -781,6 +798,11 @@ impl Tunnel {
     /// Rebuild a `Tunnel` handle from an upgraded [`Self::weak_inner`].
     pub fn from_inner(inner: Arc<TunnelInner>) -> Self {
         Self { inner }
+    }
+
+    /// `find-process-mode: always` on or off.
+    pub fn set_find_process_always(&self, on: bool) {
+        self.inner.find_process_always.store(on, Ordering::Relaxed);
     }
 
     pub fn set_mode(&self, mode: TunnelMode) {
