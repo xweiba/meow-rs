@@ -196,13 +196,7 @@ impl GeositeDB {
         }
         let regex_compiled: HashMap<String, Vec<regex::Regex>> = regex_patterns
             .into_iter()
-            .map(|(category, patterns)| {
-                let compiled = patterns
-                    .into_iter()
-                    .filter_map(|p| regex::Regex::new(&p).ok())
-                    .collect();
-                (category, compiled)
-            })
+            .map(|(category, patterns)| (category, compile_any(patterns)))
             .collect();
         Self {
             categories,
@@ -392,8 +386,111 @@ pub fn discover_and_load_from(
     }
 }
 
+/// A category's regexes as few automata as possible: "does any match" is
+/// one alternation `(?:a)|(?:b)|…`, one pass over the name and one compiled
+/// program instead of one per pattern (PaoPao: separately compiled, the
+/// geosite regexes held ~7 MB). Patterns with inline flags stay on their
+/// own (a verbose-mode comment would swallow the group's close); if the
+/// alternation will not compile (size limit), every pattern stays on its
+/// own. Invalid patterns are dropped either way.
+fn compile_any(patterns: Vec<String>) -> Vec<regex::Regex> {
+    let valid: Vec<String> = patterns
+        .into_iter()
+        .filter(|p| regex::Regex::new(p).is_ok())
+        .collect();
+    let (plain, flagged): (Vec<&String>, Vec<&String>) =
+        valid.iter().partition(|p| !p.contains("(?"));
+    let mut out = Vec::new();
+    if plain.len() > 1 {
+        let joined = plain
+            .iter()
+            .map(|p| format!("(?:{p})"))
+            .collect::<Vec<_>>()
+            .join("|");
+        match regex::Regex::new(&joined) {
+            Ok(re) => out.push(re),
+            Err(_) => out.extend(plain.iter().filter_map(|p| regex::Regex::new(p).ok())),
+        }
+    } else {
+        out.extend(plain.iter().filter_map(|p| regex::Regex::new(p).ok()));
+    }
+    out.extend(flagged.iter().filter_map(|p| regex::Regex::new(p).ok()));
+    out
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn combined_regexes_answer_like_separate_ones() {
+        let pats: Vec<String> = [
+            r"^ad[0-9]*\.example\.com$",
+            r"(^|\.)track-[a-z]+\.net$",
+            r"^x$",
+            r"(?i)^CASE\.org$",
+            r"(?x) ^ spaced \.io $ # comment",
+            r"[",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let one = compile_any(pats.clone());
+        let each: Vec<regex::Regex> = pats.iter().filter_map(|p| regex::Regex::new(p).ok()).collect();
+        assert!(one.len() < each.len());
+        for host in [
+            "ad12.example.com", "ad.example.com", "xad1.example.com", "a.track-me.net",
+            "track-me.net", "track-1.net", "x", "xx", "case.org", "CASE.org", "spaced.io",
+            "a.spaced.io", "",
+        ] {
+            assert_eq!(
+                one.iter().any(|r| r.is_match(host)),
+                each.iter().any(|r| r.is_match(host)),
+                "{host}"
+            );
+        }
+    }
+
+    /// The real geosite.dat (`MEOW_GEOSITE_DAT`): per category, the combined
+    /// regexes answer like the separately compiled ones.
+    #[test]
+    fn real_dat_combined_regexes() {
+        let Ok(path) = std::env::var("MEOW_GEOSITE_DAT") else {
+            return;
+        };
+        let bytes = std::fs::read(path).unwrap();
+        let mut patterns: HashMap<String, Vec<String>> = HashMap::new();
+        crate::geosite_dat::visit_regexes(&bytes, |cat, p| {
+            patterns.entry(cat.to_string()).or_default().push(p.to_string())
+        });
+        let (mut cats, mut checked) = (0, 0);
+        for (cat, pats) in patterns {
+            let one = compile_any(pats.clone());
+            let each: Vec<regex::Regex> =
+                pats.iter().filter_map(|p| regex::Regex::new(p).ok()).collect();
+            let mut hosts = vec!["example.com".to_string(), "a.b.c".to_string()];
+            for p in &pats {
+                // Names built from each pattern's literal bits.
+                let lit: String = p
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+                    .collect();
+                hosts.push(lit.clone());
+                hosts.push(format!("a.{lit}"));
+                hosts.push(lit.replace("..", "."));
+                hosts.push(format!("{lit}x"));
+            }
+            for h in &hosts {
+                assert_eq!(
+                    one.iter().any(|r| r.is_match(h)),
+                    each.iter().any(|r| r.is_match(h)),
+                    "{cat}: {h}"
+                );
+                checked += 1;
+            }
+            cats += 1;
+        }
+        eprintln!("{cats} categories with regexes, {checked} names checked");
+    }
     use super::*;
     use crate::mrs_parser::{write_geosite_mrs, GeositePayload};
 
