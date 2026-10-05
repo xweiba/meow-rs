@@ -3524,7 +3524,8 @@ async fn get_memory(
         .expect("valid memory stream response")
 }
 
-/// This process's resident memory and CPU use since the last look.
+/// This process's memory (footprint on Apple platforms, else resident)
+/// and CPU use since the last look.
 async fn sample_process(sys: Arc<std::sync::Mutex<sysinfo::System>>) -> (u64, f32) {
     tokio::task::spawn_blocking(move || {
         use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate};
@@ -3535,8 +3536,12 @@ async fn sample_process(sys: Arc<std::sync::Mutex<sysinfo::System>>) -> (u64, f3
             false,
             ProcessRefreshKind::new().with_cpu().with_memory(),
         );
-        sys.process(pid)
-            .map_or((0, 0.0), |p| (p.memory(), p.cpu_usage()))
+        // PaoPao: on Apple platforms the physical footprint (Activity
+        // Monitor's figure, iOS's limit), not RSS.
+        sys.process(pid).map_or((0, 0.0), |p| {
+            let memory = meow_common::memory::footprint_bytes().unwrap_or_else(|| p.memory());
+            (memory, p.cpu_usage())
+        })
     })
     .await
     .unwrap_or((0, 0.0))

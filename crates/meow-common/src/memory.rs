@@ -17,6 +17,30 @@ pub fn release_free_memory() {
     }
 }
 
+/// This process's physical footprint — what Activity Monitor shows as
+/// "Memory" and what iOS limits a network extension by (dirty and
+/// compressed pages; RSS also counts clean, shareable code pages). `None`
+/// off Apple platforms.
+pub fn footprint_bytes() -> Option<u64> {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+        // SAFETY: the buffer is a `rusage_info_v2`, matching the flavor.
+        let rc = unsafe {
+            libc::proc_pid_rusage(
+                std::process::id() as libc::c_int,
+                libc::RUSAGE_INFO_V2,
+                info.as_mut_ptr().cast(),
+            )
+        };
+        if rc == 0 {
+            // SAFETY: filled in by the successful call.
+            return Some(unsafe { info.assume_init() }.ri_phys_footprint);
+        }
+    }
+    None
+}
+
 /// Global allocator for Apple platforms (PaoPao): large blocks are mapped
 /// straight from the kernel and unmapped on free, small ones go to the
 /// system allocator.
@@ -110,6 +134,11 @@ mod paged {
     mod tests {
         use super::super::PagedLarge;
         use std::alloc::{GlobalAlloc, Layout};
+
+        #[test]
+        fn footprint_is_known() {
+            assert!(crate::memory::footprint_bytes().is_some_and(|b| b > 1 << 20));
+        }
 
         #[test]
         fn large_and_small_round_trip() {
