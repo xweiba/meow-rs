@@ -37,3 +37,13 @@ well.
 This is a point-in-time vendor. To refresh, re-copy `src/` from the madeye fork
 at the desired commit and update the pinned hash referenced above and in
 `Cargo.toml`.
+
+## PaoPao deviation: SYN watchdog keeps a session that is still receiving
+
+Upstream (`synDone`) closes the whole session when a stream's SynAck is
+more than 3 s late. The server dials the target before it answers, so one
+slow target cut every other stream on the session — a running video among
+them (seen as 4K YouTube stutter, 2026-10-05). Here the watchdog closes the
+session only when no data frame arrived since it was armed (a peer answering
+heartbeats alone still counts as wedged, #625); otherwise only the late
+stream waits, bounded by the client's own SynAck timeout.

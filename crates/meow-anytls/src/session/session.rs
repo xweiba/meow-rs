@@ -98,6 +98,11 @@ pub struct Session {
     // deadline task holding `Weak<Session>` closes the session on expiry.
     // Sync mutex — held only across abort/store, never across an await.
     syn_watchdog: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    // Data frames received from the peer so far. PaoPao: the SYN watchdog
+    // closes the session only when no data came since it was armed — a
+    // peer still sending (another stream's video) is alive; its SynAck is
+    // just late (the server dials the target before it answers).
+    frames_in: std::sync::atomic::AtomicU64,
 }
 
 impl Session {
@@ -169,6 +174,7 @@ impl Session {
             heartbeat: heartbeat_state,
             close_notify: Arc::new(Notify::new()),
             syn_watchdog: std::sync::Mutex::new(None),
+            frames_in: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -210,6 +216,7 @@ impl Session {
             heartbeat: None,
             close_notify: Arc::new(Notify::new()),
             syn_watchdog: std::sync::Mutex::new(None),
+            frames_in: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -457,6 +464,12 @@ impl Session {
 
     /// Handle an incoming frame from connection
     async fn handle_frame(&self, frame: Frame) -> Result<()> {
+        // Data only: a peer answering heartbeats alone may still be wedged
+        // (#625); another stream's data proves the data plane works.
+        if frame.cmd == Command::Push {
+            self.frames_in
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let session_id = self.id();
         tracing::debug!(
             session_id = session_id,
@@ -932,9 +945,22 @@ impl Session {
             && !self.is_closed()
         {
             let weak = Arc::downgrade(self);
+            let seen = self.frames_in.load(std::sync::atomic::Ordering::Relaxed);
             let watchdog = tokio::spawn(async move {
                 time::sleep(SYN_WATCHDOG_TIMEOUT).await;
                 if let Some(session) = weak.upgrade() {
+                    // PaoPao: upstream closes the session here, cutting
+                    // every stream on it (a running video among them) when
+                    // one target is slow to dial. Frames since the arm
+                    // prove the peer alive: only the late stream waits
+                    // (its own SYNACK timeout still applies).
+                    if session.frames_in.load(std::sync::atomic::Ordering::Relaxed) != seen {
+                        tracing::debug!(
+                            session_id = session.id(),
+                            "[Session] SYNACK late but the peer is sending - session kept"
+                        );
+                        return;
+                    }
                     tracing::warn!(
                         session_id = session.id(),
                         "[Session] No SYNACK within {:?} of open_stream - closing session",
@@ -2496,6 +2522,35 @@ mod padding_bounds_tests {
             tokio::task::yield_now().await;
         }
         panic!("syn watchdog must close the session past the deadline");
+    }
+
+    /// PaoPao: frames arriving meanwhile (another stream's data) prove the
+    /// peer alive — a late SynAck doesn't close the session under them.
+    #[tokio::test(start_paused = true)]
+    async fn syn_watchdog_keeps_a_session_that_is_still_receiving() {
+        let session = Arc::new(Session::new_client(
+            tokio::io::empty(),
+            tokio::io::sink(),
+            PaddingFactory::default().into_shared(),
+            None,
+        ));
+        let _writer = spawn_writer(&session);
+        session
+            .peer_version
+            .store(2, std::sync::atomic::Ordering::Relaxed);
+        let (_s1, _a1) = session.open_stream().await.unwrap();
+        let (_s2, _a2) = session.open_stream().await.unwrap();
+        tokio::task::yield_now().await;
+        // Stream 1 (a video) keeps receiving while stream 2 waits.
+        session
+            .handle_frame(Frame::data(1, Bytes::from_static(b"video")))
+            .await
+            .unwrap();
+        time::advance(SYN_WATCHDOG_TIMEOUT * 2).await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!session.is_closed());
     }
 
     /// A SynAck disarms the deadline — the session must survive past it.

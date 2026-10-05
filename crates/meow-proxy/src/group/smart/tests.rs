@@ -158,6 +158,7 @@ fn group(lines: &[Arc<Line>]) -> SmartGroup {
             sticky: AtomicBool::new(false),
             streams: parking_lot::Mutex::new(Vec::new()),
             cut_at: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            events: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         }),
     }
 }
@@ -365,6 +366,10 @@ async fn a_slow_line_moves_the_site_and_tests_others_once() {
         (before.0, before.1 + 1, before.2 + 1)
     );
     assert!(g.slow("rr3.googlevideo.com").contains_key("a"));
+    // Recorded for 自动优化: the slow mark once, then the speed test.
+    let kinds: Vec<_> = g.events().iter().map(|e| e.kind).collect();
+    assert_eq!(kinds.first(), Some(&"slow"), "{kinds:?}");
+    assert!(kinds.contains(&"probe"), "{kinds:?}");
     // The family let go of a; its next connection goes elsewhere.
     assert_ne!(roundtrip(&g, "youtube.com").await.unwrap(), "a");
     assert!(g.bans().is_empty(), "slow is not banned");
@@ -411,6 +416,11 @@ async fn slow_video_streams_are_cut_over_once_per_cooldown() {
         c.check(&std::task::Context::from_waker(&w)).is_some()
     };
     assert!(is_cut(&slow));
+    let cut = g.events().into_iter().find(|e| e.kind == "cut").unwrap();
+    assert_eq!(
+        (cut.line.as_str(), cut.to.as_deref(), cut.count),
+        ("a", Some("b"), Some(1))
+    );
     assert!(!is_cut(&other_line), "only the slow line's streams");
     assert!(!is_cut(&other_site), "only the site's streams");
     // Again within the cooldown: left alone (no flapping).

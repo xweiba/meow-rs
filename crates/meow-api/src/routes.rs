@@ -219,6 +219,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/logs", get(get_logs))
         .route("/memory", get(get_memory))
         .route("/site", get(get_site))
+        .route("/smart/events", get(get_smart_events))
         .route("/dns/results", get(get_dns_results))
         .route("/dns/query", get(dns_query_get).post(dns_query))
         .route("/cache/dns/flush", post(flush_dns_cache))
@@ -3505,6 +3506,30 @@ async fn get_site(
             &hosts,
         )))
         .expect("valid site response")
+}
+
+/// PaoPao: `GET /smart/events` → `[{group, at, site, kind, …}]`, what the
+/// smart groups did on their own lately (the app's 自动优化), newest first.
+async fn get_smart_events(State(state): State<Arc<AppState>>) -> Response {
+    let route = state.tunnel.route_snapshot();
+    let mut all: Vec<serde_json::Value> = Vec::new();
+    for (name, proxy) in route.proxies.iter() {
+        let Some(smart) = proxy
+            .as_any()
+            .and_then(|a| a.downcast_ref::<meow_proxy::group::smart::SmartGroup>())
+        else {
+            continue;
+        };
+        for e in smart.events() {
+            let mut v = serde_json::to_value(&e).unwrap_or_default();
+            if let Some(o) = v.as_object_mut() {
+                o.insert("group".into(), serde_json::Value::from(name.to_string()));
+            }
+            all.push(v);
+        }
+    }
+    all.sort_by_key(|v| std::cmp::Reverse(v.get("at").and_then(|a| a.as_i64()).unwrap_or(0)));
+    Json(all).into_response()
 }
 
 async fn get_memory(

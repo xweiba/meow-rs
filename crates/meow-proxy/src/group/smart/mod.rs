@@ -88,6 +88,37 @@ const SPEED_URLS: &[&str] = &[
 const CUT_GAIN: f64 = 2.0;
 /// A site's streams are cut at most once this often (no flapping).
 const CUT_COOLDOWN: Duration = Duration::from_secs(180);
+/// Tuning events kept per group (the app's 自动优化 list).
+const EVENTS_KEPT: usize = 200;
+
+/// Something the group did on its own for a site (PaoPao's 自动优化):
+/// a line found slow or stalled, a speed test, streams cut over.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct TuneEvent {
+    /// Unix milliseconds.
+    pub at: i64,
+    pub site: String,
+    /// `slow`, `stalled`, `probe`, `cut`.
+    pub kind: &'static str,
+    /// The line it is about (the slow one).
+    pub line: String,
+    /// Its speed, bytes per second (0 when unknown or stalled).
+    pub rate: f64,
+    /// `probe`: the fastest line found; `cut`: where streams go now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_rate: Option<f64>,
+    /// `probe`: lines tested; `cut`: streams cut.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
+}
+
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
 
 /// Answers with the caller's address and country (`ip=…`, `loc=…`);
 /// reachable through practically every line.
@@ -123,6 +154,8 @@ struct Shared {
     streams: parking_lot::Mutex<Vec<(String, String, Weak<Cut>)>>,
     /// When each site's streams were cut last.
     cut_at: parking_lot::Mutex<std::collections::HashMap<String, Instant>>,
+    /// The latest [`TuneEvent`]s, oldest first.
+    events: parking_lot::Mutex<std::collections::VecDeque<TuneEvent>>,
 }
 
 impl Drop for Shared {
@@ -186,8 +219,14 @@ impl SmartGroup {
             sticky: std::sync::atomic::AtomicBool::new(false),
             streams: parking_lot::Mutex::new(Vec::new()),
             cut_at: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            events: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         });
         Self { shared }
+    }
+
+    /// What the group did on its own lately (自动优化), oldest first.
+    pub fn events(&self) -> Vec<TuneEvent> {
+        self.shared.events.lock().iter().cloned().collect()
     }
 
     /// 固定出口: one line for every site of the group (AI services: the
@@ -468,6 +507,16 @@ impl Shared {
             return;
         }
         if self.store.mark_slow(site, line) {
+            self.event(TuneEvent {
+                at: unix_ms(),
+                site: site.to_string(),
+                kind: if rate > 0.0 { "slow" } else { "stalled" },
+                line: line.to_string(),
+                rate,
+                to: None,
+                to_rate: None,
+                count: None,
+            });
             info!(
                 "{}: moving {site} off {line} ({:.0} KiB/s)",
                 self.name,
@@ -503,6 +552,14 @@ impl Shared {
             }
         }
         Err(last)
+    }
+
+    fn event(&self, e: TuneEvent) {
+        let mut all = self.events.lock();
+        if all.len() >= EVENTS_KEPT {
+            all.pop_front();
+        }
+        all.push_back(e);
     }
 
     /// A video stream of `site` on `line`, to cut over later if needed.
@@ -541,6 +598,16 @@ impl Shared {
                 "{}: cutting {n} {site} stream(s) off {line}: {to} is {gain:.1}x faster",
                 self.name
             );
+            self.event(TuneEvent {
+                at: unix_ms(),
+                site: site.to_string(),
+                kind: "cut",
+                line: line.to_string(),
+                rate: 0.0,
+                to: Some(to.to_string()),
+                to_rate: None,
+                count: Some(n),
+            });
         }
     }
 
@@ -576,6 +643,7 @@ impl Shared {
             }));
         }
         let mut best: Option<(String, f64)> = None;
+        let tested = tasks.len();
         for t in tasks {
             let Ok(Some((line, rate, took))) = t.await else {
                 continue;
@@ -595,6 +663,16 @@ impl Shared {
                 best = Some((line, rate));
             }
         }
+        self.event(TuneEvent {
+            at: unix_ms(),
+            site: site.to_string(),
+            kind: "probe",
+            line: slow.to_string(),
+            rate: slow_rate,
+            to: best.as_ref().map(|b| b.0.clone()),
+            to_rate: best.as_ref().map(|b| b.1),
+            count: Some(tested),
+        });
         if let Some((line, rate)) = best.filter(|b| b.1 >= metered::SLOW_BULK_BPS) {
             info!(
                 "{}: {site} goes to {line} ({:.0} KiB/s in a speed test)",
