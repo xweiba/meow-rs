@@ -241,6 +241,109 @@ async fn send_get_and_check<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    write_get(&mut stream, parsed).await?;
+    let status = read_status_line(&mut stream).await?;
+    trace!(status, "url_test: received status");
+    if ranges.iter().any(|(lo, hi)| status >= *lo && status <= *hi) {
+        Ok(())
+    } else {
+        Err(format!("unexpected status {status}"))
+    }
+}
+
+/// Download speed through `adapter`: GETs `url` (a large file) and reads at
+/// most `max_bytes` of the body within `budget` (dial included). Returns
+/// body bytes per second, timed from the end of the headers so the dial
+/// and handshakes don't count. Running out of time still measures what
+/// came — a crawling line is exactly what this is for.
+pub async fn download_rate(
+    adapter: &dyn ProxyAdapter,
+    url: &str,
+    max_bytes: u64,
+    budget: Duration,
+) -> Result<f64, String> {
+    let parsed = ParsedUrl::parse(url).ok_or_else(|| format!("invalid url: {url}"))?;
+    let deadline = tokio::time::Instant::now() + budget;
+    let metadata = meow_common::Metadata {
+        network: meow_common::Network::Tcp,
+        conn_type: meow_common::ConnType::Tunnel,
+        host: parsed.host.as_str().into(),
+        dst_port: parsed.port,
+        ..Default::default()
+    };
+    let conn = tokio::time::timeout_at(deadline, adapter.dial_tcp(&metadata))
+        .await
+        .map_err(|_| "dial timeout".to_string())?
+        .map_err(|e| format!("dial: {e}"))?;
+    if parsed.https {
+        let tls = TlsLayer::new(&TlsConfig::new(parsed.host.to_string()))
+            .map_err(|e| format!("tls sni: {e}"))?;
+        let tls = tokio::time::timeout_at(deadline, tls.connect(Box::new(conn)))
+            .await
+            .map_err(|_| "tls timeout".to_string())?
+            .map_err(|e| format!("tls: {e}"))?;
+        read_body_rate(tls, &parsed, max_bytes, deadline).await
+    } else {
+        read_body_rate(conn, &parsed, max_bytes, deadline).await
+    }
+}
+
+async fn read_body_rate<S>(
+    stream: S,
+    parsed: &ParsedUrl,
+    max_bytes: u64,
+    deadline: tokio::time::Instant,
+) -> Result<f64, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncBufReadExt as _;
+    let mut stream = tokio::io::BufReader::new(stream);
+    let head = async {
+        write_get(stream.get_mut(), parsed).await?;
+        let status = read_status_line(&mut stream).await?;
+        if !(200..300).contains(&status) {
+            return Err(format!("unexpected status {status}"));
+        }
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = stream
+                .read_line(&mut line)
+                .await
+                .map_err(|e| format!("read: {e}"))?;
+            if n == 0 {
+                return Err("eof in headers".to_string());
+            }
+            if line == "\r\n" || line == "\n" {
+                return Ok(());
+            }
+        }
+    };
+    tokio::time::timeout_at(deadline, head)
+        .await
+        .map_err(|_| "timeout before the body".to_string())??;
+    let start = tokio::time::Instant::now();
+    let mut got = 0u64;
+    let mut buf = vec![0u8; 64 * 1024];
+    while got < max_bytes {
+        match tokio::time::timeout_at(deadline, stream.read(&mut buf)).await {
+            Ok(Ok(0)) | Err(_) => break,
+            Ok(Ok(n)) => got += n as u64,
+            Ok(Err(e)) => return Err(format!("read: {e}")),
+        }
+    }
+    if got == 0 {
+        return Err("empty body".to_string());
+    }
+    let secs = start.elapsed().as_secs_f64().max(0.001);
+    Ok(got as f64 / secs)
+}
+
+async fn write_get<S>(stream: &mut S, parsed: &ParsedUrl) -> Result<(), String>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
     // Host header includes the non-default port so virtual-hosted origins
     // route correctly; mirrors Go net/http's default behaviour.
     use std::io::Write as _;
@@ -274,15 +377,7 @@ where
         .write_all(&buf[..written])
         .await
         .map_err(|e| format!("write: {e}"))?;
-    stream.flush().await.map_err(|e| format!("flush: {e}"))?;
-
-    let status = read_status_line(&mut stream).await?;
-    trace!(status, "url_test: received status");
-    if ranges.iter().any(|(lo, hi)| status >= *lo && status <= *hi) {
-        Ok(())
-    } else {
-        Err(format!("unexpected status {status}"))
-    }
+    stream.flush().await.map_err(|e| format!("flush: {e}"))
 }
 
 async fn read_status_line<S>(stream: &mut S) -> Result<u16, String>
@@ -422,6 +517,38 @@ fn parse_expected(spec: Option<&str>) -> Result<Vec<(u16, u16)>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A loopback server sends 3 MB with headers; the probe reads only up
+    /// to its cap and reports a positive rate.
+    #[tokio::test]
+    async fn download_rate_reads_a_bounded_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut req = [0u8; 512];
+            let _ = s.read(&mut req).await;
+            let body = vec![0u8; 3_000_000];
+            let _ = s
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3000000\r\n\r\n")
+                .await;
+            let _ = s.write_all(&body).await;
+        });
+        let direct = crate::direct::DirectAdapter::new();
+        let url = format!("http://127.0.0.1:{port}/__down");
+        let rate = download_rate(&direct, &url, 1 << 20, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(rate > 0.0, "{rate}");
+        assert!(download_rate(
+            &direct,
+            "http://127.0.0.1:9/",
+            1 << 20,
+            Duration::from_secs(2)
+        )
+        .await
+        .is_err());
+    }
 
     #[test]
     fn parsed_url_cases() {

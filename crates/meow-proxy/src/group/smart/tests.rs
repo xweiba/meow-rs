@@ -49,11 +49,13 @@ impl AsyncWrite for Echo {
 
 impl ProxyConn for Echo {}
 
-/// A line that connects after `delay`, or fails while `down`.
+/// A line that connects after `delay`, fails while `down`, never answers
+/// while `hang`.
 struct Line {
     name: String,
     delay: Duration,
     down: AtomicBool,
+    hang: AtomicBool,
     dials: AtomicUsize,
     health: ProxyHealth,
 }
@@ -64,6 +66,7 @@ impl Line {
             name: name.into(),
             delay: Duration::from_millis(delay_ms),
             down: AtomicBool::new(false),
+            hang: AtomicBool::new(false),
             dials: AtomicUsize::new(0),
             health: ProxyHealth::new(),
         })
@@ -86,6 +89,9 @@ impl ProxyAdapter for Line {
     }
     async fn dial_tcp(&self, _m: &Metadata) -> Result<Box<dyn ProxyConn>> {
         self.dials.fetch_add(1, Ordering::Relaxed);
+        if self.hang.load(Ordering::Relaxed) {
+            std::future::pending::<()>().await;
+        }
         tokio::time::sleep(self.delay).await;
         if self.down.load(Ordering::Relaxed) {
             return Err(MeowError::Proxy(format!("{} is down", self.name)));
@@ -146,6 +152,9 @@ fn group(lines: &[Arc<Line>]) -> SmartGroup {
             reprobe: AtomicI64::new(i64::MAX),
             loads: Loads::default(),
             started: std::sync::atomic::AtomicBool::new(true),
+            // Echo lines answer a GET with the GET: a quick failed test.
+            speed_url: "http://127.0.0.1:9/__down".into(),
+            speed_tests: Arc::new(Semaphore::new(SPEED_PROBE_CONCURRENCY)),
         }),
     }
 }
@@ -238,4 +247,122 @@ fn trace_parsing() {
     assert_eq!(e.ip, "203.0.113.9");
     assert_eq!(e.country, "JP");
     assert!(parse_trace("nothing").is_none());
+}
+
+/// Pins `host`'s family to `pin`, every line known good there.
+fn pinned(g: &SmartGroup, host: &str, pin: &str, lines: &[&Arc<Line>]) {
+    let store = &g.shared.store;
+    for l in lines {
+        store.report(
+            "",
+            &l.name,
+            &Outcome {
+                first_ms: 100.0,
+                ..Outcome::default()
+            },
+        );
+        store.report(
+            &site_key(host),
+            &l.name,
+            &Outcome {
+                first_ms: 100.0,
+                ..Outcome::default()
+            },
+        );
+    }
+    store.use_line(&site_key(host), pin);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dead_pinned_line_is_hedged_within_the_deadline() {
+    let a = Line::new("a", 5);
+    let b = Line::new("b", 20);
+    a.hang.store(true, Ordering::Relaxed);
+    let g = group(&[Arc::clone(&a), Arc::clone(&b)]);
+    pinned(&g, "rr1.googlevideo.com", "a", &[&a, &b]);
+    let start = tokio::time::Instant::now();
+    let c =
+        meow_common::with_dial_timeout("policy:youtube", g.dial_tcp(&site("rr1.googlevideo.com")))
+            .await
+            .expect("the hedge connects before the caller's deadline");
+    drop(c);
+    let took = start.elapsed();
+    assert!(
+        took >= HEDGE_AFTER && took < HEDGE_AFTER + Duration::from_millis(100),
+        "{took:?}"
+    );
+    assert_eq!(g.current().unwrap(), "b");
+    // The family moved to the line that answered.
+    assert_eq!(
+        g.unwrap_proxy(&site("youtube.com"), false).unwrap().name(),
+        "b"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_line_hanging_still_answers_before_the_callers_deadline() {
+    let a = Line::new("a", 5);
+    let b = Line::new("b", 5);
+    a.hang.store(true, Ordering::Relaxed);
+    b.hang.store(true, Ordering::Relaxed);
+    let g = group(&[Arc::clone(&a), Arc::clone(&b)]);
+    pinned(&g, "x.com", "a", &[&a, &b]);
+    let err = meow_common::with_dial_timeout("auto", g.dial_tcp(&site("x.com")))
+        .await
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("all lines failed"), "{err}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_line_connecting_before_the_hedge_time_goes_alone() {
+    let a = Line::new("a", 1000);
+    let b = Line::new("b", 5);
+    let g = group(&[Arc::clone(&a), Arc::clone(&b)]);
+    pinned(&g, "x.com", "a", &[&a, &b]);
+    let before = b.dials.load(Ordering::Relaxed);
+    assert_eq!(roundtrip(&g, "x.com").await.unwrap(), "a");
+    tokio::time::sleep(HEDGE_AFTER * 2).await;
+    assert_eq!(b.dials.load(Ordering::Relaxed), before, "no hedge");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_merely_slower_loser_is_no_failure() {
+    let a = Line::new("a", 2000);
+    let b = Line::new("b", 10);
+    let g = group(&[Arc::clone(&a), Arc::clone(&b)]);
+    pinned(&g, "x.com", "a", &[&a, &b]);
+    assert_eq!(roundtrip(&g, "x.com").await.unwrap(), "b");
+    // a connects later, in the background.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(g.bans().is_empty());
+    let rec = g.snapshot("x.com")["a"];
+    assert_eq!(rec.failure, 0.0, "{rec:?}");
+    assert_eq!(rec.success, 2.0, "{rec:?}");
+}
+
+#[tokio::test]
+async fn a_slow_line_moves_the_site_and_tests_others_once() {
+    let a = Line::new("a", 1);
+    let b = Line::new("b", 1);
+    let c = Line::new("c", 1);
+    let g = group(&[Arc::clone(&a), Arc::clone(&b), Arc::clone(&c)]);
+    pinned(&g, "googlevideo.com", "a", &[&a, &b, &c]);
+    let dials = |l: &Arc<Line>| l.dials.load(Ordering::Relaxed);
+    let before = (dials(&a), dials(&b), dials(&c));
+    let me = &g.shared;
+    me.live("googlevideo.com", "a", Live::Slow { rate: 90_000.0 });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    me.live("googlevideo.com", "a", Live::Slow { rate: 80_000.0 });
+    me.live("googlevideo.com", "a", Live::Stalled);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // One speed test of the others, never of the slow line.
+    assert_eq!(
+        (dials(&a), dials(&b), dials(&c)),
+        (before.0, before.1 + 1, before.2 + 1)
+    );
+    assert!(g.slow("rr3.googlevideo.com").contains_key("a"));
+    // The family let go of a; its next connection goes elsewhere.
+    assert_ne!(roundtrip(&g, "youtube.com").await.unwrap(), "a");
+    assert!(g.bans().is_empty(), "slow is not banned");
 }

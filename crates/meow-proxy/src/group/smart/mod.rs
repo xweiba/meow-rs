@@ -12,6 +12,12 @@
 //! - Lines that fail three times in a row sit out five minutes ("ban box")
 //!   and come back only after a probe passes. When every line is out, the
 //!   connection is refused — never sent around the proxy.
+//! - A single dial that hasn't connected after [`HEDGE_AFTER`] gets a second
+//!   line (another exit) alongside; the first to connect serves, all
+//!   within the caller's dial deadline.
+//! - A download crawling below 200 KiB/s (or stalling) marks its line slow
+//!   for that site ten minutes: the site's next connections go to another
+//!   line, and a few others get a short speed test.
 //!
 //! Ideas from PaoPao's Go core (and mihomo's Smart group); our own code.
 
@@ -33,10 +39,11 @@ use meow_common::{
 use parking_lot::RwLock;
 use smol_str::SmolStr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{debug, warn};
+use tokio::sync::{watch, Semaphore};
+use tracing::{debug, info, warn};
 
 use self::load::Loads;
-use self::metered::MeteredConn;
+use self::metered::{Live, MeteredConn};
 use self::stats::{site_key, Exit, Outcome, Store};
 use super::UsageTracker;
 
@@ -46,6 +53,21 @@ const BATCH_SIZE: usize = 3;
 const MAX_BATCHES: usize = 3;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const PROBE_CONCURRENCY: usize = 8;
+/// A single dial not connected by now gets a second line alongside.
+const HEDGE_AFTER: Duration = Duration::from_millis(1500);
+/// Ends our dial this much before the caller's deadline, so the caller
+/// hears our answer rather than its own timeout.
+const DEADLINE_MARGIN: Duration = Duration::from_millis(200);
+/// Lines speed-tested when a site's line turned out slow.
+const SPEED_PROBE_LINES: usize = 3;
+/// Speed tests running at once, per group.
+const SPEED_PROBE_CONCURRENCY: usize = 2;
+/// One speed test reads at most this much …
+const SPEED_PROBE_BYTES: u64 = 2 << 20;
+/// … for at most this long.
+const SPEED_PROBE_TIME: Duration = Duration::from_secs(8);
+/// A large file served close to every line's exit.
+const SPEED_URL: &str = "https://speed.cloudflare.com/__down?bytes=2097152";
 
 /// Answers with the caller's address and country (`ip=…`, `loc=…`);
 /// reachable through practically every line.
@@ -70,6 +92,10 @@ struct Shared {
     loads: Loads,
     /// Upkeep (probes, the load sampler) runs: from the first dial on.
     started: std::sync::atomic::AtomicBool,
+    /// Where speed tests download from.
+    speed_url: String,
+    /// Bounds the speed tests running at once.
+    speed_tests: Arc<Semaphore>,
 }
 
 impl Drop for Shared {
@@ -128,6 +154,8 @@ impl SmartGroup {
             reprobe: AtomicI64::new(0),
             loads: Loads::default(),
             started: std::sync::atomic::AtomicBool::new(false),
+            speed_url: SPEED_URL.to_string(),
+            speed_tests: Arc::new(Semaphore::new(SPEED_PROBE_CONCURRENCY)),
         });
         Self { shared }
     }
@@ -146,6 +174,11 @@ impl SmartGroup {
     /// Lines sitting out now, with when they may come back (unix seconds).
     pub fn bans(&self) -> std::collections::HashMap<String, i64> {
         self.shared.store.bans()
+    }
+
+    /// Lines slow for `host`'s site now, with until when (unix seconds).
+    pub fn slow(&self, host: &str) -> std::collections::HashMap<String, i64> {
+        self.shared.store.slow(&site_key(host))
     }
 }
 
@@ -260,34 +293,61 @@ impl Shared {
         }
     }
 
-    /// Dials `lines` at once; the first to connect wins, the others still
-    /// teach the store how fast they were (until the timeout).
+    /// Dials `lines` at once — and `hedge` too once they haven't connected
+    /// after [`HEDGE_AFTER`] (at once if they all failed); the first to
+    /// connect wins, the others still teach the store how fast they were
+    /// (until `deadline`). A loser that was merely slower is no failure.
     async fn race(
         self: &Arc<Self>,
         site: &str,
         metadata: &Metadata,
         lines: &[String],
-        timeout: Duration,
+        hedge: Option<&str>,
+        deadline: tokio::time::Instant,
     ) -> std::result::Result<(String, Box<dyn ProxyConn>, Duration), MeowError> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(lines.len().max(1));
-        for line in lines {
-            let Some(p) = self.member(line).cloned() else {
-                continue;
-            };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(lines.len() + 1);
+        let dial = |p: Arc<dyn Proxy>, line: String| {
             let tx = tx.clone();
             let meta = metadata.clone();
-            let line = line.clone();
-            tokio::spawn(async move {
+            async move {
                 let start = Instant::now();
-                let r = tokio::time::timeout(timeout, p.dial_tcp(&meta)).await;
+                let r = tokio::time::timeout_at(deadline, p.dial_tcp(&meta)).await;
                 let _ = tx.send((line, r, start.elapsed())).await;
+            }
+        };
+        let mut started = 0;
+        for line in lines {
+            if let Some(p) = self.member(line).cloned() {
+                tokio::spawn(dial(p, line.clone()));
+                started += 1;
+            }
+        }
+        // The hedge waits: Some(true) = go now, Some(false) = not needed.
+        let (go, mut wait) = watch::channel(None::<bool>);
+        if let Some(p) = hedge.and_then(|h| self.member(h)).cloned() {
+            let fut = dial(p, hedge.unwrap_or_default().to_string());
+            let (name, site) = (self.name.clone(), site.to_string());
+            let at = tokio::time::Instant::now() + HEDGE_AFTER;
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(at) => {}
+                    r = wait.wait_for(Option::is_some) => {
+                        if !matches!(r.as_deref(), Ok(Some(true))) {
+                            return;
+                        }
+                    }
+                }
+                debug!("{name}: hedging {site}");
+                fut.await;
             });
         }
         drop(tx);
         let mut errs = Vec::new();
+        let mut failed = 0;
         while let Some((line, r, took)) = rx.recv().await {
             match r {
                 Ok(Ok(conn)) => {
+                    let _ = go.send(Some(false));
                     // The losers keep going in the background and report.
                     let me = Arc::clone(self);
                     let site = site.to_string();
@@ -313,7 +373,7 @@ impl Shared {
                                         ..Outcome::default()
                                     },
                                 ),
-                                // Slower than the timeout: says nothing new.
+                                // Slower than the deadline: says nothing new.
                                 Err(_) => {}
                             }
                         }
@@ -345,8 +405,126 @@ impl Shared {
                     errs.push(format!("{line}: timeout"));
                 }
             }
+            failed += 1;
+            if failed == started {
+                // Everything planned failed: the hedge goes now.
+                let _ = go.send(Some(true));
+            }
         }
         Err(MeowError::Proxy(errs.join("; ")))
+    }
+
+    /// Reacts to how a running connection of `line` to `site` goes.
+    fn live(self: &Arc<Self>, site: &str, line: &str, ev: Live) {
+        match ev {
+            Live::Sample { bytes, active_ms } => self.store.sample(site, line, bytes, active_ms),
+            Live::Slow { rate } => self.slow_line(site, line, rate),
+            Live::Stalled => self.slow_line(site, line, 0.0),
+        }
+    }
+
+    /// `line` crawls on `site`: mark it, so the site's next connections go
+    /// elsewhere, and speed-test a few others (once per cooldown).
+    fn slow_line(self: &Arc<Self>, site: &str, line: &str, rate: f64) {
+        if site.is_empty() {
+            return;
+        }
+        if self.store.mark_slow(site, line) {
+            info!(
+                "{}: moving {site} off {line} ({:.0} KiB/s)",
+                self.name,
+                rate / 1024.0
+            );
+        } else {
+            debug!(
+                "{}: {line} still slow for {site} ({:.0} KiB/s)",
+                self.name,
+                rate / 1024.0
+            );
+        }
+        if !self.store.speed_probe_due(site) {
+            return;
+        }
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let me = Arc::clone(self);
+            let (site, line) = (site.to_string(), line.to_string());
+            rt.spawn(async move { me.speed_probe(&site, &line).await });
+        }
+    }
+
+    /// Downloads a test file through the best few lines for `site` other
+    /// than `slow`; their speeds go into the records, and the fastest
+    /// becomes the site's line if it hasn't settled on another meanwhile.
+    async fn speed_probe(self: &Arc<Self>, site: &str, slow: &str) {
+        let mut others = self.candidates(false);
+        others.retain(|l| l != slow);
+        let mut lines = self.store.plan(site, &others).lines;
+        lines.truncate(SPEED_PROBE_LINES);
+        let mut tasks = Vec::new();
+        for line in lines {
+            let Some(p) = self.member(&line).cloned() else {
+                continue;
+            };
+            let me = Arc::clone(self);
+            tasks.push(tokio::spawn(async move {
+                let Ok(_permit) = me.speed_tests.acquire().await else {
+                    return None;
+                };
+                let start = Instant::now();
+                let r = crate::health::download_rate(
+                    p.as_ref(),
+                    &me.speed_url,
+                    SPEED_PROBE_BYTES,
+                    SPEED_PROBE_TIME,
+                )
+                .await;
+                match r {
+                    Ok(rate) => Some((line, rate, start.elapsed())),
+                    Err(e) => {
+                        // The test server may be what's unreachable: no
+                        // failure for the line.
+                        debug!("{}: speed test via {line}: {e}", me.name);
+                        None
+                    }
+                }
+            }));
+        }
+        let mut best: Option<(String, f64)> = None;
+        for t in tasks {
+            let Ok(Some((line, rate, took))) = t.await else {
+                continue;
+            };
+            debug!(
+                "{}: {line} downloads {:.0} KiB/s for {site}",
+                self.name,
+                rate / 1024.0
+            );
+            self.store.sample(
+                site,
+                &line,
+                (rate * took.as_secs_f64()) as u64,
+                took.as_secs_f64() * 1000.0,
+            );
+            if best.as_ref().is_none_or(|b| rate > b.1) {
+                best = Some((line, rate));
+            }
+        }
+        if let Some((line, rate)) = best.filter(|b| b.1 >= metered::SLOW_BULK_BPS) {
+            info!(
+                "{}: {site} goes to {line} ({:.0} KiB/s in a speed test)",
+                self.name,
+                rate / 1024.0
+            );
+            self.store.adopt(site, &line);
+        }
+    }
+
+    /// Of `rest`, the line to hedge `first` with: another exit if known.
+    fn hedge_for<'a>(&self, first: &str, rest: &'a [String]) -> Option<&'a String> {
+        let ip = self.store.exit_of(first).map(|e| e.ip);
+        rest.iter()
+            .find(|l| ip.is_none() || self.store.exit_of(l).map(|e| e.ip) != ip)
+            .or_else(|| rest.first())
     }
 }
 
@@ -479,8 +657,10 @@ impl ProxyAdapter for SmartGroup {
         if plan.lines.is_empty() {
             return Err(me.no_line());
         }
+        // Answer before the caller's own dial deadline runs out.
+        let outer = meow_common::dial::dial_deadline().map(|d| d - DEADLINE_MARGIN);
         let mut errs = Vec::new();
-        let mut lines: &[String] = &plan.lines;
+        let mut lines: Vec<String> = plan.lines.clone();
         let mut size = plan.race.max(1);
         // A site with an exit sees one address at a time, same exit first.
         let batches = if plan.pinned {
@@ -494,27 +674,48 @@ impl ProxyAdapter for SmartGroup {
             }
             let n = size.min(lines.len());
             let timeout = if n == 1 { SINGLE_TIMEOUT } else { RACE_TIMEOUT };
-            match me.race(&site, metadata, &lines[..n], timeout).await {
+            let mut deadline = tokio::time::Instant::now() + timeout;
+            if let Some(o) = outer {
+                if o <= tokio::time::Instant::now() {
+                    break;
+                }
+                deadline = deadline.min(o);
+            }
+            // One line alone: a second (another exit) joins if it is slow.
+            let hedge = (n == 1)
+                .then(|| me.hedge_for(&lines[0], &lines[1..]).cloned())
+                .flatten();
+            let tried: Vec<String> = lines[..n].iter().chain(hedge.iter()).cloned().collect();
+            match me
+                .race(&site, metadata, &lines[..n], hedge.as_deref(), deadline)
+                .await
+            {
                 Ok((line, conn, connect)) => {
                     *me.now.write() = Some(SmolStr::from(line.as_str()));
                     if !plan.no_pin {
                         // A connection lent to a roomier line keeps the
-                        // family on its exit.
-                        me.store
-                            .use_line(&site, plan.keep_pin.as_deref().unwrap_or(&line));
+                        // family on its exit; a failover moves it.
+                        let keep = plan
+                            .keep_pin
+                            .as_deref()
+                            .filter(|_| plan.lines.first() == Some(&line));
+                        me.store.use_line(&site, keep.unwrap_or(&line));
                     }
                     let store_owner = Arc::clone(me);
+                    let live_owner = Arc::clone(me);
                     let load = me.loads.of(&line);
+                    let (live_site, live_line) = (site.clone(), line.clone());
                     return Ok(Box::new(
                         MeteredConn::new(conn, connect, move |r| {
                             store_owner.store.report(&site, &line, &r);
                         })
-                        .counting(load),
+                        .counting(load)
+                        .watching(move |ev| live_owner.live(&live_site, &live_line, ev)),
                     ));
                 }
                 Err(e) => errs.push(e.to_string()),
             }
-            lines = &lines[n..];
+            lines.retain(|l| !tried.contains(l));
             if !plan.pinned {
                 size = BATCH_SIZE;
             }

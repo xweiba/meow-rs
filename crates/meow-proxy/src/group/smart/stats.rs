@@ -9,8 +9,10 @@
 //!
 //! Lines that keep failing sit out a while ("ban box") and come back only
 //! after a probe passes. Sites of one company keep one exit (risk control).
+//! A line that crawls on a site's downloads is marked slow for that site
+//! (not for others) a while: its new connections go elsewhere first.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
 
@@ -30,7 +32,7 @@ const MAX_SITES: usize = 4000;
 /// Share of known-site dials that also try a challenger.
 const EXPLORE_RATE: f64 = 0.05;
 /// Above this a connection counts as a download for throughput.
-const BULK_BYTES: u64 = 1 << 20;
+pub const BULK_BYTES: u64 = 1 << 20;
 /// Favours a line proven on this site over a guess (ms).
 const GUESS_PREMIUM: f64 = 300.0;
 /// A known line this fast (ms) is used alone.
@@ -50,6 +52,10 @@ const SPILL_RATE: f64 = (1u64 << 20) as f64;
 const ASSUMED_CAPACITY: f64 = 2.0 * SPILL_RATE;
 /// 速度最快: share of dials that try a line not measured yet.
 const MEASURE_RATE: f64 = 0.1;
+/// A line slow on a site's downloads goes last for that site this long (s).
+pub const SLOW_SECS: i64 = 10 * 60;
+/// One speed test of other lines per site (family) at most this often (s).
+pub const SPEED_PROBE_COOLDOWN: i64 = 10 * 60;
 
 /// Lines' load now: line → (bytes/s now, fastest seen).
 pub type LoadView = HashMap<String, (f64, f64)>;
@@ -241,6 +247,10 @@ struct Inner {
     /// Banned until (unix seconds) per line; kept past the time until a
     /// probe passes.
     bans: HashMap<String, i64>,
+    /// Site family → line → slow there until (unix seconds).
+    slow: HashMap<String, HashMap<String, i64>>,
+    /// Site family → when its last speed test of other lines started.
+    speed_probes: HashMap<String, i64>,
     dirty: bool,
     balance: bool,
     /// 速度最快: the line seen fastest, no per-site learning.
@@ -291,6 +301,8 @@ impl Store {
             exits: HashMap::new(),
             streak: HashMap::new(),
             bans: HashMap::new(),
+            slow: HashMap::new(),
+            speed_probes: HashMap::new(),
             dirty: false,
             balance: false,
             fastest: false,
@@ -455,6 +467,104 @@ impl Store {
         g.dirty = true;
     }
 
+    /// A throughput sample of `line` on `site` (a long download still
+    /// running, or a speed test): only its speed counts, not as one more
+    /// connection.
+    pub fn sample(&self, site: &str, line: &str, bytes: u64, active_ms: f64) {
+        if bytes == 0 || active_ms <= 0.0 {
+            return;
+        }
+        let rate = bytes as f64 / (active_ms / 1000.0);
+        let mut g = self.inner.lock();
+        g.dirty = true;
+        let all = g.overall.entry(line.to_string()).or_default();
+        all.throughput = ewma(all.throughput, rate);
+        if site.is_empty() {
+            return;
+        }
+        if let Some(r) = g.sites.get_mut(site).and_then(|m| m.get_mut(line)) {
+            r.throughput = ewma(r.throughput, rate);
+        }
+    }
+
+    /// `line` crawls (or stalls) on `site`'s downloads: for [`SLOW_SECS`]
+    /// the site's family tries other lines first, and lets go of its pin
+    /// on this line so the next connection plans afresh. False when the
+    /// mark was already there.
+    pub fn mark_slow(&self, site: &str, line: &str) -> bool {
+        let now = (self.now)();
+        let fam = family_key(site);
+        let mut g = self.inner.lock();
+        for marks in g.slow.values_mut() {
+            marks.retain(|_, until| *until > now);
+        }
+        g.slow.retain(|_, marks| !marks.is_empty());
+        let fresh = g
+            .slow
+            .entry(fam.clone())
+            .or_default()
+            .insert(line.to_string(), now + SLOW_SECS)
+            .is_none();
+        if g.pins.get(&fam).is_some_and(|p| p.line == line) {
+            g.pins.remove(&fam);
+            g.dirty = true;
+        }
+        fresh
+    }
+
+    /// Lines slow for `site` now, with until when (unix seconds).
+    pub fn slow(&self, site: &str) -> HashMap<String, i64> {
+        let now = (self.now)();
+        self.inner
+            .lock()
+            .slow
+            .get(&family_key(site))
+            .map(|m| {
+                m.iter()
+                    .filter(|(_, until)| **until > now)
+                    .map(|(l, until)| (l.clone(), *until))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// May `site` (its family) speed-test other lines now? At most once per
+    /// [`SPEED_PROBE_COOLDOWN`]; true claims the turn.
+    pub fn speed_probe_due(&self, site: &str) -> bool {
+        let now = (self.now)();
+        let mut g = self.inner.lock();
+        g.speed_probes
+            .retain(|_, at| now - *at < SPEED_PROBE_COOLDOWN);
+        let fam = family_key(site);
+        if g.speed_probes.contains_key(&fam) {
+            return false;
+        }
+        g.speed_probes.insert(fam, now);
+        true
+    }
+
+    /// A speed test found `line` fast for `site`: the family takes it as
+    /// its exit unless it already moved on to another (smart mode only:
+    /// 速度最快 never pins, 多点负载 follows its ring).
+    pub fn adopt(&self, site: &str, line: &str) {
+        let now = (self.now)();
+        let fam = family_key(site);
+        {
+            let g = self.inner.lock();
+            if g.fastest || g.balance {
+                return;
+            }
+            let slow = slow_set(&g, &fam, now);
+            if g.pins
+                .get(&fam)
+                .is_some_and(|p| now - p.last_used < STICKY_TTL && !slow.contains(p.line.as_str()))
+            {
+                return;
+            }
+        }
+        self.use_line(site, line);
+    }
+
     /// The line a site would use now without dialing (its pin, else the
     /// best known): what the connection list shows as the chain.
     pub fn peek(&self, site: &str, lines: &[String]) -> Option<String> {
@@ -476,12 +586,29 @@ impl Store {
     }
 
     /// [`Self::plan`], with how busy each line is now: a busy line hands
-    /// new connections to a comparable one with more room left.
+    /// new connections to a comparable one with more room left. Lines slow
+    /// for the site go last, whatever the strategy.
     pub fn plan_with(&self, site: &str, lines: &[String], load: &LoadView) -> Plan {
         if lines.is_empty() {
             return Plan::default();
         }
         let now = (self.now)();
+        let slow = slow_set(&self.inner.lock(), &family_key(site), now);
+        let mut plan = self.plan_inner(site, lines, load, &slow, now);
+        // Stable: the order among the fine lines (and among the slow ones)
+        // stays.
+        plan.lines.sort_by_key(|l| slow.contains(l.as_str()));
+        plan
+    }
+
+    fn plan_inner(
+        &self,
+        site: &str,
+        lines: &[String],
+        load: &LoadView,
+        slow: &HashSet<String>,
+        now: i64,
+    ) -> Plan {
         let mut g = self.inner.lock();
         let site_recs = g.sites.get(site);
         let mut rs: Vec<Ranked<'_>> = lines
@@ -509,7 +636,11 @@ impl Store {
                 r
             })
             .collect();
-        rs.sort_by(|a, b| a.eff().total_cmp(&b.eff()));
+        rs.sort_by(|a, b| {
+            slow.contains(a.line)
+                .cmp(&slow.contains(b.line))
+                .then(a.eff().total_cmp(&b.eff()))
+        });
         let ordered: Vec<String> = rs.iter().map(|r| r.line.to_string()).collect();
         // How much a line carries at most, and how much is free now.
         let capacity = |g: &Inner, l: &str| -> f64 {
@@ -556,15 +687,17 @@ impl Store {
                     if pick != first {
                         plan.lines.retain(|l| l != &pick);
                         plan.lines.insert(0, pick);
-                        plan.keep_pin = Some(pin.line.clone());
+                        plan.keep_pin = Some(pin.line);
                     }
                 }
                 return plan;
             }
         }
         let best = rs[0];
-        if g.balance && !best.known {
-            return balanced_plan(site, &rs);
+        // 多点负载 keeps a site on its ring line; one slow there moves on
+        // to the next healthy line of the ring.
+        if g.balance && (!best.known || !slow.is_empty()) {
+            return balanced_plan(site, &rs, slow);
         }
         let mut plan = Plan {
             lines: ordered,
@@ -645,6 +778,19 @@ impl Store {
         }
         out
     }
+}
+
+/// Lines slow for the family `fam` at `now`.
+fn slow_set(g: &Inner, fam: &str, now: i64) -> HashSet<String> {
+    g.slow
+        .get(fam)
+        .map(|m| {
+            m.iter()
+                .filter(|(_, until)| **until > now)
+                .map(|(l, _)| l.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Keeps the ban list: [`BAN_STREAK`] failures in a row ban a line for
@@ -805,11 +951,15 @@ fn pinned_plan(g: &Inner, pin: &Pin, ordered: &[String], cost: &HashMap<&str, f6
 /// rendezvous hashing of the site family: sites spread over lines, one
 /// site always lands on the same line, and adding or losing a line only
 /// moves the sites that were on it.
-fn balanced_plan(site: &str, rs: &[Ranked<'_>]) -> Plan {
+fn balanced_plan(site: &str, rs: &[Ranked<'_>], slow: &HashSet<String>) -> Plan {
     let best = rs[0].eff();
     let mut healthy: Vec<&str> = rs
         .iter()
-        .filter(|r| r.eff().is_finite() && r.eff() <= (best * 2.0).max(best + 400.0))
+        .filter(|r| {
+            !slow.contains(r.line)
+                && r.eff().is_finite()
+                && r.eff() <= (best * 2.0).max(best + 400.0)
+        })
         .map(|r| r.line)
         .collect();
     if healthy.is_empty() {

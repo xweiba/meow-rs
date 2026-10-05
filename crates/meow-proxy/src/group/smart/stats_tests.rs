@@ -355,3 +355,127 @@ fn fastest_goes_by_measured_download_speed_and_never_pins() {
     assert!(first.get("new").copied().unwrap_or(0) > 5, "{first:?}");
     assert!(!first.contains_key("slow"), "{first:?}");
 }
+
+#[test]
+fn a_slow_mark_moves_only_that_site_and_expires() {
+    let (s, clock) = store();
+    let all = lines(&["a", "b", "c"]);
+    for site in ["googlevideo.com", "example.com"] {
+        s.report(site, "a", &ok(50.0));
+        s.report(site, "b", &ok(200.0));
+        s.report(site, "c", &ok(300.0));
+    }
+    s.use_line("googlevideo.com", "a");
+    assert_eq!(s.plan("youtube.com", &all).lines[0], "a", "family pinned");
+    assert!(s.mark_slow("googlevideo.com", "a"));
+    assert!(!s.mark_slow("googlevideo.com", "a"), "already marked");
+    // The family's pin on a is gone; a goes last for every Google site.
+    for site in ["googlevideo.com", "youtube.com"] {
+        let p = s.plan(site, &all);
+        assert!(!p.pinned, "{site}: {p:?}");
+        assert_eq!(p.lines.last().unwrap(), "a", "{site}: {p:?}");
+    }
+    assert_eq!(s.plan("googlevideo.com", &all).lines[0], "b");
+    // Other sites keep their best line.
+    for _ in 0..20 {
+        assert_eq!(s.plan("example.com", &all).lines[0], "a");
+    }
+    assert!(s.slow("youtube.com").contains_key("a"));
+    clock.store(T0 + SLOW_SECS + 1, Ordering::Relaxed);
+    assert!(s.slow("youtube.com").is_empty());
+    assert_eq!(s.plan("googlevideo.com", &all).lines[0], "a", "expired");
+}
+
+#[test]
+fn a_slow_mark_keeps_a_pin_on_another_line() {
+    let (s, _) = store();
+    let all = lines(&["a", "b"]);
+    for l in ["a", "b"] {
+        s.report("x.com", l, &ok(100.0));
+    }
+    s.use_line("x.com", "b");
+    s.mark_slow("x.com", "a");
+    let p = s.plan("x.com", &all);
+    assert!(p.pinned);
+    assert_eq!(p.lines, all.iter().rev().cloned().collect::<Vec<_>>());
+}
+
+#[test]
+fn speed_tests_cool_down_per_family() {
+    let (s, clock) = store();
+    assert!(s.speed_probe_due("googlevideo.com"));
+    assert!(!s.speed_probe_due("googlevideo.com"));
+    assert!(!s.speed_probe_due("youtube.com"), "same family");
+    assert!(s.speed_probe_due("example.com"), "another site");
+    clock.store(T0 + SPEED_PROBE_COOLDOWN, Ordering::Relaxed);
+    assert!(s.speed_probe_due("youtube.com"));
+}
+
+#[test]
+fn balance_moves_a_site_off_its_slow_line_and_keeps_the_others() {
+    let (s, _) = store();
+    s.set_balance(true);
+    let all = lines(&["a", "b", "c", "d"]);
+    for l in &all {
+        s.report("", l, &ok(100.0));
+    }
+    let sites: Vec<String> = (0..30).map(|i| format!("site{i}.com")).collect();
+    let before: Vec<String> = sites
+        .iter()
+        .map(|site| {
+            let line = s.plan(site, &all).lines[0].clone();
+            s.use_line(site, &line);
+            s.report(site, &line, &ok(100.0));
+            line
+        })
+        .collect();
+    let (moved, slow_line) = (&sites[0], before[0].clone());
+    s.mark_slow(moved, &slow_line);
+    let p = s.plan(moved, &all);
+    assert_ne!(p.lines[0], slow_line);
+    assert_eq!(p.lines.last(), Some(&slow_line));
+    // The next line of its ring: what it would get without the slow line.
+    let rest: Vec<String> = all.iter().filter(|l| **l != slow_line).cloned().collect();
+    let fresh = Store::with_clock(|| T0, 7);
+    fresh.set_balance(true);
+    for l in &all {
+        fresh.report("", l, &ok(100.0));
+    }
+    assert_eq!(p.lines[0], fresh.plan(moved, &rest).lines[0]);
+    for (site, line) in sites.iter().zip(&before).skip(1) {
+        assert_eq!(&s.plan(site, &all).lines[0], line, "{site} kept its line");
+    }
+}
+
+#[test]
+fn fastest_puts_a_slow_line_last_for_that_site() {
+    let (s, _) = store();
+    s.set_fastest(true);
+    for l in ["quick", "other"] {
+        s.report("", l, &ok(100.0));
+    }
+    let load: LoadView = [
+        ("quick".to_string(), (0.0, 9.0 * MB)),
+        ("other".to_string(), (0.0, 1.0 * MB)),
+    ]
+    .into();
+    let all = lines(&["quick", "other"]);
+    s.mark_slow("x.com", "quick");
+    for _ in 0..50 {
+        assert_eq!(s.plan_with("x.com", &all, &load).lines[0], "other");
+        assert_eq!(s.plan_with("y.com", &all, &load).lines[0], "quick");
+    }
+}
+
+#[test]
+fn samples_update_speed_without_counting_a_connection() {
+    let (s, _) = store();
+    s.report("x.com", "a", &ok(100.0));
+    s.sample("x.com", "a", 6 << 20, 3000.0);
+    let rec = s.snapshot("x.com")["a"];
+    assert_eq!(rec.success, 1.0);
+    assert!((rec.throughput - 2.0 * MB).abs() < 1.0, "{rec:?}");
+    // A site never seen gains no record from a sample.
+    s.sample("new.com", "a", 6 << 20, 3000.0);
+    assert!(s.snapshot("new.com").is_empty());
+}
