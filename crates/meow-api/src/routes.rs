@@ -220,6 +220,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/memory", get(get_memory))
         .route("/site", get(get_site))
         .route("/smart/events", get(get_smart_events))
+        .route("/smart/peaks", get(get_smart_peaks))
         .route("/dns/results", get(get_dns_results))
         .route("/dns/query", get(dns_query_get).post(dns_query))
         .route("/cache/dns/flush", post(flush_dns_cache))
@@ -3530,6 +3531,33 @@ async fn get_smart_events(State(state): State<Arc<AppState>>) -> Response {
     }
     all.sort_by_key(|v| std::cmp::Reverse(v.get("at").and_then(|a| a.as_i64()).unwrap_or(0)));
     Json(all).into_response()
+}
+
+/// PaoPao: `GET /smart/peaks` → `{line: {"peak": bytes/s, "at": unix s}}`,
+/// the fastest each line of a smart group has gone (faded over days); the
+/// best of the groups a line is in.
+async fn get_smart_peaks(State(state): State<Arc<AppState>>) -> Response {
+    let route = state.tunnel.route_snapshot();
+    let mut all: HashMap<String, (f64, i64)> = HashMap::new();
+    for proxy in route.proxies.values() {
+        let Some(smart) = proxy
+            .as_any()
+            .and_then(|a| a.downcast_ref::<meow_proxy::group::smart::SmartGroup>())
+        else {
+            continue;
+        };
+        for (line, p) in smart.peaks() {
+            let e = all.entry(line).or_insert(p);
+            if p.0 > e.0 {
+                *e = p;
+            }
+        }
+    }
+    let out: serde_json::Map<String, serde_json::Value> = all
+        .into_iter()
+        .map(|(l, (peak, at))| (l, serde_json::json!({"peak": peak, "at": at})))
+        .collect();
+    Json(out).into_response()
 }
 
 async fn get_memory(

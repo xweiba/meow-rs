@@ -497,3 +497,23 @@ fn sites_by_the_public_suffix_list() {
     let json: serde_json::Value = serde_json::from_str(&sites_json(&["api.weiba.pp.ua"])).unwrap();
     assert_eq!(json["api.weiba.pp.ua"], "weiba.pp.ua");
 }
+
+#[test]
+fn a_lines_best_speed_is_kept_fades_over_days_and_stays_in_the_group() {
+    let (s, clock) = store();
+    // 10 MB/s in a speed test, then 2 MB/s: the best stays 10.
+    s.sample("googlevideo.com", "h01", 10 << 20, 1000.0);
+    s.sample("googlevideo.com", "h01", 2 << 20, 1000.0);
+    s.sample("googlevideo.com", "tw", 1 << 20, 1000.0);
+    let p = s.peaks(&lines(&["h01", "tw", "never"]));
+    assert_eq!(p["h01"], ((10 << 20) as f64, T0));
+    assert!(!p.contains_key("never"), "never measured");
+    // Only the lines asked for (the group's own members).
+    assert_eq!(s.peaks(&lines(&["tw"])).len(), 1);
+    // Three days on it counts half; a faster speed then takes over.
+    clock.store(T0 + PEAK_HALF_LIFE as i64, Ordering::Relaxed);
+    let half = s.peaks(&lines(&["h01"]))["h01"].0;
+    assert!((half - (5 << 20) as f64).abs() < 1.0, "{half}");
+    s.sample("googlevideo.com", "h01", 6 << 20, 1000.0);
+    assert_eq!(s.peaks(&lines(&["h01"]))["h01"].0, (6 << 20) as f64);
+}

@@ -78,7 +78,20 @@ pub struct Record {
     /// Unix seconds.
     #[serde(rename = "u")]
     pub last_used: i64,
+    /// The fastest this line has gone (bytes/s, real downloads and speed
+    /// tests), as of [`Record::peak_at`]; fades with [`PEAK_HALF_LIFE`]
+    /// (a line that slowed for good drops back). See [`Record::peak_now`].
+    #[serde(rename = "p", default, skip_serializing_if = "is_zero")]
+    pub peak: f64,
+    /// Unix seconds.
+    #[serde(rename = "pa", default)]
+    pub peak_at: i64,
 }
+
+/// A line's best speed counts half after this many seconds (three days):
+/// evenings and mornings differ, a line that once ran fast is worth trying
+/// first, but not forever.
+pub const PEAK_HALF_LIFE: f64 = 3.0 * 24.0 * 3600.0;
 
 fn is_zero(v: &f64) -> bool {
     *v == 0.0
@@ -105,6 +118,23 @@ fn ewma(old: f64, sample: f64) -> f64 {
 }
 
 impl Record {
+    /// The fastest this line has gone, faded to `now` (bytes/s).
+    pub fn peak_now(&self, now: i64) -> f64 {
+        if self.peak <= 0.0 {
+            return 0.0;
+        }
+        let age = (now - self.peak_at).max(0) as f64;
+        self.peak * 0.5f64.powf(age / PEAK_HALF_LIFE)
+    }
+
+    /// A measured speed: a new best (over the faded one) takes its place.
+    fn note_peak(&mut self, rate: f64, now: i64) {
+        if rate > 0.0 && rate >= self.peak_now(now) {
+            self.peak = rate;
+            self.peak_at = now;
+        }
+    }
+
     /// Brings the counters to `now` so old failures fade.
     fn decay(&mut self, now: i64) {
         if self.last_used == 0 || now <= self.last_used {
@@ -130,7 +160,9 @@ impl Record {
             self.first_ms = ewma(self.first_ms, r.first_ms);
         }
         if r.bytes >= BULK_BYTES && r.duration_ms > 0.0 {
-            self.throughput = ewma(self.throughput, r.bytes as f64 / (r.duration_ms / 1000.0));
+            let rate = r.bytes as f64 / (r.duration_ms / 1000.0);
+            self.throughput = ewma(self.throughput, rate);
+            self.note_peak(rate, now);
         }
     }
 
@@ -502,10 +534,12 @@ impl Store {
             return;
         }
         let rate = bytes as f64 / (active_ms / 1000.0);
+        let now = (self.now)();
         let mut g = self.inner.lock();
         g.dirty = true;
         let all = g.overall.entry(line.to_string()).or_default();
         all.throughput = ewma(all.throughput, rate);
+        all.note_peak(rate, now);
         if site.is_empty() {
             return;
         }
@@ -672,8 +706,16 @@ impl Store {
         // How much a line carries at most, and how much is free now.
         let capacity = |g: &Inner, l: &str| -> f64 {
             let (_, peak) = load.get(l).copied().unwrap_or_default();
-            let tp = g.overall.get(l).map_or(0.0, |r| r.throughput);
-            peak.max(tp)
+            let rec = g.overall.get(l);
+            let tp = rec.map_or(0.0, |r| r.throughput);
+            // No average measured: half its best ever stands in (recent
+            // measurements decide; the best only ranks the unknown).
+            let best = if tp > 0.0 {
+                0.0
+            } else {
+                rec.map_or(0.0, |r| r.peak_now(now)) / 2.0
+            };
+            peak.max(tp).max(best)
         };
         let busy = |l: &str| load.get(l).is_some_and(|(rate, _)| *rate >= SPILL_RATE);
 
@@ -768,6 +810,22 @@ impl Store {
         }
         drop(g);
         plan
+    }
+
+    /// The fastest each of `lines` has gone, faded to now (bytes/s), with
+    /// when (unix seconds); lines never measured are absent. Only `lines`
+    /// (the group's own members): a group never looks beyond them.
+    pub fn peaks(&self, lines: &[String]) -> HashMap<String, (f64, i64)> {
+        let now = (self.now)();
+        let g = self.inner.lock();
+        lines
+            .iter()
+            .filter_map(|l| {
+                let r = g.overall.get(l)?;
+                let p = r.peak_now(now);
+                (p > 0.0).then(|| (l.clone(), (p, r.peak_at)))
+            })
+            .collect()
     }
 
     /// What is known about `site`, per line (the app's "this site uses …").

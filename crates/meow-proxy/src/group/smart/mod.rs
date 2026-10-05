@@ -262,6 +262,18 @@ impl SmartGroup {
         Self { shared }
     }
 
+    /// The fastest each member has gone (bytes/s, faded) and when (unix
+    /// seconds); members never measured are absent.
+    pub fn peaks(&self) -> std::collections::HashMap<String, (f64, i64)> {
+        let names: Vec<String> = self
+            .shared
+            .members
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect();
+        self.shared.store.peaks(&names)
+    }
+
     /// What the group did on its own lately (自动优化), oldest first.
     pub fn events(&self) -> Vec<TuneEvent> {
         self.shared.events.lock().iter().cloned().collect()
@@ -655,8 +667,13 @@ impl Shared {
     async fn speed_probe(self: &Arc<Self>, site: &str, slow: &str, slow_rate: f64) {
         let mut others = self.candidates(false);
         others.retain(|l| l != slow);
+        // The group's own members only (`candidates`), never beyond.
         let mut lines = self.store.plan(site, &others).lines;
         if is_video_site(site) {
+            // The ones that went fastest before are tried first.
+            let peaks = self.store.peaks(&lines);
+            let best = |l: &String| peaks.get(l).map_or(0.0, |p| p.0);
+            lines.sort_by(|a, b| best(b).total_cmp(&best(a)));
             lines = probe_mix(&lines, &self.store.snapshot(site), unix_ms() / 1000);
         } else {
             lines.truncate(SPEED_PROBE_LINES);
