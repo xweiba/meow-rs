@@ -159,6 +159,7 @@ fn group(lines: &[Arc<Line>]) -> SmartGroup {
             streams: parking_lot::Mutex::new(Vec::new()),
             cut_at: parking_lot::Mutex::new(std::collections::HashMap::new()),
             events: parking_lot::Mutex::new(std::collections::VecDeque::new()),
+            swept_at: parking_lot::Mutex::new(None),
         }),
     }
 }
@@ -453,4 +454,12 @@ fn video_speed_tests_mix_the_usual_lines_with_untried_ones() {
     // Few lines: all of them, once.
     let few = probe_mix(&planned[..3], &known, 0);
     assert_eq!(few, vec!["l0", "l1", "l2"]);
+}
+
+#[tokio::test]
+async fn testing_every_member_happens_at_most_once_an_hour() {
+    let a = Line::new("a", 1);
+    let g = group(&[Arc::clone(&a)]);
+    assert!(g.shared.sweep_due());
+    assert!(!g.shared.sweep_due(), "within the hour: the usual eight");
 }

@@ -63,6 +63,17 @@ const SPEED_PROBE_LINES: usize = 3;
 /// … for video: more, half of them lines never measured on the site (the
 /// usual few may all be slow while an untried one runs 80 Mbit/s).
 const VIDEO_PROBE_LINES: usize = 8;
+/// Video speed tests read this much: 2 MB is gone before a fast line
+/// leaves TCP's slow start (an 80 Mbit/s line measured like a 10 one).
+const VIDEO_PROBE_BYTES: u64 = 8 << 20;
+/// When fewer than half the group's lines have a known best speed, a slow
+/// video tests every member once (the table fills at once instead of eight
+/// a time, where the fast one may never come up) — at most this often.
+const SWEEP_COOLDOWN: Duration = Duration::from_secs(3600);
+/// A faster line at least this fast (bytes/s, ~25 Mbit/s: 4K) takes a
+/// stream over at [`CUT_GAIN_FAST`] already.
+const CUT_FAST_BPS: f64 = 3.0 * 1024.0 * 1024.0;
+const CUT_GAIN_FAST: f64 = 1.5;
 /// Speed tests running at once, per group.
 const SPEED_PROBE_CONCURRENCY: usize = 2;
 /// One speed test reads at most this much …
@@ -194,6 +205,8 @@ struct Shared {
     cut_at: parking_lot::Mutex<std::collections::HashMap<String, Instant>>,
     /// The latest [`TuneEvent`]s, oldest first.
     events: parking_lot::Mutex<std::collections::VecDeque<TuneEvent>>,
+    /// When every member was speed-tested last ([`SWEEP_COOLDOWN`]).
+    swept_at: parking_lot::Mutex<Option<Instant>>,
 }
 
 impl Drop for Shared {
@@ -258,6 +271,7 @@ impl SmartGroup {
             streams: parking_lot::Mutex::new(Vec::new()),
             cut_at: parking_lot::Mutex::new(std::collections::HashMap::new()),
             events: parking_lot::Mutex::new(std::collections::VecDeque::new()),
+            swept_at: parking_lot::Mutex::new(None),
         });
         Self { shared }
     }
@@ -592,16 +606,29 @@ impl Shared {
     /// `line`'s download speed from the first of [`SPEED_URLS`] that serves
     /// (a server's error status tries the next; the line's own failure
     /// ends it).
-    async fn download_rate(&self, line: &dyn ProxyAdapter) -> std::result::Result<f64, String> {
+    async fn download_rate(
+        &self,
+        line: &dyn ProxyAdapter,
+        bytes: u64,
+    ) -> std::result::Result<f64, String> {
         let mut last = "no speed test url".to_string();
         for url in &self.speed_urls {
-            match crate::health::download_rate(line, url, SPEED_PROBE_BYTES, SPEED_PROBE_TIME).await
-            {
+            match crate::health::download_rate(line, url, bytes, SPEED_PROBE_TIME).await {
                 Err(e) if e.starts_with("unexpected status") => last = format!("{url}: {e}"),
                 r => return r,
             }
         }
         Err(last)
+    }
+
+    /// May every member be speed-tested now? True claims the turn.
+    fn sweep_due(&self) -> bool {
+        let mut at = self.swept_at.lock();
+        if at.is_some_and(|t| t.elapsed() < SWEEP_COOLDOWN) {
+            return false;
+        }
+        *at = Some(Instant::now());
+        true
     }
 
     fn event(&self, e: TuneEvent) {
@@ -669,15 +696,24 @@ impl Shared {
         others.retain(|l| l != slow);
         // The group's own members only (`candidates`), never beyond.
         let mut lines = self.store.plan(site, &others).lines;
-        if is_video_site(site) {
+        let video = is_video_site(site);
+        if video {
             // The ones that went fastest before are tried first.
             let peaks = self.store.peaks(&lines);
             let best = |l: &String| peaks.get(l).map_or(0.0, |p| p.0);
             lines.sort_by(|a, b| best(b).total_cmp(&best(a)));
-            lines = probe_mix(&lines, &self.store.snapshot(site), unix_ms() / 1000);
+            // Most lines never measured: all of them, once an hour.
+            if !(peaks.len() * 2 < lines.len() && self.sweep_due()) {
+                lines = probe_mix(&lines, &self.store.snapshot(site), unix_ms() / 1000);
+            }
         } else {
             lines.truncate(SPEED_PROBE_LINES);
         }
+        let bytes = if video {
+            VIDEO_PROBE_BYTES
+        } else {
+            SPEED_PROBE_BYTES
+        };
         let mut tasks = Vec::new();
         for line in lines {
             let Some(p) = self.member(&line).cloned() else {
@@ -689,7 +725,7 @@ impl Shared {
                     return None;
                 };
                 let start = Instant::now();
-                let r = me.download_rate(p.as_ref()).await;
+                let r = me.download_rate(p.as_ref(), bytes).await;
                 match r {
                     Ok(rate) => Some((line, rate, start.elapsed())),
                     Err(e) => {
@@ -743,7 +779,8 @@ impl Shared {
             // cut it, so the player comes back on the faster one (the
             // records now rank it first).
             let gain = rate / slow_rate.max(1.0);
-            if is_video_site(site) && rate >= VIDEO_SLOW_BPS && gain >= CUT_GAIN {
+            let worth = gain >= CUT_GAIN || (rate >= CUT_FAST_BPS && gain >= CUT_GAIN_FAST);
+            if video && rate >= VIDEO_SLOW_BPS && worth {
                 self.cut_over(site, slow, &line, gain);
             }
         }
