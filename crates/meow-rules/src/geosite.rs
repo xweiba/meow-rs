@@ -432,7 +432,7 @@ mod tests {
             r"[",
         ]
         .iter()
-        .map(|s| s.to_string())
+        .map(ToString::to_string)
         .collect();
         let one = compile_any(pats.clone());
         let each: Vec<regex::Regex> = pats.iter().filter_map(|p| regex::Regex::new(p).ok()).collect();
@@ -460,7 +460,7 @@ mod tests {
         let bytes = std::fs::read(path).unwrap();
         let mut patterns: HashMap<String, Vec<String>> = HashMap::new();
         crate::geosite_dat::visit_regexes(&bytes, |cat, p| {
-            patterns.entry(cat.to_string()).or_default().push(p.to_string())
+            patterns.entry(cat.to_string()).or_default().push(p.to_string());
         });
         let (mut cats, mut checked) = (0, 0);
         for (cat, pats) in patterns {
