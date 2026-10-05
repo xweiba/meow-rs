@@ -4,6 +4,12 @@
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
+// PaoPao: freed large blocks go back to the system at once (iOS limits
+// the dirty footprint). See `meow_common::memory::PagedLarge`.
+#[cfg(all(not(feature = "dhat-heap"), any(target_os = "macos", target_os = "ios")))]
+#[global_allocator]
+static ALLOC: meow_common::memory::PagedLarge = meow_common::memory::PagedLarge;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use anyhow::Context as _;
 use anyhow::Result;

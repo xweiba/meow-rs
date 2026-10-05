@@ -3,6 +3,16 @@ use meow_common::{Metadata, Rule, RuleMatchHelper, RuleType};
 use crate::adapter::{intern_adapter, Adapter};
 use smol_str::SmolStr;
 
+/// Lower case; an internationalised name in punycode, the form connections
+/// carry (`多多创业.com` → `xn--vhq70hruha.com`).
+pub(crate) fn ascii_name(name: &str) -> String {
+    if name.is_ascii() {
+        name.to_ascii_lowercase()
+    } else {
+        meow_trie::to_ascii(name)
+    }
+}
+
 pub struct DomainRule {
     domain: SmolStr,
     adapter: Adapter,
@@ -11,7 +21,7 @@ pub struct DomainRule {
 impl DomainRule {
     pub fn new(domain: &str, adapter: &str) -> Self {
         Self {
-            domain: domain.to_lowercase().into(),
+            domain: ascii_name(domain).into(),
             adapter: intern_adapter(adapter),
         }
     }

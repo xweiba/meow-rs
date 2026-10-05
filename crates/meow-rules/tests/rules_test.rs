@@ -148,6 +148,12 @@ fn domain_suffix_match_cases() {
             "example.com",
             false,
         ),
+        (
+            "internationalised: rule in Chinese, host in punycode",
+            "多多创业.com",
+            "www.xn--vhq70hruha.com",
+            true,
+        ),
     ];
 
     let mut failures = Vec::new();

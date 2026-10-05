@@ -11,7 +11,7 @@ pub struct DomainSuffixRule {
 impl DomainSuffixRule {
     pub fn new(suffix: &str, adapter: &str) -> Self {
         Self {
-            suffix: suffix.to_ascii_lowercase().into(),
+            suffix: crate::domain::ascii_name(suffix).into(),
             adapter: intern_adapter(adapter),
         }
     }

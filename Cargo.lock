@@ -3086,6 +3086,7 @@ name = "meow-trie"
 version = "0.22.0"
 dependencies = [
  "criterion",
+ "idna 1.1.0",
  "proptest",
 ]
 

@@ -4,4 +4,4 @@
 //! up a hostname without scanning the full rule list.
 
 mod trie;
-pub use trie::DomainTrie;
+pub use trie::{to_ascii, DomainTrie};

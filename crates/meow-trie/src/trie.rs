@@ -439,6 +439,26 @@ impl<T> Sealed<T> {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// `+.`, `*.` or `.` and the name after it.
+fn split_prefix(pattern: &str) -> (&str, &str) {
+    for p in ["+.", "*.", "."] {
+        if let Some(rest) = pattern.strip_prefix(p) {
+            return (p, rest);
+        }
+    }
+    ("", pattern)
+}
+
+/// An internationalised name in its lower-case punycode (ASCII) form, so
+/// `多多创业.com` and `xn--vhq70hruha.com` are one name. Names that are not
+/// valid IDNs are only lower-cased (they match only themselves).
+pub fn to_ascii(name: &str) -> String {
+    match idna::domain_to_ascii(name) {
+        Ok(a) if !a.is_empty() => a,
+        _ => name.to_lowercase(),
+    }
+}
+
 impl<T: Clone + 'static> DomainTrie<T> {
     pub fn new() -> Self {
         DomainTrie {
@@ -449,11 +469,13 @@ impl<T: Clone + 'static> DomainTrie<T> {
 
     pub fn insert(&mut self, domain: &str, data: T) -> bool {
         let trimmed = domain.trim();
-        let lowered: Cow<'_, str> = if trimmed
-            .bytes()
-            .any(|b| b.is_ascii_uppercase() || !b.is_ascii())
-        {
-            Cow::Owned(trimmed.to_lowercase())
+        let lowered: Cow<'_, str> = if !trimmed.is_ascii() {
+            // Internationalised: stored in its punycode form, the form
+            // connections carry (SNI, DNS).
+            let (prefix, name) = split_prefix(trimmed);
+            Cow::Owned(format!("{prefix}{}", to_ascii(name)))
+        } else if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
+            Cow::Owned(trimmed.to_ascii_lowercase())
         } else {
             Cow::Borrowed(trimmed)
         };
@@ -538,6 +560,9 @@ impl<T: Clone + 'static> DomainTrie<T> {
         if query.is_empty() {
             return None;
         }
+        if !query.is_ascii() {
+            return self.search_best::<false>(&to_ascii(query));
+        }
         if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
             self.search_best::<true>(query)
         } else {
@@ -553,6 +578,9 @@ impl<T: Clone + 'static> DomainTrie<T> {
         let query = domain_lower.trim_end_matches('.');
         if query.is_empty() {
             return None;
+        }
+        if !query.is_ascii() {
+            return self.search_best::<false>(&to_ascii(query));
         }
         self.search_best::<false>(query)
     }
@@ -575,6 +603,9 @@ impl<T: Clone + 'static> DomainTrie<T> {
         let query = domain_lower.trim_end_matches('.');
         if query.is_empty() {
             return None;
+        }
+        if !query.is_ascii() {
+            return self.search_min_normalized(&to_ascii(query));
         }
         let n = label_count(query);
         let mut best: Option<&T> = None;
@@ -839,6 +870,26 @@ mod proptests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internationalised_names_match_either_spelling() {
+        for sealed in [false, true] {
+            let mut trie = DomainTrie::new();
+            trie.insert("+.多多创业.com", 1);
+            trie.insert("xn--fiqs8s.cn", 2); // 中国.cn
+            trie.insert("例子.测试", 3);
+            if sealed {
+                trie.seal();
+            }
+            assert_eq!(trie.search("a.多多创业.com"), Some(&1));
+            assert_eq!(trie.search("www.xn--vhq70hruha.com"), Some(&1));
+            assert_eq!(trie.search("WWW.多多创业.COM"), Some(&1));
+            assert_eq!(trie.search("中国.cn"), Some(&2));
+            assert_eq!(trie.search_normalized("xn--fsqu00a.xn--0zwm56d"), Some(&3));
+            assert_eq!(trie.search_min_normalized("例子.测试"), Some(&3));
+            assert_eq!(trie.search("别的.com"), None);
+        }
+    }
 
     #[test]
     fn test_basic_insert_and_search() {
