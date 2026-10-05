@@ -435,12 +435,25 @@ mod tests {
         .map(ToString::to_string)
         .collect();
         let one = compile_any(pats.clone());
-        let each: Vec<regex::Regex> = pats.iter().filter_map(|p| regex::Regex::new(p).ok()).collect();
+        let each: Vec<regex::Regex> = pats
+            .iter()
+            .filter_map(|p| regex::Regex::new(p).ok())
+            .collect();
         assert!(one.len() < each.len());
         for host in [
-            "ad12.example.com", "ad.example.com", "xad1.example.com", "a.track-me.net",
-            "track-me.net", "track-1.net", "x", "xx", "case.org", "CASE.org", "spaced.io",
-            "a.spaced.io", "",
+            "ad12.example.com",
+            "ad.example.com",
+            "xad1.example.com",
+            "a.track-me.net",
+            "track-me.net",
+            "track-1.net",
+            "x",
+            "xx",
+            "case.org",
+            "CASE.org",
+            "spaced.io",
+            "a.spaced.io",
+            "",
         ] {
             assert_eq!(
                 one.iter().any(|r| r.is_match(host)),
@@ -460,13 +473,18 @@ mod tests {
         let bytes = std::fs::read(path).unwrap();
         let mut patterns: HashMap<String, Vec<String>> = HashMap::new();
         crate::geosite_dat::visit_regexes(&bytes, |cat, p| {
-            patterns.entry(cat.to_string()).or_default().push(p.to_string());
+            patterns
+                .entry(cat.to_string())
+                .or_default()
+                .push(p.to_string());
         });
         let (mut cats, mut checked) = (0, 0);
         for (cat, pats) in patterns {
             let one = compile_any(pats.clone());
-            let each: Vec<regex::Regex> =
-                pats.iter().filter_map(|p| regex::Regex::new(p).ok()).collect();
+            let each: Vec<regex::Regex> = pats
+                .iter()
+                .filter_map(|p| regex::Regex::new(p).ok())
+                .collect();
             let mut hosts = vec!["example.com".to_string(), "a.b.c".to_string()];
             for p in &pats {
                 // Names built from each pattern's literal bits.

@@ -215,8 +215,7 @@ pub fn from_dat_bytes(
 pub(crate) fn visit_regexes(data: &[u8], mut f: impl FnMut(&str, &str)) {
     let mut r = PbReader::new(data);
     let mut categories = HashMap::new();
-    let (mut counts, mut regexes, mut keywords) =
-        (HashMap::new(), HashMap::new(), HashMap::new());
+    let (mut counts, mut regexes, mut keywords) = (HashMap::new(), HashMap::new(), HashMap::new());
     let mut skipped = SkipStats::default();
     while !r.is_at_end() {
         let (field, wire) = r.read_tag().unwrap();

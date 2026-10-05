@@ -6,7 +6,10 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 
 // PaoPao: freed large blocks go back to the system at once (iOS limits
 // the dirty footprint). See `meow_common::memory::PagedLarge`.
-#[cfg(all(not(feature = "dhat-heap"), any(target_os = "macos", target_os = "ios")))]
+#[cfg(all(
+    not(feature = "dhat-heap"),
+    any(target_os = "macos", target_os = "ios")
+))]
 #[global_allocator]
 static ALLOC: meow_common::memory::PagedLarge = meow_common::memory::PagedLarge;
 
@@ -1135,15 +1138,17 @@ fn bind_socket_addr(listen: &str, port: u16) -> Result<SocketAddr> {
 }
 
 async fn run(
-    config: meow_config::Config,
+    mut config: meow_config::Config,
     config_path: Option<String>,
     log_tx: tokio::sync::broadcast::Sender<meow_api::log_stream::LogMessage>,
     shutdown: ShutdownSignal,
     on_ready: Option<ReadyCallback>,
     early_binding: EarlyOutboundBinding,
 ) -> Result<()> {
-    // Keep raw config in shared state for runtime mutations
-    let raw_config = Arc::new(RwLock::new(config.raw.clone()));
+    // Keep raw config in shared state for runtime mutations. Moved, not
+    // cloned: `config` lives as long as the process (PaoPao: one copy of a
+    // ~10k-rule document is ~1 MB).
+    let raw_config = Arc::new(RwLock::new(std::mem::take(&mut config.raw)));
 
     // Wrap proxy providers in a DashMap for concurrent access.
     let proxy_providers: Arc<DashMap<String, Arc<ProxyProvider>>> = {
@@ -1219,7 +1224,7 @@ async fn run(
     // The supervisor lives on the tunnel so config reloads can reconcile
     // the task set (issue #514).
     tunnel.reconcile_health_checks(&meow_config::extract_health_check_specs(
-        config.raw.proxy_groups.as_deref().unwrap_or(&[]),
+        raw_config.read().proxy_groups.as_deref().unwrap_or(&[]),
     ));
 
     // Start DNS server if configured. The handle is shared with the API
@@ -1262,7 +1267,7 @@ async fn run(
     // (issue #625).
     let proxy_provider_refresh =
         Arc::new(meow_config::proxy_provider_refresh::ProxyProviderRefreshSupervisor::default());
-    proxy_provider_refresh.reconcile(&proxy_providers, config.raw.proxy_providers.as_ref());
+    proxy_provider_refresh.reconcile(&proxy_providers, raw_config.read().proxy_providers.as_ref());
 
     // Providers whose `proxy:` name could not resolve during the
     // pre-publish initial fetch retry once now that `update_routing` has
