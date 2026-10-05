@@ -207,6 +207,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/rules/{index}", delete(delete_rule))
         .route("/rules/reorder", post(reorder_rules))
+        .route("/rules/match", get(get_rule_match))
         .route("/connections", get(get_connections))
         .route("/connections/{id}", delete(close_connection))
         .route("/connections", delete(close_all_connections))
@@ -510,6 +511,62 @@ async fn get_rules(State(state): State<Arc<AppState>>) -> Response {
         })
         .collect();
     Json(RulesResponse { rules: result }).into_response()
+}
+
+#[derive(Deserialize)]
+struct RuleMatchParams {
+    host: String,
+    port: u16,
+    /// `tcp` (default) or `udp`.
+    network: Option<String>,
+    /// Rule index to treat as absent ("who decides if it were deleted").
+    skip: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct RuleMatchResponse {
+    /// Rule type as `/rules` reports it, or `Direct` / `Global` /
+    /// `PaoPaoHosts` / `Final` when no rule decided.
+    rule: String,
+    payload: String,
+    /// Index into `/rules`; -1 when no rule decided.
+    index: i64,
+    proxy: String,
+}
+
+/// PaoPao: `GET /rules/match?host=&port=[&network=tcp|udp][&skip=i]` →
+/// `{"rule","payload","index","proxy"}` — which rule decides a connection to
+/// `host:port` right now, answered by the live rule engine (same route
+/// snapshot, mode and paopao-hosts pins as real traffic).
+async fn get_rule_match(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RuleMatchParams>,
+) -> Response {
+    let host = params.host.trim();
+    if host.is_empty() {
+        return msg_err(StatusCode::BAD_REQUEST, "host is required");
+    }
+    let network = match params.network.as_deref() {
+        None | Some("tcp") => meow_common::Network::Tcp,
+        Some("udp") => meow_common::Network::Udp,
+        Some(_) => return msg_err(StatusCode::BAD_REQUEST, "network must be tcp or udp"),
+    };
+    // A synthetic proxy-inbound connection: no source socket, so no
+    // process lookup. IP literals are folded by the tunnel's pre-handle.
+    let metadata = meow_common::Metadata {
+        network,
+        host: host.into(),
+        dst_port: params.port,
+        ..Default::default()
+    };
+    let info = state.tunnel.explain(&metadata, params.skip).await;
+    Json(RuleMatchResponse {
+        rule: info.rule.to_string(),
+        payload: info.payload.to_string(),
+        index: info.index.map_or(-1, |i| i as i64),
+        proxy: info.proxy.to_string(),
+    })
+    .into_response()
 }
 
 #[derive(Serialize)]

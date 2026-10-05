@@ -510,6 +510,70 @@ impl TunnelInner {
         }
     }
 
+    /// Explain which rule decides `metadata` right now, without dialing or
+    /// touching match statistics — the `/rules/match` API. Same order as
+    /// [`Self::resolve_proxy_lazy`]: paopao-hosts LAN pin, then mode, then
+    /// the live compiled rules (GEOSITE / GEOIP / rule-providers included),
+    /// resolving the destination IP only when the scan reaches a rule that
+    /// needs it. `skip = Some(i)` treats rule index `i` as absent ("who
+    /// decides if it were deleted"). No process lookup: the query has no
+    /// source socket, so PROCESS-* rules never match.
+    pub async fn explain(&self, metadata: &Metadata, skip: Option<usize>) -> RuleMatchInfo {
+        let fixed = |rule: &'static str, payload: SmolStr, proxy: &'static str| RuleMatchInfo {
+            rule: SmolStr::new_static(rule),
+            payload,
+            index: None,
+            proxy: SmolStr::new_static(proxy),
+        };
+        let mut meta = metadata.clone();
+        // Live traffic folds IP literals / fake IPs / paopao-hosts pins the
+        // same way before matching; a Drop verdict (stale fake IP) still
+        // gets an answer here — the explain caller asked about a host.
+        let _ = self.pre_handle_metadata(&mut meta);
+        if let Some((target, _)) = self.paopao_lan_direct(&meta) {
+            return fixed("PaoPaoHosts", target.rule_payload, "DIRECT");
+        }
+        let route = self.route();
+        match *self.mode.read() {
+            TunnelMode::Global if route.proxies.contains_key("GLOBAL") => {
+                return fixed("Global", SmolStr::default(), "GLOBAL");
+            }
+            // Global without a GLOBAL group dials direct, as resolve_proxy.
+            TunnelMode::Direct | TunnelMode::Global => {
+                return fixed("Direct", SmolStr::default(), "DIRECT");
+            }
+            TunnelMode::Rule => {}
+        }
+
+        let compiled = &route.compiled_rules;
+        let rules = route.rules.as_ref();
+        // Phase one: the lazy scan, which stops before the first rule that
+        // needs an unresolved IP.
+        let needs_ip = {
+            let probe = Self::target_probe(&route, &meta);
+            match compiled.match_rules_lazy(&meta, rules, &probe) {
+                LazyMatchOutcome::Matched(m) if Some(m.rule_index) != skip => {
+                    return RuleMatchInfo::from_match(Some(m));
+                }
+                LazyMatchOutcome::NoMatch => return RuleMatchInfo::from_match(None),
+                // The skipped rule decided: the tail scan may reach IP rules.
+                LazyMatchOutcome::Matched(_) => compiled.needs_ip_resolution(),
+                LazyMatchOutcome::NeedsEnrichment { needs_ip, .. } => needs_ip,
+            }
+        };
+        if needs_ip && meta.dst_ip.is_none() && !meta.host.is_empty() {
+            if let Some(ip) = self.resolver().resolve_ip_real(&meta.host).await {
+                meta.dst_ip = Some(ip);
+            }
+        }
+        let probe = Self::target_probe(&route, &meta);
+        let m = match skip {
+            Some(i) => compiled.match_rules_skipping(&meta, rules, &probe, i),
+            None => compiled.match_rules(&meta, rules, &probe),
+        };
+        RuleMatchInfo::from_match(m)
+    }
+
     /// `paopao-hosts:` pins the host to a LAN address (private, loopback,
     /// link-local, CGNAT, ULA): route DIRECT in every mode, ahead of the
     /// rules — a LAN address must never be sent to a remote proxy.
@@ -641,6 +705,42 @@ pub struct ResolvedTarget {
     /// the dial (`route: _route`) — dropping it early re-opens the reload
     /// race this type exists to close.
     pub route: Arc<RouteTable>,
+}
+
+/// Answer of [`Tunnel::explain`]: the rule that decides a connection and
+/// where it goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleMatchInfo {
+    /// Rule type as `/rules` reports it (`DOMAIN-SUFFIX`, `GEOSITE`,
+    /// `MATCH`…), or the mode / pin that decided without a rule
+    /// (`Direct`, `Global`, `PaoPaoHosts`, `Final` = no rule matched).
+    pub rule: SmolStr,
+    /// Rule payload (empty for `MATCH` and the rule-less answers).
+    pub payload: SmolStr,
+    /// Index into `/rules`; `None` when no rule decided.
+    pub index: Option<usize>,
+    /// Target adapter or group name the rule points at.
+    pub proxy: SmolStr,
+}
+
+impl RuleMatchInfo {
+    fn from_match(m: Option<CompiledMatchResult<'_>>) -> Self {
+        match m {
+            Some(m) => Self {
+                rule: SmolStr::new_static(m.rule_type.as_str()),
+                payload: SmolStr::from(m.rule_payload),
+                index: Some(m.rule_index),
+                proxy: SmolStr::from(m.adapter_name),
+            },
+            // Same fallthrough as `materialize_rule_match`: no rule → DIRECT.
+            None => Self {
+                rule: SmolStr::new_static("Final"),
+                payload: SmolStr::default(),
+                index: None,
+                proxy: SmolStr::new_static("DIRECT"),
+            },
+        }
+    }
 }
 
 /// Verdict from [`TunnelInner::pre_handle_metadata`].
@@ -812,6 +912,11 @@ impl Tunnel {
 
     pub fn mode(&self) -> TunnelMode {
         *self.inner.mode.read()
+    }
+
+    /// Which rule decides `metadata` right now; see [`TunnelInner::explain`].
+    pub async fn explain(&self, metadata: &Metadata, skip: Option<usize>) -> RuleMatchInfo {
+        self.inner.explain(metadata, skip).await
     }
 
     pub fn update_rules(&self, rules: Vec<Box<dyn Rule>>) {

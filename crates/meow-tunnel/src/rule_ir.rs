@@ -658,6 +658,40 @@ impl CompiledRuleSet {
         )
     }
 
+    /// [`Self::match_rules`] with the rule at index `skip` treated as absent:
+    /// answers "who would decide if this rule were deleted" for the
+    /// `/rules/match` explain API. Kept off the traffic hot path — it runs
+    /// the normal scan and only when that lands on `skip` resumes an ordered
+    /// scan after it (no earlier slot matched, so the tail holds the
+    /// answer). Rules pruned at build time (dead after a MATCH) are not
+    /// revived: skipping a MATCH that precedes them falls through to `None`.
+    pub fn match_rules_skipping<'a>(
+        &'a self,
+        metadata: &Metadata,
+        rules: &'a [Box<dyn Rule>],
+        probe: &dyn TargetProbe,
+        skip: usize,
+    ) -> Option<CompiledMatchResult<'a>> {
+        let first = self.match_rules(metadata, rules, probe)?;
+        if first.rule_index != skip {
+            return Some(first);
+        }
+        let helper = RuleMatchHelper;
+        let input = MatchInput::new(metadata);
+        let mut on_missing = |m: CompiledMatchResult<'_>| warn_missing_target(&m);
+        let after = self.slots.partition_point(|s| s.rule_index() <= skip);
+        // EVAL_TRIE=true: trie-owned domain slots in the tail must be
+        // evaluated directly, as in the post-skip tail of `match_rules`.
+        self.scan_range::<true>(
+            after..self.slots.len(),
+            &input,
+            rules,
+            &helper,
+            probe,
+            &mut on_missing,
+        )
+    }
+
     /// Like [`Self::match_rules`], but with **demand-driven early stop**:
     /// the scan halts at the first slot whose predicate needs metadata the
     /// caller has not materialized yet (a resolved `dst_ip`, or process

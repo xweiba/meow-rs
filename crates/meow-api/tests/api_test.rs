@@ -6,7 +6,7 @@ use meow_common::{DnsMode, Proxy};
 use meow_config::raw::{RawConfig, RawProxyGroup, RawSubscription};
 use meow_dns::{HostEntry, Resolver};
 use meow_trie::DomainTrie;
-use meow_tunnel::{ResolvedTarget, Tunnel};
+use meow_tunnel::{ResolvedTarget, RuleMatchInfo, Tunnel};
 use parking_lot::RwLock;
 use smallvec::smallvec;
 use std::collections::HashMap;
@@ -5702,4 +5702,217 @@ async fn put_configs_tun_fake_ip_change_restarts_listener() {
         "stop_tun must have reaped the listener slot, not just the flag"
     );
     assert!(state.tunnel.resolver().fake_ip_v4_net().is_some());
+}
+
+/// `GET /rules/match` answers from the live rule engine: the deciding
+/// rule, `skip` falling through to the next one, and request validation.
+#[tokio::test]
+async fn rules_match_explains_deciding_rule() {
+    let state = test_state_default();
+    let get = |uri: &str| {
+        let app = create_router(Arc::clone(&state));
+        let req = Request::get(uri).body(axum::body::Body::empty()).unwrap();
+        async move { app.oneshot(req).await.unwrap() }
+    };
+
+    let resp = get("/rules/match?host=example.com&port=443").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(resp).await,
+        serde_json::json!({"rule": "DOMAIN", "payload": "example.com", "index": 0, "proxy": "DIRECT"})
+    );
+
+    let resp = get("/rules/match?host=example.com&port=443&skip=0").await;
+    assert_eq!(
+        body_json(resp).await,
+        serde_json::json!({"rule": "MATCH", "payload": "", "index": 1, "proxy": "REJECT"})
+    );
+
+    let resp = get("/rules/match?host=other.org&port=80&network=udp").await;
+    assert_eq!(
+        body_json(resp).await,
+        serde_json::json!({"rule": "MATCH", "payload": "", "index": 1, "proxy": "REJECT"})
+    );
+
+    let resp = get("/rules/match?host=example.com&port=443&skip=1").await;
+    assert_eq!(body_json(resp).await["index"], 0);
+
+    for bad in [
+        "/rules/match?host=&port=443",
+        "/rules/match?host=example.com",
+        "/rules/match?host=example.com&port=443&network=icmp",
+    ] {
+        assert_eq!(get(bad).await.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
+}
+
+/// With nothing deciding by rule (mode direct), `index` is -1.
+#[tokio::test]
+async fn rules_match_reports_mode_without_rule_index() {
+    let state = test_state_default();
+    state.tunnel.set_mode(meow_common::TunnelMode::Direct);
+    let resp = create_router(state)
+        .oneshot(
+            Request::get("/rules/match?host=example.com&port=443")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        body_json(resp).await,
+        serde_json::json!({"rule": "Direct", "payload": "", "index": -1, "proxy": "DIRECT"})
+    );
+}
+
+// ── Tunnel::explain (engine level) ───────────────────────────────
+// These live here rather than in meow-tunnel's unit tests because the
+// meow-tunnel test build pulls boring-sys (needs cmake) via meow-config's
+// default features, while this crate builds meow-config without them.
+
+/// Tunnel with `filler` leading never-matching domain rules (above 64
+/// rules the compiled plan switches to the domain-indexed trie path), then
+/// the four rules under test.
+fn explain_tunnel(filler: usize, resolver: Resolver) -> Tunnel {
+    let mut rules: Vec<String> = (0..filler)
+        .map(|i| format!("DOMAIN-SUFFIX,filler{i}.test,REJECT"))
+        .collect();
+    rules.extend(
+        [
+            "DOMAIN-SUFFIX,example.com,REJECT",
+            "DOMAIN-KEYWORD,example,DIRECT",
+            "IP-CIDR,1.2.3.0/24,REJECT,no-resolve",
+            "MATCH,REJECT",
+        ]
+        .map(String::from),
+    );
+    let raw = RawConfig {
+        rules: Some(rules),
+        ..Default::default()
+    };
+    let meow_config::RebuildResult { proxies, rules, .. } =
+        meow_config::rebuild_from_raw(&raw).unwrap();
+    let tunnel = Tunnel::new(Arc::new(resolver));
+    tunnel.update_routing(proxies, rules, Default::default());
+    tunnel
+}
+
+fn plain_resolver() -> Resolver {
+    Resolver::new(
+        vec![],
+        vec![],
+        DnsMode::Normal,
+        DomainTrie::new(),
+        false,
+        true,
+    )
+}
+
+fn explain_meta(host: &str) -> meow_common::Metadata {
+    meow_common::Metadata {
+        host: host.into(),
+        dst_port: 443,
+        ..Default::default()
+    }
+}
+
+fn info(rule: &str, payload: &str, index: Option<usize>, proxy: &str) -> RuleMatchInfo {
+    RuleMatchInfo {
+        rule: rule.into(),
+        payload: payload.into(),
+        index,
+        proxy: proxy.into(),
+    }
+}
+
+/// The deciding rule, `skip` moving to the next rule, the MATCH fallback,
+/// IP rules on an IP literal and skipping MATCH itself — on both the linear
+/// and the domain-indexed compiled plans.
+#[tokio::test]
+async fn explain_reports_deciding_rule_and_honours_skip() {
+    for filler in [0, 80] {
+        let tunnel = explain_tunnel(filler, plain_resolver());
+        assert_eq!(
+            tunnel
+                .route_snapshot()
+                .compiled_rules
+                .uses_linear_scan_plan(),
+            filler == 0
+        );
+        let at = |i: usize| Some(filler + i);
+        let cases = [
+            (
+                "x.example.com",
+                None,
+                info("DOMAIN-SUFFIX", "example.com", at(0), "REJECT"),
+            ),
+            // Skipping the deciding rule falls to the next match.
+            (
+                "x.example.com",
+                at(0),
+                info("DOMAIN-KEYWORD", "example", at(1), "DIRECT"),
+            ),
+            // Skipping a later rule changes nothing.
+            (
+                "x.example.com",
+                at(1),
+                info("DOMAIN-SUFFIX", "example.com", at(0), "REJECT"),
+            ),
+            ("other.org", None, info("MATCH", "", at(3), "REJECT")),
+            // Without MATCH nothing decides: DIRECT.
+            ("other.org", at(3), info("Final", "", None, "DIRECT")),
+            (
+                "1.2.3.4",
+                None,
+                info("IP-CIDR", "1.2.3.0/24", at(2), "REJECT"),
+            ),
+            ("1.2.3.4", at(2), info("MATCH", "", at(3), "REJECT")),
+        ];
+        for (host, skip, want) in cases {
+            assert_eq!(
+                tunnel.explain(&explain_meta(host), skip).await,
+                want,
+                "filler={filler} host={host} skip={skip:?}"
+            );
+        }
+    }
+}
+
+/// Mode global / direct decide without a rule.
+#[tokio::test]
+async fn explain_follows_mode() {
+    let tunnel = explain_tunnel(0, plain_resolver());
+    let meta = explain_meta("x.example.com");
+    tunnel.set_mode(meow_common::TunnelMode::Global);
+    assert_eq!(
+        tunnel.explain(&meta, None).await,
+        info("Global", "", None, "GLOBAL")
+    );
+    tunnel.set_mode(meow_common::TunnelMode::Direct);
+    assert_eq!(
+        tunnel.explain(&meta, Some(0)).await,
+        info("Direct", "", None, "DIRECT")
+    );
+}
+
+/// A paopao-hosts LAN pin decides ahead of rules; a public pin runs the
+/// rules against the pinned IP.
+#[tokio::test]
+async fn explain_reports_paopao_hosts_pins() {
+    use meow_dns::{PaopaoHostRule, PaopaoHosts};
+    let mut resolver = plain_resolver();
+    let mut list = PaopaoHosts::new();
+    for (value, addr) in [("pve.lan.test", "192.168.1.5"), ("pub.test", "1.2.3.4")] {
+        list.push(PaopaoHostRule::new("exact", value, Some(addr.parse().unwrap())).unwrap());
+    }
+    resolver.set_paopao_hosts(Some(Arc::new(list)));
+    let tunnel = explain_tunnel(0, resolver);
+    assert_eq!(
+        tunnel.explain(&explain_meta("pve.lan.test"), None).await,
+        info("PaoPaoHosts", "pve.lan.test", None, "DIRECT")
+    );
+    assert_eq!(
+        tunnel.explain(&explain_meta("pub.test"), None).await,
+        info("IP-CIDR", "1.2.3.0/24", Some(2), "REJECT")
+    );
 }
