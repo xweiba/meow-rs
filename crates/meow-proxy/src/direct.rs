@@ -35,6 +35,10 @@ pub struct DirectAdapter {
     /// PaoPao: leave by this interface (`interface-name:`, e.g. another
     /// VPN's `utun6`), whatever the global binding.
     interface: Option<String>,
+    /// PaoPao: the name a configured `type: direct` proxy was given (e.g.
+    /// `iface:utun6`); groups list, pick and show it by that name (mihomo
+    /// keeps it too). None: the built-in `DIRECT` / `COMPATIBLE`.
+    name: Option<String>,
     health: ProxyHealth,
 }
 
@@ -46,8 +50,15 @@ impl DirectAdapter {
             resolver: None,
             connect_timeout: None,
             interface: None,
+            name: None,
             health: ProxyHealth::new(),
         }
+    }
+
+    /// Known by `name` (a configured direct proxy), not `DIRECT`.
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 
     /// Leave by interface `name` (PaoPao's per-rule interfaces).
@@ -331,6 +342,9 @@ async fn connect_with_mark(
 #[async_trait]
 impl ProxyAdapter for DirectAdapter {
     fn name(&self) -> &str {
+        if let Some(n) = &self.name {
+            return n;
+        }
         match self.adapter_type {
             AdapterType::Compatible => "COMPATIBLE",
             _ => "DIRECT",

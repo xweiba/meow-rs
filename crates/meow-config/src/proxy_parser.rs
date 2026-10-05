@@ -971,7 +971,8 @@ fn parse_direct(
     use meow_trie::DomainTrie;
     use std::net::{IpAddr, SocketAddr};
 
-    let mut adapter = DirectAdapter::new();
+    // Its own name, so a group holding it can list and pick it.
+    let mut adapter = DirectAdapter::new().named(name);
 
     // PaoPao: `interface-name:` — leave by that interface (e.g. another
     // VPN's tunnel, to reach what only it reaches).
@@ -3830,6 +3831,12 @@ tls: true
     fn parse_direct_without_dns_ok() {
         let cfg = direct_config("name: my-direct\ntype: direct\n");
         assert!(parse_proxy(&cfg).is_ok());
+    }
+
+    #[test]
+    fn a_configured_direct_keeps_its_name() {
+        let cfg = direct_config("name: iface:utun6\ntype: direct\ninterface-name: utun6\n");
+        assert_eq!(parse_proxy(&cfg).unwrap().name(), "iface:utun6");
     }
 
     #[test]
