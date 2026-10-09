@@ -1,0 +1,37 @@
+{
+  "name": "singbox",
+  "body": "{\"outbounds\":[{\"type\":\"selector\",\"tag\":\"select\",\"outbounds\":[\"a\"]},{\"type\":\"shadowsocks\",\"tag\":\"香港 SB\",\"server\":\"2.2.2.2\",\"server_port\":8388,\"method\":\"aes-128-gcm\",\"password\":\"p\",\"detour\":\"x\"},{\"type\":\"wireguard\",\"tag\":\"wg\",\"server\":\"3.3.3.3\",\"server_port\":51820},{\"type\":\"direct\",\"tag\":\"direct\"},{\"type\":\"vless\",\"tag\":\"日本 SB\",\"server\":\"jp.sb.example\",\"server_port\":443,\"uuid\":\"b831381d-6324-4d53-ad4f-8cda48b30811\",\"tls\":{\"enabled\":true,\"server_name\":\"jp.sb.example\"}}]}",
+  "expected": {
+    "nodes": [
+      {
+        "name": "香港 SB",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "2.2.2.2",
+          "server_port": 8388,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "日本 SB",
+        "outbound": {
+          "type": "vless",
+          "server": "jp.sb.example",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "tls": {
+            "enabled": true,
+            "server_name": "jp.sb.example"
+          }
+        }
+      }
+    ],
+    "skipped": 1,
+    "split": {
+      "groups": [],
+      "rules": []
+    },
+    "usage": null
+  }
+}

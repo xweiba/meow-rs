@@ -1,0 +1,165 @@
+{
+  "name": "quirks",
+  "body": "# comment\nmixed-port: 7890\nproxies:\n  - name: 12345\n    type: ss\n    server: 7.7.7.7\n    port: \"8388\"\n    cipher: aes-128-gcm\n    password: 0123\n  - {name: v2p, type: ss, server: 7.7.7.8, port: 1, cipher: aes-128-gcm, password: p, plugin: v2ray-plugin, plugin-opts: {mode: websocket, host: a.com, path: /x, tls: true}}\n  - {name: bad-plugin, type: ss, server: 7.7.7.9, port: 1, cipher: aes-128-gcm, password: p, plugin: shadow-tls}\n  - {name: no-port, type: ss, server: 7.7.7.10, cipher: aes-128-gcm, password: p}\n  - {name: hy-auth, type: hysteria2, server: h.example.com, port: 443, auth: secret, obfs: salamander, obfs-password: o, alpn: [h3], up: 100, down: \"1 Gbps\"}\n  - {name: grpc, type: vless, server: g.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, tls: true, network: grpc, grpc-opts: {grpc-service-name: svc}, alpn: \"h2,http/1.1\"}\n  - {name: h2, type: vmess, server: h2.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, alterId: 0, cipher: auto, tls: true, network: h2, h2-opts: {path: /h2, host: [h2.example.com]}}\n  - {name: http-tls, type: http, server: p.example.com, port: 443, username: u, password: p, tls: true, sni: p.example.com}\n  - {name: socks, type: socks5, server: s.example.com, port: 1080}\n  - {name: any, type: anytls, server: a.example.com, port: 443, password: p, sni: a.example.com, skip-cert-verify: yes}\n  - {name: tuic-alpn, type: tuic, server: t.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, password: p, udp-relay-mode: quic}\n  - just a string\nproxy-groups:\n  - {name: G, proxies: [12345, v2p]}\n  - {type: select}\nrules:\n  - MATCH,G\n",
+  "expected": {
+    "nodes": [
+      {
+        "name": "12345",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "7.7.7.7",
+          "server_port": 8388,
+          "method": "aes-128-gcm",
+          "password": "123"
+        }
+      },
+      {
+        "name": "v2p",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "7.7.7.8",
+          "server_port": 1,
+          "method": "aes-128-gcm",
+          "password": "p",
+          "plugin": "v2ray-plugin",
+          "plugin_opts": "mode=websocket;host=a.com;path=/x;tls"
+        }
+      },
+      {
+        "name": "hy-auth",
+        "outbound": {
+          "type": "hysteria2",
+          "server": "h.example.com",
+          "server_port": 443,
+          "password": "secret",
+          "up_mbps": 100,
+          "down_mbps": 1,
+          "obfs": {
+            "type": "salamander",
+            "password": "o"
+          },
+          "tls": {
+            "enabled": true,
+            "alpn": [
+              "h3"
+            ]
+          }
+        }
+      },
+      {
+        "name": "grpc",
+        "outbound": {
+          "type": "vless",
+          "server": "g.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "tls": {
+            "enabled": true,
+            "alpn": [
+              "h2",
+              "http/1.1"
+            ]
+          },
+          "transport": {
+            "type": "grpc",
+            "service_name": "svc"
+          },
+          "packet_encoding": "xudp"
+        }
+      },
+      {
+        "name": "h2",
+        "outbound": {
+          "type": "vmess",
+          "server": "h2.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "security": "auto",
+          "alter_id": 0,
+          "tls": {
+            "enabled": true
+          },
+          "transport": {
+            "type": "http",
+            "host": [
+              "h2.example.com"
+            ],
+            "path": "/h2"
+          },
+          "packet_encoding": "xudp"
+        }
+      },
+      {
+        "name": "http-tls",
+        "outbound": {
+          "type": "http",
+          "server": "p.example.com",
+          "server_port": 443,
+          "username": "u",
+          "password": "p",
+          "tls": {
+            "enabled": true,
+            "server_name": "p.example.com"
+          }
+        }
+      },
+      {
+        "name": "socks",
+        "outbound": {
+          "type": "socks",
+          "server": "s.example.com",
+          "server_port": 1080,
+          "version": "5"
+        }
+      },
+      {
+        "name": "any",
+        "outbound": {
+          "type": "anytls",
+          "server": "a.example.com",
+          "server_port": 443,
+          "password": "p",
+          "tls": {
+            "enabled": true,
+            "server_name": "a.example.com",
+            "insecure": true
+          }
+        }
+      },
+      {
+        "name": "tuic-alpn",
+        "outbound": {
+          "type": "tuic",
+          "server": "t.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "password": "p",
+          "udp_relay_mode": "quic",
+          "tls": {
+            "enabled": true,
+            "alpn": [
+              "h3"
+            ]
+          }
+        }
+      }
+    ],
+    "skipped": 2,
+    "split": {
+      "groups": [
+        {
+          "n": "G",
+          "t": "select",
+          "m": [
+            "12345",
+            "v2p"
+          ]
+        }
+      ],
+      "rules": [
+        "MATCH,G"
+      ]
+    },
+    "usage": null
+  }
+}

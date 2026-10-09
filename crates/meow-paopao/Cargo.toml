@@ -1,0 +1,28 @@
+[package]
+name = "meow-paopao"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "PaoPao config generation: subscription parsing and the settings model (pure functions, no IO)."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+name = "meow_paopao"
+
+[dependencies]
+serde = { workspace = true }
+# Key order of a node's outbound is a persistence contract shared with the
+# Dart app, so every JSON object keeps insertion order.
+serde_json = { workspace = true, features = ["preserve_order"] }
+base64 = { workspace = true }
+indexmap = { version = "2", features = ["serde"] }
+# The event parser (not serde_yaml): Dart's `yaml` package resolves plain and
+# quoted scalars differently (`password: 0123` is the int 123, `"0123"` the
+# string), and serde_yaml does not expose the scalar style.
+yaml-rust2 = { version = "0.11", default-features = false }
+
+[lints]
+workspace = true

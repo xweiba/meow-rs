@@ -1,0 +1,177 @@
+{
+  "name": "test-links",
+  "body": "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388#%E9%A6%99%E6%B8%AF%2001\nss://2022-blake3-aes-128-gcm:AAAAAAAAAAAAAAAAAAAAAA%3D%3D@h.example.com:443#2022\nss://YWVzLTEyOC1nY206cHdANS42LjcuODoxMjM0#old\nvmess://eyJ2IjoiMiIsInBzIjoi5pel5pysIDAxIiwiYWRkIjoianAuZXhhbXBsZS5jb20iLCJwb3J0IjoiNDQzIiwiaWQiOiJiODMxMzgxZC02MzI0LTRkNTMtYWQ0Zi04Y2RhNDhiMzA4MTEiLCJhaWQiOiIwIiwic2N5IjoiYXV0byIsIm5ldCI6IndzIiwidHlwZSI6Im5vbmUiLCJob3N0IjoiY2RuLmV4YW1wbGUuY29tIiwicGF0aCI6Ii9yYXkiLCJ0bHMiOiJ0bHMiLCJzbmkiOiIifQ==\nvless://b831381d-6324-4d53-ad4f-8cda48b30811@r.example.com:443?security=reality&sni=www.apple.com&fp=chrome&pbk=jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0&sid=0123abcd&type=tcp&flow=xtls-rprx-vision#Reality\nvless://b831381d-6324-4d53-ad4f-8cda48b30811@w.example.com:443?security=tls&type=ws&path=%2Fws&host=w.example.com&sni=w.example.com#WS\ntrojan://secret@t.example.com:443?type=grpc&serviceName=gun&sni=t.example.com#Trojan\nhysteria2://pw@hy.example.com:8443?sni=hy.example.com&obfs=salamander&obfs-password=x&insecure=1#HY2\ntuic://b831381d-6324-4d53-ad4f-8cda48b30811:pw@tu.example.com:443?congestion_control=bbr&alpn=h3&sni=tu.example.com&udp_relay_mode=native#TUIC\nsocks5://u:p@9.9.9.9:1080#S5\nwireguard://whatever@1.1.1.1:51820#WG",
+  "expected": {
+    "nodes": [
+      {
+        "name": "香港 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 8388,
+          "method": "aes-256-gcm",
+          "password": "pass"
+        }
+      },
+      {
+        "name": "2022",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "h.example.com",
+          "server_port": 443,
+          "method": "2022-blake3-aes-128-gcm",
+          "password": "AAAAAAAAAAAAAAAAAAAAAA=="
+        }
+      },
+      {
+        "name": "old",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "5.6.7.8",
+          "server_port": 1234,
+          "method": "aes-128-gcm",
+          "password": "pw"
+        }
+      },
+      {
+        "name": "日本 01",
+        "outbound": {
+          "type": "vmess",
+          "server": "jp.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "security": "auto",
+          "alter_id": 0,
+          "tls": {
+            "enabled": true,
+            "server_name": "cdn.example.com"
+          },
+          "transport": {
+            "type": "ws",
+            "path": "/ray",
+            "headers": {
+              "Host": "cdn.example.com"
+            }
+          },
+          "packet_encoding": "xudp"
+        }
+      },
+      {
+        "name": "Reality",
+        "outbound": {
+          "type": "vless",
+          "server": "r.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "flow": "xtls-rprx-vision",
+          "tls": {
+            "enabled": true,
+            "server_name": "www.apple.com",
+            "utls": {
+              "enabled": true,
+              "fingerprint": "chrome"
+            },
+            "reality": {
+              "enabled": true,
+              "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+              "short_id": "0123abcd"
+            }
+          },
+          "packet_encoding": "xudp"
+        }
+      },
+      {
+        "name": "WS",
+        "outbound": {
+          "type": "vless",
+          "server": "w.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "tls": {
+            "enabled": true,
+            "server_name": "w.example.com"
+          },
+          "transport": {
+            "type": "ws",
+            "path": "/ws",
+            "headers": {
+              "Host": "w.example.com"
+            }
+          },
+          "packet_encoding": "xudp"
+        }
+      },
+      {
+        "name": "Trojan",
+        "outbound": {
+          "type": "trojan",
+          "server": "t.example.com",
+          "server_port": 443,
+          "password": "secret",
+          "tls": {
+            "enabled": true,
+            "server_name": "t.example.com"
+          },
+          "transport": {
+            "type": "grpc",
+            "service_name": "gun"
+          }
+        }
+      },
+      {
+        "name": "HY2",
+        "outbound": {
+          "type": "hysteria2",
+          "server": "hy.example.com",
+          "server_port": 8443,
+          "password": "pw",
+          "obfs": {
+            "type": "salamander",
+            "password": "x"
+          },
+          "tls": {
+            "enabled": true,
+            "server_name": "hy.example.com",
+            "insecure": true
+          }
+        }
+      },
+      {
+        "name": "TUIC",
+        "outbound": {
+          "type": "tuic",
+          "server": "tu.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "password": "pw",
+          "congestion_control": "bbr",
+          "udp_relay_mode": "native",
+          "tls": {
+            "enabled": true,
+            "server_name": "tu.example.com",
+            "alpn": [
+              "h3"
+            ]
+          }
+        }
+      },
+      {
+        "name": "S5",
+        "outbound": {
+          "type": "socks",
+          "server": "9.9.9.9",
+          "server_port": 1080,
+          "version": "5",
+          "username": "u",
+          "password": "p"
+        }
+      }
+    ],
+    "skipped": 1,
+    "split": {
+      "groups": [],
+      "rules": []
+    },
+    "usage": null
+  }
+}

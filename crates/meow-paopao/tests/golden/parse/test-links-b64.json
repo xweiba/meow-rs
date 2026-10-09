@@ -1,0 +1,177 @@
+{
+  "name": "test-links-b64",
+  "body": "c3M6Ly9ZV1Z6TFRJMU5pMW5ZMjA2Y0dGemN3QDEuMi4zLjQ6ODM4OCMlRTklQTYlOTklRTYlQjglQUYlMjAwMQ0Kc3M6Ly8yMDIyLWJsYWtlMy1hZXMtMTI4LWdjbTpBQUFBQUFBQUFBQUFBQUFBQUFBQUFBJTNEJTNEQGguZXhhbXBsZS5jb206NDQzIzIwMjINCnNzOi8vWVdWekxURXlPQzFuWTIwNmNIZEFOUzQyTGpjdU9Eb3hNak0wI29sZA0Kdm1lc3M6Ly9leUoySWpvaU1pSXNJbkJ6SWpvaTVwZWw1cHlzSURBeElpd2lZV1JrSWpvaWFuQXVaWGhoYlhCc1pTNWpiMjBpTENKd2IzSjBJam9pTkRReklpd2lhV1FpT2lKaU9ETXhNemd4WkMwMk16STBMVFJrTlRNdFlXUTBaaTA0WTJSaE5EaGlNekE0TVRFaUxDSmhhV1FpT2lJd0lpd2ljMk41SWpvaVlYVjBieUlzSW01bGRDSTZJbmR6SWl3aWRIbHdaU0k2SW01dmJtVWlMQ0pvYjNOMElqb2lZMlJ1TG1WNFlXMXdiR1V1WTI5dElpd2ljR0YwYUNJNklpOXlZWGtpTENKMGJITWlPaUowYkhNaUxDSnpibWtpT2lJaWZRPT0NCnZsZXNzOi8vYjgzMTM4MWQtNjMyNC00ZDUzLWFkNGYtOGNkYTQ4YjMwODExQHIuZXhhbXBsZS5jb206NDQzP3NlY3VyaXR5PXJlYWxpdHkmc25pPXd3dy5hcHBsZS5jb20mZnA9Y2hyb21lJnBiaz1qTlhIdDF5Um8wdkR1Y2hRbElQNlowWnZqVDNLdHpWSS1UNEU3Um9MSlMwJnNpZD0wMTIzYWJjZCZ0eXBlPXRjcCZmbG93PXh0bHMtcnByeC12aXNpb24jUmVhbGl0eQ0Kdmxlc3M6Ly9iODMxMzgxZC02MzI0LTRkNTMtYWQ0Zi04Y2RhNDhiMzA4MTFAdy5leGFtcGxlLmNvbTo0NDM/c2VjdXJpdHk9dGxzJnR5cGU9d3MmcGF0aD0lMkZ3cyZob3N0PXcuZXhhbXBsZS5jb20mc25pPXcuZXhhbXBsZS5jb20jV1MNCnRyb2phbjovL3NlY3JldEB0LmV4YW1wbGUuY29tOjQ0Mz90eXBlPWdycGMmc2VydmljZU5hbWU9Z3VuJnNuaT10LmV4YW1wbGUuY29tI1Ryb2phbg0KaHlzdGVyaWEyOi8vcHdAaHkuZXhhbXBsZS5jb206ODQ0Mz9zbmk9aHkuZXhhbXBsZS5jb20mb2Jmcz1zYWxhbWFuZGVyJm9iZnMtcGFzc3dvcmQ9eCZpbnNlY3VyZT0xI0hZMg0KdHVpYzovL2I4MzEzODFkLTYzMjQtNGQ1My1hZDRmLThjZGE0OGIzMDgxMTpwd0B0dS5leGFtcGxlLmNvbTo0NDM/Y29uZ2VzdGlvbl9jb250cm9sPWJiciZhbHBuPWgzJnNuaT10dS5leGFtcGxlLmNvbSZ1ZHBfcmVsYXlfbW9kZT1uYXRpdmUjVFVJQw0Kc29ja3M1Oi8vdTpwQDkuOS45Ljk6MTA4MCNTNQ0Kd2lyZWd1YXJkOi8vd2hhdGV2ZXJAMS4xLjEuMTo1MTgyMCNXRw==",
+  "expected": {
+    "nodes": [
+      {
+        "name": "香港 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 8388,
+          "method": "aes-256-gcm",
+          "password": "pass"
+        }
+      },
+      {
+        "name": "2022",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "h.example.com",
+          "server_port": 443,
+          "method": "2022-blake3-aes-128-gcm",
+          "password": "AAAAAAAAAAAAAAAAAAAAAA=="
+        }
+      },
+      {
+        "name": "old",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "5.6.7.8",
+          "server_port": 1234,
+          "method": "aes-128-gcm",
+          "password": "pw"
+        }
+      },
+      {
+        "name": "日本 01",
+        "outbound": {
+          "type": "vmess",
+          "server": "jp.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "security": "auto",
+          "alter_id": 0,
+          "tls": {
+            "enabled": true,
+            "server_name": "cdn.example.com"
+          },
+          "transport": {
+            "type": "ws",
+            "path": "/ray",
+            "headers": {
+              "Host": "cdn.example.com"
+            }
+          },
+          "packet_encoding": "xudp"
+        }
+      },
+      {
+        "name": "Reality",
+        "outbound": {
+          "type": "vless",
+          "server": "r.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "flow": "xtls-rprx-vision",
+          "tls": {
+            "enabled": true,
+            "server_name": "www.apple.com",
+            "utls": {
+              "enabled": true,
+              "fingerprint": "chrome"
+            },
+            "reality": {
+              "enabled": true,
+              "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+              "short_id": "0123abcd"
+            }
+          },
+          "packet_encoding": "xudp"
+        }
+      },
+      {
+        "name": "WS",
+        "outbound": {
+          "type": "vless",
+          "server": "w.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "tls": {
+            "enabled": true,
+            "server_name": "w.example.com"
+          },
+          "transport": {
+            "type": "ws",
+            "path": "/ws",
+            "headers": {
+              "Host": "w.example.com"
+            }
+          },
+          "packet_encoding": "xudp"
+        }
+      },
+      {
+        "name": "Trojan",
+        "outbound": {
+          "type": "trojan",
+          "server": "t.example.com",
+          "server_port": 443,
+          "password": "secret",
+          "tls": {
+            "enabled": true,
+            "server_name": "t.example.com"
+          },
+          "transport": {
+            "type": "grpc",
+            "service_name": "gun"
+          }
+        }
+      },
+      {
+        "name": "HY2",
+        "outbound": {
+          "type": "hysteria2",
+          "server": "hy.example.com",
+          "server_port": 8443,
+          "password": "pw",
+          "obfs": {
+            "type": "salamander",
+            "password": "x"
+          },
+          "tls": {
+            "enabled": true,
+            "server_name": "hy.example.com",
+            "insecure": true
+          }
+        }
+      },
+      {
+        "name": "TUIC",
+        "outbound": {
+          "type": "tuic",
+          "server": "tu.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "password": "pw",
+          "congestion_control": "bbr",
+          "udp_relay_mode": "native",
+          "tls": {
+            "enabled": true,
+            "server_name": "tu.example.com",
+            "alpn": [
+              "h3"
+            ]
+          }
+        }
+      },
+      {
+        "name": "S5",
+        "outbound": {
+          "type": "socks",
+          "server": "9.9.9.9",
+          "server_port": 1080,
+          "version": "5",
+          "username": "u",
+          "password": "p"
+        }
+      }
+    ],
+    "skipped": 1,
+    "split": {
+      "groups": [],
+      "rules": []
+    },
+    "usage": null
+  }
+}

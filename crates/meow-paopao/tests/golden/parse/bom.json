@@ -1,0 +1,122 @@
+{
+  "name": "bom",
+  "body": "﻿proxies:\n  - {name: \"HK 01\", type: ss, server: 1.1.1.1, port: 1, cipher: aes-128-gcm, password: p}\n  - {name: \"JP 01\", type: ss, server: 1.1.1.2, port: 2, cipher: aes-128-gcm, password: p}\n  - {name: \"US 01\", type: ss, server: 1.1.1.3, port: 3, cipher: aes-128-gcm, password: p}\n  - {name: \"🎥 奈飞 SG\", type: ss, server: 1.1.1.4, port: 4, cipher: aes-128-gcm, password: p}\nproxy-groups:\n  - {name: 🚀 节点选择, type: select, proxies: [AUTO, \"HK 01\", \"JP 01\", \"US 01\"]}\n  - {name: AUTO, type: url-test, proxies: [\"HK 01\", \"JP 01\", \"US 01\"], url: \"http://www.gstatic.com/generate_204\", interval: 300}\n  - {name: Media, type: select, proxies: [🚀 节点选择, \"US 01\"]}\n  - {name: 🎥 奈飞, type: select, proxies: [\"🎥 奈飞 SG\", \"US 01\"]}\n  - {name: 🇭🇰 香港, type: select, proxies: [\"HK 01\"]}\n  - {name: 其他地区, type: select, proxies: [\"JP 01\"]}\n  - {name: 漏网之鱼, type: select, proxies: [🚀 节点选择, DIRECT]}\nrules:\n  - DOMAIN-SUFFIX,netflix.com,🎥 奈飞\n  - DOMAIN-SUFFIX,hbo.com,Media\n  - DOMAIN-KEYWORD,google,🚀 节点选择\n  - DOMAIN,hk.example.com,🇭🇰 香港\n  - IP-CIDR,8.8.8.8/32,🚀 节点选择,no-resolve\n  - PROCESS-NAME,Telegram,Media\n  - DOMAIN-SUFFIX,ads.example.com,REJECT\n  - GEOIP,CN,DIRECT\n  - MATCH,漏网之鱼\n",
+  "expected": {
+    "nodes": [
+      {
+        "name": "HK 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.1.1.1",
+          "server_port": 1,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "JP 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.1.1.2",
+          "server_port": 2,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "US 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.1.1.3",
+          "server_port": 3,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "🎥 奈飞 SG",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.1.1.4",
+          "server_port": 4,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      }
+    ],
+    "skipped": 0,
+    "split": {
+      "groups": [
+        {
+          "n": "🚀 节点选择",
+          "t": "select",
+          "m": [
+            "AUTO",
+            "HK 01",
+            "JP 01",
+            "US 01"
+          ]
+        },
+        {
+          "n": "AUTO",
+          "t": "url-test",
+          "m": [
+            "HK 01",
+            "JP 01",
+            "US 01"
+          ]
+        },
+        {
+          "n": "Media",
+          "t": "select",
+          "m": [
+            "🚀 节点选择",
+            "US 01"
+          ]
+        },
+        {
+          "n": "🎥 奈飞",
+          "t": "select",
+          "m": [
+            "🎥 奈飞 SG",
+            "US 01"
+          ]
+        },
+        {
+          "n": "🇭🇰 香港",
+          "t": "select",
+          "m": [
+            "HK 01"
+          ]
+        },
+        {
+          "n": "其他地区",
+          "t": "select",
+          "m": [
+            "JP 01"
+          ]
+        },
+        {
+          "n": "漏网之鱼",
+          "t": "select",
+          "m": [
+            "🚀 节点选择",
+            "DIRECT"
+          ]
+        }
+      ],
+      "rules": [
+        "DOMAIN-SUFFIX,netflix.com,🎥 奈飞",
+        "DOMAIN-SUFFIX,hbo.com,Media",
+        "DOMAIN-KEYWORD,google,🚀 节点选择",
+        "DOMAIN,hk.example.com,🇭🇰 香港",
+        "IP-CIDR,8.8.8.8/32,🚀 节点选择,no-resolve",
+        "PROCESS-NAME,Telegram,Media",
+        "DOMAIN-SUFFIX,ads.example.com,REJECT",
+        "GEOIP,CN,DIRECT",
+        "MATCH,漏网之鱼"
+      ]
+    },
+    "usage": null
+  }
+}

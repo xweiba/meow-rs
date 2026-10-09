@@ -1,0 +1,13 @@
+{
+  "name": "broken-json",
+  "body": "{\"outbounds\": [",
+  "expected": {
+    "nodes": [],
+    "skipped": 0,
+    "split": {
+      "groups": [],
+      "rules": []
+    },
+    "usage": null
+  }
+}

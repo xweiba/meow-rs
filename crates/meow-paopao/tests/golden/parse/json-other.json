@@ -1,0 +1,13 @@
+{
+  "name": "json-other",
+  "body": "{\"hello\": 1}",
+  "expected": {
+    "nodes": [],
+    "skipped": 0,
+    "split": {
+      "groups": [],
+      "rules": []
+    },
+    "usage": null
+  }
+}

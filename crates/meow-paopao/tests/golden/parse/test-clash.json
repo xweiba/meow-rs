@@ -1,0 +1,135 @@
+{
+  "name": "test-clash",
+  "body": "port: 7890\nproxies:\n  - {name: \"HK 1\", type: ss, server: hk.example.com, port: 8388, cipher: chacha20-ietf-poly1305, password: \"p\"}\n  - name: obfs\n    type: ss\n    server: o.example.com\n    port: 443\n    cipher: aes-128-gcm\n    password: p\n    plugin: obfs\n    plugin-opts: {mode: tls, host: bing.com}\n  - name: vm\n    type: vmess\n    server: vm.example.com\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    tls: true\n    network: ws\n    ws-opts: {path: /p, headers: {Host: vm.example.com}}\n  - name: reality\n    type: vless\n    server: re.example.com\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    flow: xtls-rprx-vision\n    tls: true\n    servername: www.apple.com\n    client-fingerprint: chrome\n    reality-opts: {public-key: jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0, short-id: 0123abcd}\n  - {name: tj, type: trojan, server: tj.example.com, port: 443, password: x, sni: tj.example.com, skip-cert-verify: true}\n  - {name: hy, type: hysteria2, server: hy.example.com, port: 443, password: x, up: \"50 Mbps\", down: \"200 Mbps\"}\n  - {name: tu, type: tuic, server: tu.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, password: x, congestion-controller: bbr}\n  - {name: snell, type: snell, server: s.example.com, port: 1, psk: x}\nproxy-groups:\n  - {name: PROXY, type: select, proxies: [HK 1]}\n",
+  "expected": {
+    "nodes": [
+      {
+        "name": "HK 1",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "hk.example.com",
+          "server_port": 8388,
+          "method": "chacha20-ietf-poly1305",
+          "password": "p"
+        }
+      },
+      {
+        "name": "obfs",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "o.example.com",
+          "server_port": 443,
+          "method": "aes-128-gcm",
+          "password": "p",
+          "plugin": "obfs-local",
+          "plugin_opts": "obfs=tls;obfs-host=bing.com"
+        }
+      },
+      {
+        "name": "vm",
+        "outbound": {
+          "type": "vmess",
+          "server": "vm.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "security": "auto",
+          "alter_id": 0,
+          "tls": {
+            "enabled": true
+          },
+          "transport": {
+            "type": "ws",
+            "path": "/p",
+            "headers": {
+              "Host": "vm.example.com"
+            }
+          },
+          "packet_encoding": "xudp"
+        }
+      },
+      {
+        "name": "reality",
+        "outbound": {
+          "type": "vless",
+          "server": "re.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "flow": "xtls-rprx-vision",
+          "tls": {
+            "enabled": true,
+            "server_name": "www.apple.com",
+            "utls": {
+              "enabled": true,
+              "fingerprint": "chrome"
+            },
+            "reality": {
+              "enabled": true,
+              "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+              "short_id": "0123abcd"
+            }
+          },
+          "packet_encoding": "xudp"
+        }
+      },
+      {
+        "name": "tj",
+        "outbound": {
+          "type": "trojan",
+          "server": "tj.example.com",
+          "server_port": 443,
+          "password": "x",
+          "tls": {
+            "enabled": true,
+            "server_name": "tj.example.com",
+            "insecure": true
+          }
+        }
+      },
+      {
+        "name": "hy",
+        "outbound": {
+          "type": "hysteria2",
+          "server": "hy.example.com",
+          "server_port": 443,
+          "password": "x",
+          "up_mbps": 50,
+          "down_mbps": 200,
+          "tls": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "tu",
+        "outbound": {
+          "type": "tuic",
+          "server": "tu.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "password": "x",
+          "congestion_control": "bbr",
+          "tls": {
+            "enabled": true,
+            "alpn": [
+              "h3"
+            ]
+          }
+        }
+      }
+    ],
+    "skipped": 1,
+    "split": {
+      "groups": [
+        {
+          "n": "PROXY",
+          "t": "select",
+          "m": [
+            "HK 1"
+          ]
+        }
+      ],
+      "rules": []
+    },
+    "usage": null
+  }
+}

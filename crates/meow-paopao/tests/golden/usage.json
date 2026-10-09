@@ -1,0 +1,44 @@
+[
+  {
+    "header": "upload=1024; download=2048; total=1073741824; expire=1798732800",
+    "expected": {
+      "upload": 1024,
+      "download": 2048,
+      "total": 1073741824,
+      "expire": 1798732800000
+    }
+  },
+  {
+    "header": "upload=0;download=0;total=0;expire=0",
+    "expected": {
+      "upload": 0,
+      "download": 0,
+      "total": 0
+    }
+  },
+  {
+    "header": "upload=1; total=x",
+    "expected": {
+      "upload": 1,
+      "download": 0,
+      "total": 0
+    }
+  },
+  {
+    "header": "garbage",
+    "expected": null
+  },
+  {
+    "header": "",
+    "expected": null
+  },
+  {
+    "header": "expire=1798732800",
+    "expected": {
+      "upload": 0,
+      "download": 0,
+      "total": 0,
+      "expire": 1798732800000
+    }
+  }
+]

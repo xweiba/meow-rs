@@ -1,0 +1,13 @@
+{
+  "name": "garbage",
+  "body": "hello world, not a subscription",
+  "expected": {
+    "nodes": [],
+    "skipped": 0,
+    "split": {
+      "groups": [],
+      "rules": []
+    },
+    "usage": null
+  }
+}

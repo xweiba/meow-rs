@@ -1,0 +1,13 @@
+{
+  "name": "broken-yaml",
+  "body": "proxies:\n  - {name: [unclosed\n",
+  "expected": {
+    "nodes": [],
+    "skipped": 0,
+    "split": {
+      "groups": [],
+      "rules": []
+    },
+    "usage": null
+  }
+}

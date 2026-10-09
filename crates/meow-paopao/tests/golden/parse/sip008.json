@@ -1,0 +1,36 @@
+{
+  "name": "sip008",
+  "body": "{\"version\":1,\"servers\":[{\"server\":\"4.4.4.4\",\"server_port\":8388,\"method\":\"aes-256-gcm\",\"password\":\"p\",\"remarks\":\"新加坡 SIP\"},{\"server\":\"5.5.5.5\",\"server_port\":\"9000\",\"method\":\"chacha20-ietf-poly1305\",\"password\":\"p\",\"plugin\":\"obfs-local\",\"plugin_opts\":\"obfs=http\"},{\"server\":\"6.6.6.6\",\"server_port\":0,\"method\":\"x\",\"password\":\"p\"}]}",
+  "expected": {
+    "nodes": [
+      {
+        "name": "新加坡 SIP",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "4.4.4.4",
+          "server_port": 8388,
+          "method": "aes-256-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "5.5.5.5",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "5.5.5.5",
+          "server_port": 9000,
+          "method": "chacha20-ietf-poly1305",
+          "password": "p",
+          "plugin": "obfs-local",
+          "plugin_opts": "obfs=http"
+        }
+      }
+    ],
+    "skipped": 1,
+    "split": {
+      "groups": [],
+      "rules": []
+    },
+    "usage": null
+  }
+}

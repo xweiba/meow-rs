@@ -1,0 +1,13 @@
+{
+  "name": "empty",
+  "body": "   \n",
+  "expected": {
+    "nodes": [],
+    "skipped": 0,
+    "split": {
+      "groups": [],
+      "rules": []
+    },
+    "usage": null
+  }
+}

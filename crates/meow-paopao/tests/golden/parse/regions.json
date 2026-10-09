@@ -1,0 +1,264 @@
+{
+  "name": "regions",
+  "body": "proxies:\n  - {name: \"剩余流量：100 GB\", type: ss, server: 1.2.3.4, port: 1000, cipher: aes-128-gcm, password: p}\n  - {name: \"套餐到期：2027-01-01\", type: ss, server: 1.2.3.4, port: 1001, cipher: aes-128-gcm, password: p}\n  - {name: \"香港 01 IEPL\", type: ss, server: 1.2.3.4, port: 1002, cipher: aes-128-gcm, password: p}\n  - {name: \"香港 02\", type: ss, server: 1.2.3.4, port: 1003, cipher: aes-128-gcm, password: p}\n  - {name: \"HK 03 x2\", type: ss, server: 1.2.3.4, port: 1004, cipher: aes-128-gcm, password: p}\n  - {name: \"日本 01 中转\", type: ss, server: 1.2.3.4, port: 1005, cipher: aes-128-gcm, password: p}\n  - {name: \"JP 02\", type: ss, server: 1.2.3.4, port: 1006, cipher: aes-128-gcm, password: p}\n  - {name: \"美国 01\", type: ss, server: 1.2.3.4, port: 1007, cipher: aes-128-gcm, password: p}\n  - {name: \"🇺🇸 美国 02 0.5x\", type: ss, server: 1.2.3.4, port: 1008, cipher: aes-128-gcm, password: p}\n  - {name: \"新加坡 01\", type: ss, server: 1.2.3.4, port: 1009, cipher: aes-128-gcm, password: p}\n  - {name: \"SG 02 专线\", type: ss, server: 1.2.3.4, port: 1010, cipher: aes-128-gcm, password: p}\n  - {name: \"台湾 01\", type: ss, server: 1.2.3.4, port: 1011, cipher: aes-128-gcm, password: p}\n  - {name: \"TW 02\", type: ss, server: 1.2.3.4, port: 1012, cipher: aes-128-gcm, password: p}\n  - {name: \"韩国 01\", type: ss, server: 1.2.3.4, port: 1013, cipher: aes-128-gcm, password: p}\n  - {name: \"英国 01\", type: ss, server: 1.2.3.4, port: 1014, cipher: aes-128-gcm, password: p}\n  - {name: \"德国 01\", type: ss, server: 1.2.3.4, port: 1015, cipher: aes-128-gcm, password: p}\n  - {name: \"土耳其 01\", type: ss, server: 1.2.3.4, port: 1016, cipher: aes-128-gcm, password: p}\n  - {name: \"马来西亚 01\", type: ss, server: 1.2.3.4, port: 1017, cipher: aes-128-gcm, password: p}\n  - {name: \"越南 01\", type: ss, server: 1.2.3.4, port: 1018, cipher: aes-128-gcm, password: p}\n  - {name: \"香港 02\", type: ss, server: 1.2.3.4, port: 1019, cipher: aes-128-gcm, password: p}\n  - {name: \"无名节点\", type: ss, server: 1.2.3.4, port: 1020, cipher: aes-128-gcm, password: p}\n  - {name: \"美国 v6\", type: ss, server: 2001:db8::1, port: 1021, cipher: aes-128-gcm, password: p}\n  - {name: \"HY 日本\", type: hysteria2, server: hy.example.com, port: 443, password: x}\n  - {name: \"TJ 新加坡\", type: trojan, server: tj.example.com, port: 443, password: x, sni: tj.example.com}\n",
+  "expected": {
+    "nodes": [
+      {
+        "name": "剩余流量：100 GB",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1000,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "套餐到期：2027-01-01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1001,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "香港 01 IEPL",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1002,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "香港 02",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1003,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "HK 03 x2",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1004,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "日本 01 中转",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1005,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "JP 02",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1006,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "美国 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1007,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "🇺🇸 美国 02 0.5x",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1008,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "新加坡 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1009,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "SG 02 专线",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1010,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "台湾 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1011,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "TW 02",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1012,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "韩国 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1013,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "英国 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1014,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "德国 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1015,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "土耳其 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1016,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "马来西亚 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1017,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "越南 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1018,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "香港 02",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1019,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "无名节点",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 1020,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "美国 v6",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "2001:db8::1",
+          "server_port": 1021,
+          "method": "aes-128-gcm",
+          "password": "p"
+        }
+      },
+      {
+        "name": "HY 日本",
+        "outbound": {
+          "type": "hysteria2",
+          "server": "hy.example.com",
+          "server_port": 443,
+          "password": "x",
+          "tls": {
+            "enabled": true
+          }
+        }
+      },
+      {
+        "name": "TJ 新加坡",
+        "outbound": {
+          "type": "trojan",
+          "server": "tj.example.com",
+          "server_port": 443,
+          "password": "x",
+          "tls": {
+            "enabled": true,
+            "server_name": "tj.example.com"
+          }
+        }
+      }
+    ],
+    "skipped": 0,
+    "split": {
+      "groups": [],
+      "rules": []
+    },
+    "usage": {
+      "upload": 0,
+      "download": 0,
+      "total": 107374182400,
+      "expire": 1798847940000
+    }
+  }
+}

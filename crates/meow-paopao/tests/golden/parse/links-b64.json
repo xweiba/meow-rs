@@ -1,0 +1,103 @@
+{
+  "name": "links-b64",
+  "body": "c3M6Ly9ZV1Z6TFRJMU5pMW5ZMjA2Y0dGemN3QDEuMi4zLjQ6ODM4OCMlRTklQTYlOTklRTYlQjglQUYlMjAwMQp2bWVzczovL2V5SjJJam9pTWlJc0luQnpJam9pNXBlbDVweXNJREF4SWl3aVlXUmtJam9pYW5BdVpYaGhiWEJzWlM1amIyMGlMQ0p3YjNKMElqb2lORFF6SWl3aWFXUWlPaUppT0RNeE16Z3haQzAyTXpJMExUUmtOVE10WVdRMFppMDRZMlJoTkRoaU16QTRNVEVpTENKaGFXUWlPaUl3SWl3aWMyTjVJam9pWVhWMGJ5SXNJbTVsZENJNkluZHpJaXdpZEhsd1pTSTZJbTV2Ym1VaUxDSm9iM04wSWpvaVkyUnVMbVY0WVcxd2JHVXVZMjl0SWl3aWNHRjBhQ0k2SWk5eVlYa2lMQ0owYkhNaU9pSjBiSE1pTENKemJta2lPaUlpZlE9PQp2bGVzczovL2I4MzEzODFkLTYzMjQtNGQ1My1hZDRmLThjZGE0OGIzMDgxMUB3LmV4YW1wbGUuY29tOjQ0Mz9zZWN1cml0eT10bHMmdHlwZT13cyZwYXRoPSUyRndzJmhvc3Q9dy5leGFtcGxlLmNvbSZzbmk9dy5leGFtcGxlLmNvbSNXUyUyMOe+juWbvQp0cm9qYW46Ly9zZWNyZXRAdC5leGFtcGxlLmNvbTo0NDM/dHlwZT1ncnBjJnNlcnZpY2VOYW1lPWd1biZzbmk9dC5leGFtcGxlLmNvbSNUcm9qYW4lMjDlj7Dmub4KaHlzdGVyaWEyOi8vcHdAaHkuZXhhbXBsZS5jb206ODQ0Mz9zbmk9aHkuZXhhbXBsZS5jb20mb2Jmcz1zYWxhbWFuZGVyJm9iZnMtcGFzc3dvcmQ9eCZpbnNlY3VyZT0xI0hZMiUyMOaWsOWKoOWdoQ==",
+  "expected": {
+    "nodes": [
+      {
+        "name": "香港 01",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "1.2.3.4",
+          "server_port": 8388,
+          "method": "aes-256-gcm",
+          "password": "pass"
+        }
+      },
+      {
+        "name": "日本 01",
+        "outbound": {
+          "type": "vmess",
+          "server": "jp.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "security": "auto",
+          "alter_id": 0,
+          "tls": {
+            "enabled": true,
+            "server_name": "cdn.example.com"
+          },
+          "transport": {
+            "type": "ws",
+            "path": "/ray",
+            "headers": {
+              "Host": "cdn.example.com"
+            }
+          },
+          "packet_encoding": "xudp"
+        }
+      },
+      {
+        "name": "WS 美国",
+        "outbound": {
+          "type": "vless",
+          "server": "w.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "tls": {
+            "enabled": true,
+            "server_name": "w.example.com"
+          },
+          "transport": {
+            "type": "ws",
+            "path": "/ws",
+            "headers": {
+              "Host": "w.example.com"
+            }
+          },
+          "packet_encoding": "xudp"
+        }
+      },
+      {
+        "name": "Trojan 台湾",
+        "outbound": {
+          "type": "trojan",
+          "server": "t.example.com",
+          "server_port": 443,
+          "password": "secret",
+          "tls": {
+            "enabled": true,
+            "server_name": "t.example.com"
+          },
+          "transport": {
+            "type": "grpc",
+            "service_name": "gun"
+          }
+        }
+      },
+      {
+        "name": "HY2 新加坡",
+        "outbound": {
+          "type": "hysteria2",
+          "server": "hy.example.com",
+          "server_port": 8443,
+          "password": "pw",
+          "obfs": {
+            "type": "salamander",
+            "password": "x"
+          },
+          "tls": {
+            "enabled": true,
+            "server_name": "hy.example.com",
+            "insecure": true
+          }
+        }
+      }
+    ],
+    "skipped": 0,
+    "split": {
+      "groups": [],
+      "rules": []
+    },
+    "usage": null
+  }
+}

@@ -1,0 +1,104 @@
+{
+  "name": "links-mixed",
+  "body": "# comment\nss://bad\nvmess://notbase64!!\ntrojan://pw@[2001:db8::2]:443?sni=x.example#v6%20trojan\nvless://b831381d-6324-4d53-ad4f-8cda48b30811@v.example.com:443?security=none&type=tcp#\nhy2://pw@hy.example.com:443/?sni=hy.example.com#hy2\nsocks://dTpw@1.1.1.1:1080#socks-b64\nanytls://pw@a.example.com:443?sni=a.example.com&insecure=1#any\ntuic://b831381d-6324-4d53-ad4f-8cda48b30811:pw@t.example.com:443?alpn=h3,h2#tuic2\nss://YWVzLTEyOC1nY206cHc=@9.9.9.9:443/?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Da.com#ss-plugin\nhttp://not-a-node.example.com",
+  "expected": {
+    "nodes": [
+      {
+        "name": "v6 trojan",
+        "outbound": {
+          "type": "trojan",
+          "server": "2001:db8::2",
+          "server_port": 443,
+          "password": "pw",
+          "tls": {
+            "enabled": true,
+            "server_name": "x.example"
+          }
+        }
+      },
+      {
+        "name": "v.example.com",
+        "outbound": {
+          "type": "vless",
+          "server": "v.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "packet_encoding": "xudp"
+        }
+      },
+      {
+        "name": "hy2",
+        "outbound": {
+          "type": "hysteria2",
+          "server": "hy.example.com",
+          "server_port": 443,
+          "password": "pw",
+          "tls": {
+            "enabled": true,
+            "server_name": "hy.example.com"
+          }
+        }
+      },
+      {
+        "name": "socks-b64",
+        "outbound": {
+          "type": "socks",
+          "server": "1.1.1.1",
+          "server_port": 1080,
+          "version": "5",
+          "username": "u",
+          "password": "p"
+        }
+      },
+      {
+        "name": "any",
+        "outbound": {
+          "type": "anytls",
+          "server": "a.example.com",
+          "server_port": 443,
+          "password": "pw",
+          "tls": {
+            "enabled": true,
+            "server_name": "a.example.com",
+            "insecure": true
+          }
+        }
+      },
+      {
+        "name": "tuic2",
+        "outbound": {
+          "type": "tuic",
+          "server": "t.example.com",
+          "server_port": 443,
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "password": "pw",
+          "tls": {
+            "enabled": true,
+            "alpn": [
+              "h3",
+              "h2"
+            ]
+          }
+        }
+      },
+      {
+        "name": "ss-plugin",
+        "outbound": {
+          "type": "shadowsocks",
+          "server": "9.9.9.9",
+          "server_port": 443,
+          "method": "aes-128-gcm",
+          "password": "pw",
+          "plugin": "obfs-local",
+          "plugin_opts": "obfs=http;obfs-host=a.com"
+        }
+      }
+    ],
+    "skipped": 3,
+    "split": {
+      "groups": [],
+      "rules": []
+    },
+    "usage": null
+  }
+}
