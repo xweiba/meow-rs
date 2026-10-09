@@ -11,6 +11,7 @@
 # PID at the end.
 #
 #   crates/meow-box/lan-test.sh        # BOX_HOST / CLIENT_HOST to override
+#   BOX_ARGS="--iface eth0 --ip 192.168.1.250/24 --gateway 192.168.1.1" crates/meow-box/lan-test.sh
 set -euo pipefail
 box="${BOX_HOST:-root@192.168.1.242}"
 client="${CLIENT_HOST:-root@192.168.1.114}"
@@ -18,7 +19,7 @@ meow="$(cd "$(dirname "$0")/../.." && pwd)/target/release/meow"
 ssh "$box" '[ -f /root/box-test/pids ] && kill $(cat /root/box-test/pids) 2>/dev/null; sleep 1; rm -rf /root/box-test && mkdir -p /root/box-test'
 scp -q "$meow" "$box:/root/box-test/"
 pw="$(openssl rand -hex 12)"
-ssh "$box" PW="$pw" bash -s <<'BOX'
+ssh "$box" PW="$pw" BOX_ARGS="'${BOX_ARGS:---iface eth0}'" bash -s <<'BOX'
 set -eu
 cd /root/box-test
 command -v python3 >/dev/null || pacman -S --noconfirm --needed python >/dev/null 2>&1
@@ -30,7 +31,7 @@ link() { printf 'ss://%s@127.0.0.1:%s#%s\n' "$(printf 'aes-128-gcm:%s' "$PW" | b
 nohup python3 -m http.server 18080 --bind 127.0.0.1 > http.log 2>&1 & echo $! >> pids
 # A clean start: no subscription yet (box.json keeps the MAC and lease).
 rm -f /var/lib/paopao-box/subscriptions.json
-nohup ./meow box --iface eth0 > box.log 2>&1 & echo $! >> pids
+nohup ./meow box $BOX_ARGS > box.log 2>&1 & echo $! >> pids
 for i in $(seq 1 180); do grep -q '已就绪 · IP [0-9.]* · 管理 http' box.log && break; sleep 0.5; done
 grep '已就绪' box.log | grep -o 'IP [0-9][0-9.]*' | head -1 | cut -d' ' -f2 > box-ip
 BOX
