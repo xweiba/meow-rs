@@ -2,12 +2,18 @@
 //! `GEOIP,CN`) and GeoSite (`geosite.dat`, for `GEOSITE,…` and the DNS
 //! front's domestic list).
 //!
-//! The core only fetches the data its config uses when it starts; the box
-//! starts it before there is a subscription (no `GEOIP` rule yet) and later
-//! hot-reloads, so the core alone would never fetch the GeoIP data. The box
-//! makes sure both files arrive: direct downloads over a few mirrors,
-//! retried with backoff until they are here, then a reload so the rules
-//! use them.
+//! The box starts the core before there is a subscription (no `GEOIP` rule
+//! yet) and later hot-reloads. The box makes sure both files arrive: direct
+//! downloads over a few mirrors, retried with backoff until they are here,
+//! then a reload so the rules use them.
+//!
+//! Overlap with the core: since `meow_app::geodata_fetch::run_background_fetch`
+//! the core itself fetches what a reload newly references (same mirrors —
+//! `meow_config::geodata::mirrors` — checked, retried, rules rebuilt).
+//! This module is kept because the box needs more than the core does: the
+//! GeoSite file must hold the domestic list (`cn`) its DNS front loads, and
+//! both files are wanted whatever the rules say. Both writers replace the
+//! files atomically; whichever lands first, the other finds nothing to do.
 
 use std::collections::HashSet;
 use std::path::Path;

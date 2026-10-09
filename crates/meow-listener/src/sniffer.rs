@@ -47,16 +47,13 @@ impl SnifferRuntime {
         self.cfg.enable
     }
 
-    /// Peek at the stream's first bytes and populate `metadata.sniff_host`.
-    ///
-    /// Never returns an error — all failure modes (IO error, timeout, parse
-    /// failure, skip-domain discard) collapse to a silent no-op that leaves
-    /// `metadata` unchanged.
-    pub async fn sniff(&self, stream: &TcpStream, metadata: &mut Metadata) {
+    /// Whether a flow to `metadata` is sniffed at all: sniffing on, the
+    /// `parse-pure-ip` gate passed (no name yet, or a `force-domain` one),
+    /// and its port mapped to a protocol.
+    pub fn sniffs(&self, metadata: &Metadata) -> bool {
         if !self.cfg.enable {
-            return;
+            return false;
         }
-
         // parse-pure-ip gate: skip if host is already a non-IP domain name,
         // unless that domain is in the force list.
         if self.cfg.parse_pure_ip
@@ -64,9 +61,47 @@ impl SnifferRuntime {
             && metadata.host.parse::<IpAddr>().is_err()
             && self.force.search(&metadata.host).is_none()
         {
+            return false;
+        }
+        self.port_map.contains_key(&metadata.dst_port)
+    }
+
+    /// Whether `port` is sniffed as TLS (its ClientHello may need more than
+    /// one read before it parses).
+    pub fn is_tls_port(&self, port: u16) -> bool {
+        matches!(self.port_map.get(&port), Some(Proto::Tls))
+    }
+
+    /// How long a sniff may wait for the first bytes (`sniffer.timeout`).
+    pub fn timeout(&self) -> std::time::Duration {
+        self.cfg.timeout
+    }
+
+    /// Sniffs bytes the listener already read (the TUN's first payload):
+    /// same gates and effects as [`Self::sniff`], no I/O.
+    pub fn sniff_bytes(&self, buf: &[u8], metadata: &mut Metadata) {
+        if !self.sniffs(metadata) {
             return;
         }
+        let sniffed = match self.port_map.get(&metadata.dst_port) {
+            Some(Proto::Tls) => sniff_tls(buf),
+            Some(Proto::Http) => sniff_http(buf),
+            None => None,
+        };
+        if let Some(host) = sniffed {
+            self.maybe_apply_sniff(&host, metadata);
+        }
+    }
 
+    /// Peek at the stream's first bytes and populate `metadata.sniff_host`.
+    ///
+    /// Never returns an error — all failure modes (IO error, timeout, parse
+    /// failure, skip-domain discard) collapse to a silent no-op that leaves
+    /// `metadata` unchanged.
+    pub async fn sniff(&self, stream: &TcpStream, metadata: &mut Metadata) {
+        if !self.sniffs(metadata) {
+            return;
+        }
         // Per-port protocol dispatch.
         let Some(proto) = self.port_map.get(&metadata.dst_port) else {
             return;
@@ -143,7 +178,7 @@ impl SnifferRuntime {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use meow_common::{ConnType, Network};
     use std::net::SocketAddr;
@@ -165,7 +200,7 @@ mod tests {
     }
 
     // Build a minimal TLS ClientHello with the given SNI hostname.
-    fn build_client_hello(hostname: &str) -> Vec<u8> {
+    pub(crate) fn build_client_hello(hostname: &str) -> Vec<u8> {
         let name_bytes = hostname.as_bytes();
         let sni_entry_len = 3 + name_bytes.len();
         let sni_list_len = sni_entry_len;

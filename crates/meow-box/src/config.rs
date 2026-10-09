@@ -152,6 +152,16 @@ pub fn core_config(
             "dns-hijack": ["any:53"],
         }),
     );
+    // A device that has just made the box its gateway still holds the real
+    // address the DNS front gave it while it was not routing through the
+    // box yet (REAL_TTL), and some programs resolve on their own: those
+    // flows reach the core by address. The core's TUN sniffs them (TLS
+    // SNI / HTTP Host); overriding the destination with the sniffed site
+    // makes a line resolve it on its side (no poisoned or stale address
+    // handed to it), while a direct connection keeps the device's address.
+    if let Some(s) = c.get_mut("sniffer").and_then(Value::as_object_mut) {
+        s.insert("override-destination".into(), true.into());
+    }
     let hosts = c.get("paopao-hosts").cloned();
     let lines = c
         .get("proxies")
@@ -222,6 +232,9 @@ mod tests {
         assert_eq!(y["tun"]["file-descriptor"], 9);
         assert_eq!(y["tun"]["auto-route"], false);
         assert_eq!(y["tun"]["mtu"], 1500);
+        assert_eq!(y["sniffer"]["enable"], true);
+        assert_eq!(y["sniffer"]["parse-pure-ip"], true, "named flows untouched");
+        assert_eq!(y["sniffer"]["override-destination"], true);
         assert_eq!(y["mode"], "rule");
         assert_eq!(c.lines, 0);
         assert!(c.hosts.is_none());

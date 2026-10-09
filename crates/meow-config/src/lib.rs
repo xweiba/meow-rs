@@ -2713,6 +2713,12 @@ async fn load_rule_providers_async(
     .map_err(|e| anyhow::anyhow!("rule-provider load task failed: {e}"))?
 }
 
+/// The `sniffer:` section of `raw` as startup parses it (its `strict`
+/// setting applied) — for a listener respawned by a config reload.
+pub fn sniffer_config_from_raw(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::Error> {
+    parse_sniffer_config(raw, raw.strict.unwrap_or(false))
+}
+
 fn parse_sniffer_config(
     raw: &raw::RawConfig,
     strict: bool,
@@ -2831,7 +2837,7 @@ fn missing_geodata_downloads<'a>(
     raw: &raw::RawConfig,
     geo: &'a GeoDataConfig,
     scan_lines: &[String],
-) -> Vec<(&'a String, PathBuf)> {
+) -> Vec<(&'a String, PathBuf, geodata::GeoKind)> {
     let needs_geoip = scan_lines.iter().any(|l| line_references_geoip(l));
     let needs_asn = scan_lines.iter().any(|l| line_references_asn(l));
     let needs_geosite =
@@ -2862,24 +2868,29 @@ fn missing_geodata_downloads<'a>(
 
     let mut downloads = Vec::new();
     if geoip_missing {
-        downloads.push((&geo.mmdb_url, geoip_path));
+        downloads.push((&geo.mmdb_url, geoip_path, geodata::GeoKind::Mmdb));
     }
     if asn_missing {
-        downloads.push((&geo.asn_url, asn_path));
+        downloads.push((&geo.asn_url, asn_path, geodata::GeoKind::Mmdb));
     }
     if geosite_missing {
-        downloads.push((&geo.geosite_url, geosite_path));
+        downloads.push((&geo.geosite_url, geosite_path, geodata::GeoKind::Geosite));
     }
     downloads
 }
 
-/// The geo DBs `raw`'s rules reference that are not on disk yet, as
-/// `(url, destination)` — what a background startup fetch has to get.
-pub fn missing_geodata_for(raw: &raw::RawConfig, geo: &GeoDataConfig) -> Vec<(String, PathBuf)> {
+/// The geo DBs `raw` references (rules, sub-rules, inline provider
+/// payloads, DNS `geosite:` policies) that are not on disk yet — what a
+/// background fetch has to get, at startup and after every reload.
+pub fn missing_geodata_for(raw: &raw::RawConfig, geo: &GeoDataConfig) -> Vec<geodata::GeoDownload> {
     let scan = collect_geo_scan_lines(raw, &HashMap::new());
     missing_geodata_downloads(raw, geo, &scan)
         .into_iter()
-        .map(|(url, path)| (url.clone(), path))
+        .map(|(url, dest, kind)| geodata::GeoDownload {
+            url: url.clone(),
+            dest,
+            kind,
+        })
         .collect()
 }
 
@@ -2949,7 +2960,7 @@ async fn ensure_geodata(
     let proxy: Option<Arc<dyn Proxy>> =
         prefetch.and_then(|m| internal_http::first_named_proxy(raw.proxies.as_deref(), &m.map));
 
-    for (url, dest) in downloads {
+    for (url, dest, _) in downloads {
         info!("geodata: downloading {} to {}", url, dest.display());
         if let Err(e) = geodata::download_and_replace(url, &dest, proxy.as_ref()).await {
             warn!("geodata: failed to download {} — {}", url, e);
@@ -5578,10 +5589,12 @@ mod geoip_context_tests {
             ]),
             ..Default::default()
         };
-        let want: Vec<PathBuf> = missing_geodata_for(&raw, &geo)
-            .into_iter()
-            .map(|(_, p)| p)
-            .collect();
+        let missing = missing_geodata_for(&raw, &geo);
+        assert_eq!(
+            missing.iter().map(|d| d.kind).collect::<Vec<_>>(),
+            vec![geodata::GeoKind::Mmdb, geodata::GeoKind::Geosite]
+        );
+        let want: Vec<PathBuf> = missing.into_iter().map(|d| d.dest).collect();
         assert_eq!(
             want,
             vec![dir.join("Country.mmdb"), dir.join("geosite.dat")]

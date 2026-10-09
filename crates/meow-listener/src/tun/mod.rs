@@ -83,6 +83,8 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use meow_common::{ConnType, Metadata, Network, ProxyConn};
 use meow_tunnel::Tunnel;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+
+use crate::sniffer::SnifferRuntime;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
@@ -97,12 +99,16 @@ use tracing::{debug, info, warn};
 /// `SetReadDeadline(now + 200ms)` + `Peek(1)`, deadline error ignored).
 /// A client-first flow's first segment normally follows the handshake ACK
 /// back-to-back and lands well inside it; one that misses the window just
-/// relays its bytes without a prefix — the prefix takes no part in
-/// routing, so nothing else changes.
+/// relays its bytes without a prefix. The prefix routes only through the
+/// sniffer ([`TunListener::with_sniffer`], flows to real addresses), so a
+/// flow that missed the window is matched on its address alone.
 const TUN_SNIFF_WINDOW: Duration = Duration::from_millis(200);
 /// First-read size when waiting for real traffic. Large enough to pull a
 /// TLS ClientHello record header + a bit of payload in one shot.
 const TUN_FIRST_READ: usize = 256;
+/// Most a sniffed flow's first payload grows to while a TLS ClientHello is
+/// completed for the sniffer: one whole TLS record and its header.
+const TUN_SNIFF_MAX: usize = 5 + 16 * 1024;
 
 use route::RouteGuard;
 
@@ -349,6 +355,9 @@ pub struct TunListener {
     /// Global-scope binding installed by the caller before this listener
     /// was built (see [`Self::with_outbound_binding`]).
     outbound_binding: Option<OutboundBinding>,
+    /// The `sniffer:` section (see [`Self::with_sniffer`]); None: flows
+    /// are not sniffed.
+    sniffer: Option<Arc<SnifferRuntime>>,
 }
 
 impl TunListener {
@@ -359,7 +368,20 @@ impl TunListener {
             name,
             ready: None,
             outbound_binding: None,
+            sniffer: None,
         }
+    }
+
+    /// Sniff flows to real addresses (TLS SNI / HTTP Host from the first
+    /// payload), as mihomo does for its TUN: a device that connects by
+    /// address (an answer from another resolver, a cached or hard-coded
+    /// address) is still matched on the site, and with
+    /// `override-destination` the site becomes the destination a line is
+    /// asked for. Flows to fake addresses are left alone — the fake-IP
+    /// pool already gives them their name.
+    pub fn with_sniffer(mut self, sniffer: Arc<SnifferRuntime>) -> Self {
+        self.sniffer = Some(sniffer);
+        self
     }
 
     /// Hand over an [`OutboundBinding`] the caller installed early — the
@@ -846,6 +868,7 @@ impl TunListener {
                         }
                         let tunnel = self.tunnel.clone();
                         let name = self.name.clone();
+                        let sniffer = self.sniffer.clone();
                         let sem = conn_limit.clone();
                         let warned = Arc::clone(&warned_saturated);
                         tasks.spawn(async move {
@@ -903,7 +926,8 @@ impl TunListener {
                                 None
                             };
                             let _permit = permit;
-                            handle_tcp_flow(tunnel, stream, prefix, src, dst, &name).await;
+                            handle_tcp_flow(tunnel, stream, prefix, src, dst, &name, sniffer.as_deref())
+                                .await;
                         });
                     }
                     None => break Err("netstack TCP listener closed".into()),
@@ -1069,16 +1093,17 @@ where
 
 async fn handle_tcp_flow(
     tunnel: Tunnel,
-    tcp: lwip::TcpStream,
-    prefix: Vec<u8>,
+    mut tcp: lwip::TcpStream,
+    mut prefix: Vec<u8>,
     src: SocketAddr, // client behind the tun
     dst: SocketAddr, // original destination
     in_name: &str,
+    sniffer: Option<&SnifferRuntime>,
 ) {
     // Android: the owning app is asked with both ends, before the fake-IP
     // rewrite changes `dst` (a no-op elsewhere).
     meow_common::note_tun_flow(Network::Tcp, src, dst);
-    let metadata = Metadata {
+    let mut metadata = Metadata {
         network: Network::Tcp,
         conn_type: ConnType::Tun,
         src_ip: Some(src.ip()),
@@ -1088,6 +1113,13 @@ async fn handle_tcp_flow(
         in_name: in_name.into(),
         ..Default::default()
     };
+    if let Some(sniffer) = sniffer {
+        // A fake address names its site through the pool; only flows to
+        // real addresses have nothing else to go on.
+        if !tunnel.resolver().in_fake_ip_range(dst.ip()) {
+            sniff_tun_flow(sniffer, &mut tcp, &mut prefix, &mut metadata).await;
+        }
+    }
 
     // handle_tcp does the rest: fake-IP rewrite, lazy rule match, stats
     // guard, dial, zero-alloc relay. `prefix` is the first payload read
@@ -1106,6 +1138,47 @@ async fn handle_tcp_flow(
         metadata,
     )
     .await;
+}
+
+/// Whether `buf` starts a TLS handshake record it does not hold whole yet.
+fn tls_record_incomplete(buf: &[u8]) -> bool {
+    match buf {
+        [0x16] | [0x16, 0x03] | [0x16, 0x03, _] | [0x16, 0x03, _, _] => true,
+        [0x16, 0x03, _, hi, lo, ..] => buf.len() < 5 + usize::from(u16::from_be_bytes([*hi, *lo])),
+        _ => false,
+    }
+}
+
+/// Sniffs a TUN flow's first payload (`prefix`, replayed upstream as is):
+/// on a TLS port the ClientHello is completed first — the first read holds
+/// [`TUN_FIRST_READ`] bytes at most, a ClientHello spans more, often two
+/// segments — waiting no longer than the sniffer's timeout. Bytes read here
+/// join `prefix`, so the relay still sends everything.
+async fn sniff_tun_flow<R>(
+    sniffer: &SnifferRuntime,
+    tcp: &mut R,
+    prefix: &mut Vec<u8>,
+    metadata: &mut Metadata,
+) where
+    R: AsyncRead + Unpin,
+{
+    if prefix.is_empty() || !sniffer.sniffs(metadata) {
+        return;
+    }
+    if sniffer.is_tls_port(metadata.dst_port) {
+        let deadline = tokio::time::Instant::now() + sniffer.timeout();
+        let mut chunk = vec![0u8; 4096];
+        while tls_record_incomplete(prefix) && prefix.len() < TUN_SNIFF_MAX {
+            // A read dropped at the deadline consumes nothing (lwIP hands
+            // a chunk over only on the poll that returns it).
+            match tokio::time::timeout_at(deadline, tcp.read(&mut chunk)).await {
+                Ok(Ok(n)) if n > 0 => prefix.extend_from_slice(&chunk[..n]),
+                // EOF / error: the relay meets it on its own read.
+                _ => break,
+            }
+        }
+    }
+    sniffer.sniff_bytes(prefix, metadata);
 }
 
 /// Netstack TCP stream plus the bytes already consumed during the sniff
@@ -1343,6 +1416,134 @@ mod tests {
         let mut buf = [0u8; 32];
         let n = conn.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"EHLO meow\r\n");
+    }
+
+    fn sniffer(override_destination: bool) -> crate::sniffer::SnifferRuntime {
+        crate::sniffer::SnifferRuntime::new(meow_common::sniffer::SnifferConfig {
+            enable: true,
+            parse_pure_ip: true,
+            override_destination,
+            tls_ports: vec![443],
+            http_ports: vec![80],
+            timeout: Duration::from_secs(5),
+            ..Default::default()
+        })
+    }
+
+    fn by_address(port: u16) -> meow_common::Metadata {
+        meow_common::Metadata {
+            network: meow_common::Network::Tcp,
+            dst_ip: Some("20.205.243.166".parse().unwrap()),
+            dst_port: port,
+            ..Default::default()
+        }
+    }
+
+    /// A ClientHello longer than the first read (the TUN reads at most
+    /// `TUN_FIRST_READ` bytes before dialing): the sniff reads the rest,
+    /// finds the site, and every byte stays in the prefix for the relay.
+    #[tokio::test]
+    async fn tun_sniff_completes_a_split_client_hello() {
+        let name = format!("{0}.{0}.{0}.{0}.github.com", "a".repeat(55));
+        let hello = crate::sniffer::tests::build_client_hello(&name);
+        assert!(hello.len() > super::TUN_FIRST_READ);
+        for override_destination in [false, true] {
+            let (mut device, mut flow) = tokio::io::duplex(64 * 1024);
+            let mut prefix = hello[..super::TUN_FIRST_READ].to_vec();
+            device
+                .write_all(&hello[super::TUN_FIRST_READ..])
+                .await
+                .unwrap();
+            let mut meta = by_address(443);
+            super::sniff_tun_flow(
+                &sniffer(override_destination),
+                &mut flow,
+                &mut prefix,
+                &mut meta,
+            )
+            .await;
+            assert_eq!(prefix, hello, "the whole ClientHello is relayed");
+            assert_eq!(meta.sniff_host, name.as_str());
+            // `override-destination`: the line is asked for the site; the
+            // address stays for a direct dial.
+            let want_host = if override_destination {
+                name.as_str()
+            } else {
+                ""
+            };
+            assert_eq!(meta.host, want_host);
+            assert_eq!(meta.dst_ip, by_address(443).dst_ip);
+        }
+    }
+
+    /// Nothing more arrives: the sniff gives up at the sniffer's timeout
+    /// and the flow goes on by address with what it had.
+    #[tokio::test]
+    async fn tun_sniff_waits_no_longer_than_the_timeout() {
+        let hello = crate::sniffer::tests::build_client_hello(&"c".repeat(250));
+        let (_device, mut flow) = tokio::io::duplex(1024);
+        let mut prefix = hello[..super::TUN_FIRST_READ].to_vec();
+        let mut meta = by_address(443);
+        let rt = crate::sniffer::SnifferRuntime::new(meow_common::sniffer::SnifferConfig {
+            enable: true,
+            parse_pure_ip: true,
+            tls_ports: vec![443],
+            timeout: Duration::from_millis(50),
+            ..Default::default()
+        });
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            super::sniff_tun_flow(&rt, &mut flow, &mut prefix, &mut meta),
+        )
+        .await
+        .expect("bounded by the sniffer timeout");
+        assert_eq!(prefix.len(), super::TUN_FIRST_READ);
+        assert_eq!(meta.sniff_host, "");
+        assert_eq!(meta.host, "");
+    }
+
+    /// HTTP Host, and flows the sniffer leaves alone: a port it does not
+    /// sniff, an empty prefix (server-first), a flow that has its name.
+    #[tokio::test]
+    async fn tun_sniff_reads_http_host_and_skips_the_rest() {
+        let rt = sniffer(true);
+        let (_device, mut flow) = tokio::io::duplex(64);
+        let mut prefix = b"GET / HTTP/1.1\r\nHost: www.example.com\r\n\r\n".to_vec();
+        let mut meta = by_address(80);
+        super::sniff_tun_flow(&rt, &mut flow, &mut prefix, &mut meta).await;
+        assert_eq!(meta.host, "www.example.com");
+
+        let hello = crate::sniffer::tests::build_client_hello("x.example");
+        let mut meta = by_address(8443);
+        super::sniff_tun_flow(&rt, &mut flow, &mut hello.clone(), &mut meta).await;
+        assert_eq!(meta.sniff_host, "", "unsniffed port");
+
+        let mut meta = by_address(443);
+        super::sniff_tun_flow(&rt, &mut flow, &mut Vec::new(), &mut meta).await;
+        assert_eq!(meta.sniff_host, "", "nothing to sniff");
+
+        let mut meta = by_address(443);
+        meta.host = "named.example".into();
+        super::sniff_tun_flow(&rt, &mut flow, &mut hello.clone(), &mut meta).await;
+        assert_eq!(
+            meta.host, "named.example",
+            "parse-pure-ip: named flows kept"
+        );
+    }
+
+    #[test]
+    fn tls_record_completeness() {
+        let hello = crate::sniffer::tests::build_client_hello("x.example");
+        assert!(super::tls_record_incomplete(&hello[..1]));
+        assert!(super::tls_record_incomplete(&hello[..4]));
+        assert!(super::tls_record_incomplete(&hello[..hello.len() - 1]));
+        assert!(!super::tls_record_incomplete(&hello));
+        assert!(!super::tls_record_incomplete(b"GET / HTTP/1.1\r\n"));
+        assert!(
+            !super::tls_record_incomplete(&[0x16, 0x01, 0, 0, 9]),
+            "not TLS"
+        );
+        assert!(!super::tls_record_incomplete(&[]));
     }
 
     #[tokio::test]

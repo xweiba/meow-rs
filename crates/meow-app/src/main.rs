@@ -1318,6 +1318,10 @@ async fn run(
         }
     }
 
+    // Committed config changes, bumped by the API server and the
+    // subscription refresh; the geodata fetch below follows them.
+    let config_commits = meow_api::routes::ConfigCommits::default();
+
     // Start subscription background refresh task
     {
         let raw_config = Arc::clone(&raw_config);
@@ -1329,6 +1333,7 @@ async fn run(
         let rule_provider_refresh = Arc::clone(&rule_provider_refresh);
         let proxy_provider_refresh = Arc::clone(&proxy_provider_refresh);
         let provider_dialer_registry = config.provider_dialer_registry.clone();
+        let config_commits = config_commits.clone();
         tokio::spawn(async move {
             meow_app::subscription_refresh::run_loop(
                 raw_config,
@@ -1340,6 +1345,7 @@ async fn run(
                 provider_dialer_registry,
                 rule_provider_refresh,
                 proxy_provider_refresh,
+                config_commits,
             )
             .await;
         });
@@ -1348,8 +1354,11 @@ async fn run(
     // Fetch any missing geodata DBs on startup (unconditional — independent of
     // geodata.auto-update). Runs in the background so listener startup is not
     // blocked; rules are rebuilt and the DNS resolver republished afterward
-    // if anything was downloaded.
-    {
+    // if anything was downloaded. With `geodata.background-fetch` the
+    // follower below does the startup pass itself (only what the config
+    // uses, mirrors, checked, retried); otherwise the classic all-files
+    // fetch runs here.
+    if !config.geodata.background_fetch {
         let geodata = config.geodata.clone();
         let tunnel = tunnel.clone();
         let raw_config = Arc::clone(&raw_config);
@@ -1373,6 +1382,38 @@ async fn run(
                 proxy_providers,
                 dns_server,
                 cache_dir,
+            )
+            .await;
+        });
+    }
+
+    // Rule data a reload newly needs (a subscription adding GEOIP /
+    // GEOSITE rules, a `geosite:` DNS policy) is fetched after each commit,
+    // then the rules are rebuilt — not only at startup.
+    {
+        let tunnel = tunnel.clone();
+        let raw_config = Arc::clone(&raw_config);
+        let rule_providers = Arc::clone(&rule_providers);
+        let proxy_providers = Arc::clone(&proxy_providers);
+        let dns_server = Arc::clone(&dns_server_handle);
+        // Same rebuild context as the startup fetch above (issue #717).
+        let cache_dir = config_path
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .map(meow_config::resource_cache_dir_for_config_path);
+        let commits = config_commits.subscribe();
+        let initial = config.geodata.background_fetch;
+        tokio::spawn(async move {
+            meow_app::geodata_fetch::run_background_fetch(
+                tunnel,
+                raw_config,
+                rule_providers,
+                proxy_providers,
+                dns_server,
+                cache_dir,
+                commits,
+                meow_app::geodata_fetch::Retry::default(),
+                initial,
             )
             .await;
         });
@@ -1626,7 +1667,8 @@ async fn run(
             config.api.external_ui.clone(),
             Arc::clone(&dns_server_handle),
             config.provider_dialer_registry.clone(),
-        );
+        )
+        .with_config_commits(config_commits.clone());
         // Bind eagerly like the DNS listener and the `listeners:` entries:
         // an `external-controller` failure is a hard startup error, not a
         // detached task that dies one log line deep (issue #641).
@@ -1654,7 +1696,8 @@ async fn run(
                 tun_config_to_listener_config(&config.tun),
                 "meow-tun".to_string(),
             )
-            .with_readiness_signal(ready_tx);
+            .with_readiness_signal(ready_tx)
+            .with_sniffer(Arc::clone(&sniffer_runtime));
             // The global-route binding installed before the config build
             // moves into the listener, which clears it with its routes —
             // or right away if startup fails (issue #695).

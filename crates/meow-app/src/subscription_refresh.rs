@@ -55,6 +55,9 @@ pub async fn run_loop(
     proxy_provider_refresh: Arc<
         meow_config::proxy_provider_refresh::ProxyProviderRefreshSupervisor,
     >,
+    // Bumped after each committed refresh, like the API's commits, so the
+    // geodata fetch sees rules a subscription brings in.
+    config_commits: meow_api::routes::ConfigCommits,
 ) {
     // Same provider-cache directory `load_config` used at startup — trusted
     // rebuilds of the daemon's own config must keep resolving relative
@@ -366,6 +369,7 @@ pub async fn run_loop(
                             // through the reconcile instead (issue #543
                             // review).
                             *raw_config.write() = candidate.clone();
+                            config_commits.notify();
                             if let Some(dns) = dns {
                                 meow_api::routes::publish_dns(&tunnel, dns_server.as_ref(), &dns)
                                     .await;

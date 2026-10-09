@@ -340,3 +340,247 @@ async fn run_on_startup_republishes_resolver_with_downloaded_geosite() {
     // clean global.
     meow_common::clear_host_resolver();
 }
+
+/// A minimal IPv4 MaxMind DB: `0.0.0.0/1` → `{country: {iso_code}}`, the
+/// other half without data — enough for a real `GEOIP,<code>` match.
+fn tiny_mmdb(code: &str) -> Vec<u8> {
+    fn s(out: &mut Vec<u8>, v: &str) {
+        out.push(0x40 | v.len() as u8);
+        out.extend_from_slice(v.as_bytes());
+    }
+    // One node, 24-bit records: left → data offset 0 (node_count + 16),
+    // right → no data (node_count).
+    let mut db = vec![0, 0, 17, 0, 0, 1];
+    db.extend_from_slice(&[0u8; 16]);
+    db.push(0xE1);
+    s(&mut db, "country");
+    db.push(0xE1);
+    s(&mut db, "iso_code");
+    s(&mut db, code);
+    db.extend_from_slice(b"\xab\xcd\xefMaxMind.com");
+    db.push(0xE9);
+    s(&mut db, "node_count");
+    db.extend_from_slice(&[0xC1, 1]);
+    s(&mut db, "record_size");
+    db.extend_from_slice(&[0xA1, 24]);
+    s(&mut db, "ip_version");
+    db.extend_from_slice(&[0xA1, 4]);
+    s(&mut db, "database_type");
+    s(&mut db, "Test");
+    s(&mut db, "languages");
+    db.extend_from_slice(&[0x00, 0x04]);
+    s(&mut db, "binary_format_major_version");
+    db.extend_from_slice(&[0xA1, 2]);
+    s(&mut db, "binary_format_minor_version");
+    db.push(0xA0);
+    s(&mut db, "build_epoch");
+    db.extend_from_slice(&[0x01, 0x02, 1]);
+    s(&mut db, "description");
+    db.push(0xE0);
+    db
+}
+
+fn leak(b: Vec<u8>) -> &'static [u8] {
+    Box::leak(b.into_boxed_slice())
+}
+
+/// `geodata:` with background fetch, files in `dir`, links on `addr`.
+fn geodata_yaml(dir: &std::path::Path, addr: std::net::SocketAddr) -> String {
+    format!(
+        "geodata:\n  background-fetch: true\n  \
+         mmdb-path: '{}'\n  geosite-path: '{}'\n  \
+         url:\n    mmdb: http://{addr}/country.mmdb\n    geosite: http://{addr}/geosite.mrs\n",
+        dir.join("Country.mmdb").display(),
+        dir.join("geosite.mrs").display(),
+    )
+}
+
+fn raw_from(yaml: &str) -> meow_config::raw::RawConfig {
+    serde_yaml::from_str(yaml).unwrap()
+}
+
+/// Installs `raw`'s rules on `tunnel` the way a reload commits them (a
+/// background-fetch config builds with the missing files as empty data).
+fn commit_rules(tunnel: &meow_tunnel::Tunnel, raw: &meow_config::raw::RawConfig) {
+    let rebuild = meow_config::rebuild_from_raw_with_resolver(
+        raw,
+        Some(&tunnel.resolver_slot()),
+        None,
+        &HashMap::new(),
+        None,
+    )
+    .unwrap();
+    tunnel.update_routing(rebuild.proxies, rebuild.rules, rebuild.dialer_registry);
+}
+
+fn plain_tunnel() -> meow_tunnel::Tunnel {
+    meow_tunnel::Tunnel::new(Arc::new(meow_dns::Resolver::new(
+        vec![],
+        vec![],
+        meow_common::DnsMode::Normal,
+        meow_trie::DomainTrie::new(),
+        true,
+        true,
+    )))
+}
+
+/// The adapter `tunnel` picks for a host / an address, as `/rules/match`
+/// explains it.
+async fn decides(tunnel: &meow_tunnel::Tunnel, host: &str, ip: Option<std::net::IpAddr>) -> String {
+    let m = meow_common::Metadata {
+        network: meow_common::Network::Tcp,
+        host: host.into(),
+        dst_ip: ip,
+        dst_port: 443,
+        ..Default::default()
+    };
+    tunnel.explain(&m, None).await.proxy.to_string()
+}
+
+/// Polls `cond` (bounded: a failure must end the test, not hang it).
+async fn eventually<F, Fut>(what: &str, mut cond: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !cond().await {
+        assert!(tokio::time::Instant::now() < deadline, "timed out: {what}");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// The box/app sequence: the core starts with a config that needs no rule
+/// data, then a reload adds `GEOSITE` and `GEOIP` rules. The commit wakes
+/// the background fetch, which downloads both files and rebuilds the
+/// rules — they match without another reload.
+#[tokio::test]
+async fn reload_adding_geo_rules_fetches_the_data_and_rules_start_matching() {
+    let mut routes = HashMap::new();
+    routes.insert("/country.mmdb", leak(tiny_mmdb("XX")));
+    routes.insert(
+        "/geosite.mrs",
+        leak(
+            meow_rules::mrs_parser::write_geosite_mrs(&meow_rules::mrs_parser::GeositePayload {
+                categories: vec![("testcat".to_string(), vec!["hit.example".to_string()])],
+            })
+            .unwrap(),
+        ),
+    );
+    let addr = spawn_origin(routes).await;
+    let dir = tempfile::tempdir().unwrap();
+    let geodata = geodata_yaml(dir.path(), addr);
+
+    let before = raw_from(&format!("{geodata}rules:\n  - MATCH,DIRECT\n"));
+    let tunnel = plain_tunnel();
+    commit_rules(&tunnel, &before);
+    let raw_config = Arc::new(parking_lot::RwLock::new(before));
+    let commits = meow_api::routes::ConfigCommits::default();
+    tokio::spawn(meow_app::geodata_fetch::run_background_fetch(
+        tunnel.clone(),
+        Arc::clone(&raw_config),
+        Arc::new(parking_lot::RwLock::new(HashMap::new())),
+        Arc::new(dashmap::DashMap::new()),
+        Arc::new(parking_lot::RwLock::new(None)),
+        None,
+        commits.subscribe(),
+        meow_app::geodata_fetch::Retry::default(),
+        // No startup pass (it would have found nothing to get): only the
+        // commit below can start the fetch.
+        false,
+    ));
+
+    // The reload: new rules committed, then the commit is announced (the
+    // API does both in its commit path).
+    let after = raw_from(&format!(
+        "{geodata}rules:\n  - GEOSITE,testcat,REJECT\n  - GEOIP,XX,REJECT\n  - MATCH,DIRECT\n"
+    ));
+    commit_rules(&tunnel, &after);
+    *raw_config.write() = after;
+    let ip: std::net::IpAddr = "1.2.3.4".parse().unwrap();
+    assert_eq!(decides(&tunnel, "hit.example", None).await, "DIRECT");
+    assert_eq!(decides(&tunnel, "", Some(ip)).await, "DIRECT");
+    commits.notify();
+
+    eventually("GEOSITE rule matches after the fetch", || async {
+        decides(&tunnel, "hit.example", None).await == "REJECT"
+    })
+    .await;
+    eventually("GEOIP rule matches after the fetch", || async {
+        decides(&tunnel, "", Some(ip)).await == "REJECT"
+    })
+    .await;
+    assert_eq!(
+        std::fs::read(dir.path().join("Country.mmdb")).unwrap(),
+        tiny_mmdb("XX")
+    );
+    assert_eq!(decides(&tunnel, "other.example", None).await, "DIRECT");
+}
+
+/// A failed download is retried with backoff until it lands (the origin
+/// answers 404 to the first two requests), then the rules are rebuilt.
+#[tokio::test]
+async fn failed_fetch_is_retried_until_the_data_arrives() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let body = tiny_mmdb("XX");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn({
+        let hits = Arc::clone(&hits);
+        async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let n = hits.fetch_add(1, Ordering::SeqCst);
+                let (status, body): (&str, &[u8]) = if n < 2 {
+                    ("404 Not Found", b"")
+                } else {
+                    ("200 OK", &body)
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(body).await;
+                let _ = sock.shutdown().await;
+            }
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let raw = raw_from(&format!(
+        "{}rules:\n  - GEOIP,XX,REJECT\n  - MATCH,DIRECT\n",
+        geodata_yaml(dir.path(), addr)
+    ));
+    let tunnel = plain_tunnel();
+    commit_rules(&tunnel, &raw);
+    let commits = meow_api::routes::ConfigCommits::default();
+    tokio::spawn(meow_app::geodata_fetch::run_background_fetch(
+        tunnel.clone(),
+        Arc::new(parking_lot::RwLock::new(raw)),
+        Arc::new(parking_lot::RwLock::new(HashMap::new())),
+        Arc::new(dashmap::DashMap::new()),
+        Arc::new(parking_lot::RwLock::new(None)),
+        None,
+        commits.subscribe(),
+        meow_app::geodata_fetch::Retry {
+            first: std::time::Duration::from_millis(20),
+            max: std::time::Duration::from_millis(80),
+        },
+        true,
+    ));
+    let ip: std::net::IpAddr = "1.2.3.4".parse().unwrap();
+    eventually("GEOIP rule matches once a retry got the data", || async {
+        decides(&tunnel, "", Some(ip)).await == "REJECT"
+    })
+    .await;
+    assert_eq!(hits.load(Ordering::SeqCst), 3, "two failures, one success");
+}

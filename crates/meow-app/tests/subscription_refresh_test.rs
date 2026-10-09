@@ -200,6 +200,7 @@ fn spawn_loop(fx: &Fixture) {
         fx.provider_dialer_registry.clone(),
         Arc::new(RefreshSupervisor::default()),
         Arc::new(meow_config::proxy_provider_refresh::ProxyProviderRefreshSupervisor::default()),
+        Default::default(),
     ));
 }
 
@@ -736,6 +737,7 @@ async fn refresh_without_backing_file_applies_in_memory_only() {
         fx.provider_dialer_registry.clone(),
         Arc::new(RefreshSupervisor::default()),
         Arc::new(meow_config::proxy_provider_refresh::ProxyProviderRefreshSupervisor::default()),
+        Default::default(),
     ));
 
     wait_group(&fx.tunnel, "node-1").await;

@@ -200,18 +200,10 @@ pub async fn run_on_startup(
     let route = tunnel.route_snapshot();
     let proxies = &route.proxies;
     let downloaded = if geo.background_fetch {
-        // Only what the rules use, racing a few lines (startup never waited).
+        // Only what the config uses (startup never waited for it).
         let raw = raw_config.read().clone();
-        let racers =
-            meow_config::internal_http::first_named_proxies(raw.proxies.as_deref(), proxies, 3);
-        let mut got = Vec::new();
-        for (url, dest) in meow_config::missing_geodata_for(&raw, &geo) {
-            match meow_config::geodata::download_and_replace_racing(&url, &dest, &racers).await {
-                Ok(()) => got.push("geodata"),
-                Err(e) => warn!("geodata background fetch: {url}: {e:#}"),
-            }
-        }
-        got
+        let got = fetch_needed(&raw, &geo, &tunnel).await.downloaded;
+        vec!["geodata"; got]
     } else {
         let targets = compute_targets(&geo);
         let download_proxy = meow_config::internal_http::first_named_proxy(
@@ -223,7 +215,33 @@ pub async fn run_on_startup(
     if downloaded.is_empty() {
         return;
     }
+    reload_rules_with_new_data(
+        &tunnel,
+        &raw_config,
+        &rule_providers,
+        &proxy_providers,
+        &dns_server,
+        cache_dir.as_deref(),
+        "geodata startup-fetch",
+    )
+    .await;
+}
 
+/// Rebuilds the rules (and republishes the resolver) after rule data
+/// arrived on disk, so GEOIP / GEOSITE / `geosite:` policies match without
+/// another reload. The raw is read inside the config lane: a download that
+/// finishes after a PUT must not revert rules to the pre-PUT config
+/// (issue #514).
+#[allow(clippy::too_many_arguments)]
+async fn reload_rules_with_new_data(
+    tunnel: &Tunnel,
+    raw_config: &RwLock<RawConfig>,
+    rule_providers: &Arc<RwLock<std::collections::HashMap<String, Arc<RuleProvider>>>>,
+    proxy_providers: &dashmap::DashMap<String, Arc<ProxyProvider>>,
+    dns_server: &RwLock<Option<meow_api::routes::DnsServerHandle>>,
+    cache_dir: Option<&std::path::Path>,
+    label: &str,
+) {
     // Serialize against config commits and rebuild from the raw committed
     // *inside* the lane — otherwise a download finishing after a PUT could
     // revert rules to a set built from the pre-PUT config (issue #514).
@@ -233,9 +251,9 @@ pub async fn run_on_startup(
     // tracks later `set_resolver` swaps (issue #514).
     let resolver = tunnel.resolver_slot();
     let rebuild = tokio::task::spawn_blocking({
-        let cache_dir = cache_dir.clone();
+        let cache_dir = cache_dir.map(std::path::Path::to_path_buf);
         let raw = raw.clone();
-        let rule_providers = Arc::clone(&rule_providers);
+        let rule_providers = Arc::clone(rule_providers);
         let proxy_providers: std::collections::HashMap<_, _> = proxy_providers
             .iter()
             .map(|e| (e.key().clone(), Arc::clone(e.value())))
@@ -267,12 +285,12 @@ pub async fn run_on_startup(
             // (issue #543).
             republish_dns_for_geo_dbs(
                 &raw,
-                cache_dir.as_deref(),
+                cache_dir,
                 &rebuild.rule_providers,
                 rebuild.rules,
-                &tunnel,
-                &dns_server,
-                "geodata startup-fetch",
+                tunnel,
+                dns_server,
+                label,
             )
             .await;
             // No registry swap or supervisor reconcile: the rebuild bound
@@ -281,16 +299,158 @@ pub async fn run_on_startup(
             // provider payloads embed geo entries parsed against the
             // provider's load-time ctx — a DB arriving via this fetch only
             // reaches them at the next full config commit.
-            info!("geodata startup-fetch: rules reloaded with downloaded DBs");
+            info!("{label}: rules reloaded with downloaded DBs");
         }
-        Ok(Err(e)) => warn!(
-            "geodata startup-fetch: rule rebuild failed after download: {:#}",
-            e
-        ),
-        Err(e) => warn!(
-            "geodata startup-fetch: rule rebuild task failed after download: {}",
-            e
-        ),
+        Ok(Err(e)) => warn!("{label}: rule rebuild failed after download: {e:#}"),
+        Err(e) => warn!("{label}: rule rebuild task failed after download: {e}"),
+    }
+}
+
+/// What one [`fetch_needed`] pass did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FetchPass {
+    /// Files downloaded (checked and in place).
+    pub downloaded: usize,
+    /// Files still missing (every link failed or gave unusable data).
+    pub missing: usize,
+}
+
+/// Downloads the rule data `raw` references and lacks
+/// ([`meow_config::missing_geodata_for`]): mirrors, checked before they
+/// replace anything, raced through up to three of the config's lines (as
+/// published on `tunnel`) and directly
+/// ([`meow_config::geodata::download_checked`]).
+pub async fn fetch_needed(raw: &RawConfig, geo: &GeoDataConfig, tunnel: &Tunnel) -> FetchPass {
+    let wanted = meow_config::missing_geodata_for(raw, geo);
+    if wanted.is_empty() {
+        return FetchPass::default();
+    }
+    let racers = meow_config::internal_http::first_named_proxies(
+        raw.proxies.as_deref(),
+        &tunnel.route_snapshot().proxies,
+        3,
+    );
+    let mut pass = FetchPass::default();
+    for d in &wanted {
+        match meow_config::geodata::download_checked(d, &racers).await {
+            Ok(link) => {
+                info!("geodata: {} downloaded from {link}", d.dest.display());
+                pass.downloaded += 1;
+            }
+            Err(e) => {
+                warn!("geodata: {}: {e:#}", d.dest.display());
+                pass.missing += 1;
+            }
+        }
+    }
+    pass
+}
+
+/// Pacing of [`run_background_fetch`]'s retries after a failed pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retry {
+    /// Wait after the first failed pass; doubles after each further one.
+    pub first: std::time::Duration,
+    /// Longest wait between passes.
+    pub max: std::time::Duration,
+}
+
+impl Default for Retry {
+    fn default() -> Self {
+        Self {
+            first: std::time::Duration::from_secs(5),
+            max: std::time::Duration::from_secs(600),
+        }
+    }
+}
+
+/// Keeps the rule data the running config needs on disk: a pass
+/// ([`fetch_needed`]) at start when `initial` (the startup fetch of
+/// `geodata.background-fetch`), and one after every committed config change
+/// (`commits`, bumped by the API's commit path) — a reload that adds
+/// `GEOIP` / `GEOSITE` rules or `geosite:` DNS policies gets its files
+/// without a restart. A pass that downloaded something rebuilds the rules
+/// and republishes the resolver ([`reload_rules_with_new_data`]); a pass
+/// that left files missing is retried with backoff ([`Retry`]), sooner when
+/// another commit lands.
+///
+/// The geodata settings (links, paths) are read from the committed raw on
+/// every pass, so a reload that changes them is followed too. Ends when the
+/// tunnel is dropped or every commit sender is gone. Spawn it as a
+/// background task.
+///
+/// `meow box` downloads the same two files itself as well
+/// (`meow_box::App::ensure_rule_data`, which also loads the box DNS
+/// front's domestic list); both replace files atomically, so whichever
+/// lands first wins and the other finds nothing missing.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_background_fetch(
+    tunnel: Tunnel,
+    raw_config: Arc<RwLock<RawConfig>>,
+    rule_providers: Arc<RwLock<std::collections::HashMap<String, Arc<RuleProvider>>>>,
+    proxy_providers: Arc<dashmap::DashMap<String, Arc<ProxyProvider>>>,
+    dns_server: Arc<RwLock<Option<meow_api::routes::DnsServerHandle>>>,
+    cache_dir: Option<std::path::PathBuf>,
+    mut commits: tokio::sync::watch::Receiver<u64>,
+    retry: Retry,
+    initial: bool,
+) {
+    // Weak between passes: an embedder dropping every `Tunnel` handle ends
+    // this task instead of keeping `TunnelInner` alive (issue #514).
+    let weak = tunnel.weak_inner();
+    drop(tunnel);
+    let mut wait = retry.first;
+    let mut run_pass = initial;
+    loop {
+        let mut pending = false;
+        if run_pass {
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            let tunnel = Tunnel::from_inner(inner);
+            let raw = raw_config.read().clone();
+            let geo = match meow_config::geodata::parse_geodata(raw.geodata.as_ref()) {
+                Ok(g) => g,
+                Err(e) => {
+                    warn!("geodata: {e:#}");
+                    GeoDataConfig::default()
+                }
+            };
+            let pass = fetch_needed(&raw, &geo, &tunnel).await;
+            if pass.downloaded > 0 {
+                reload_rules_with_new_data(
+                    &tunnel,
+                    &raw_config,
+                    &rule_providers,
+                    &proxy_providers,
+                    &dns_server,
+                    cache_dir.as_deref(),
+                    "geodata fetch",
+                )
+                .await;
+            }
+            pending = pass.missing > 0;
+        }
+        if pending {
+            warn!("geodata: retrying in {}s", wait.as_secs());
+            tokio::select! {
+                changed = commits.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    wait = retry.first;
+                }
+                () = tokio::time::sleep(wait) => {
+                    wait = (wait * 2).min(retry.max);
+                }
+            }
+        } else {
+            wait = retry.first;
+            if commits.changed().await.is_err() {
+                return;
+            }
+        }
+        run_pass = true;
     }
 }
 

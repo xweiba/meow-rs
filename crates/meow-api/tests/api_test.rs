@@ -78,6 +78,7 @@ fn test_state_with_backing(raw: RawConfig, config_path: Option<String>) -> Arc<A
         listeners: vec![],
         external_ui: None,
         traffic_feed: Default::default(),
+        config_commits: Default::default(),
         dns_server: Default::default(),
     })
 }
@@ -117,6 +118,7 @@ fn test_state_with_route(raw: RawConfig, named: Vec<(&str, Arc<dyn Proxy>)>) -> 
         listeners: vec![],
         external_ui: None,
         traffic_feed: Default::default(),
+        config_commits: Default::default(),
         dns_server: Default::default(),
     })
 }
@@ -159,6 +161,7 @@ fn test_state_with_secret(secret: &str) -> Arc<AppState> {
         listeners: vec![],
         external_ui: None,
         traffic_feed: Default::default(),
+        config_commits: Default::default(),
         dns_server: Default::default(),
     })
 }
@@ -299,6 +302,7 @@ async fn external_ui_serves_static_directory() {
         listeners: vec![],
         external_ui: Some(dir.path().to_path_buf()),
         traffic_feed: Default::default(),
+        config_commits: Default::default(),
         dns_server: Default::default(),
     });
     let app = create_router(state);
@@ -2660,6 +2664,7 @@ mod delay_support {
             listeners: vec![],
             external_ui: None,
             traffic_feed: Default::default(),
+            config_commits: Default::default(),
             dns_server: Default::default(),
         })
     }
@@ -2718,6 +2723,7 @@ mod delay_support {
             listeners: vec![],
             external_ui: None,
             traffic_feed: Default::default(),
+            config_commits: Default::default(),
             dns_server: Default::default(),
         })
     }
@@ -3664,6 +3670,7 @@ fn test_state_with_hosts_entry() -> Arc<AppState> {
         listeners: vec![],
         external_ui: None,
         traffic_feed: Default::default(),
+        config_commits: Default::default(),
         dns_server: Default::default(),
     })
 }
@@ -3824,6 +3831,7 @@ async fn get_dns_query_txt_relays_upstream_sections_and_flags() {
         listeners: vec![],
         external_ui: None,
         traffic_feed: Default::default(),
+        config_commits: Default::default(),
         dns_server: Default::default(),
     });
 
@@ -5915,4 +5923,58 @@ async fn explain_reports_paopao_hosts_pins() {
         tunnel.explain(&explain_meta("pub.test"), None).await,
         info("IP-CIDR", "1.2.3.0/24", Some(2), "REJECT")
     );
+}
+
+/// A committed `PUT /configs` (forced or not) announces itself on
+/// `config_commits` — what wakes the geodata fetch after a reload that
+/// adds GEOIP / GEOSITE rules. A rejected one does not.
+#[tokio::test]
+async fn put_configs_announces_each_commit() {
+    use base64::Engine as _;
+    let state = test_state(RawConfig {
+        rules: Some(vec!["MATCH,DIRECT".into()]),
+        ..Default::default()
+    });
+    let mut follower = state.config_commits.subscribe();
+    let put = |yaml: &str, force: bool| {
+        let payload = base64::engine::general_purpose::STANDARD.encode(yaml);
+        Request::builder()
+            .method("PUT")
+            .uri(if force {
+                "/configs?force=true"
+            } else {
+                "/configs"
+            })
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({"payload": payload}).to_string(),
+            ))
+            .unwrap()
+    };
+
+    let response = create_router(Arc::clone(&state))
+        .oneshot(put(
+            "mode: rule\ngeodata:\n  background-fetch: true\nrules:\n  - GEOIP,CN,DIRECT\n  - MATCH,DIRECT\n",
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(state.config_commits.count(), 1);
+    assert!(follower.has_changed().unwrap(), "the follower is woken");
+    follower.borrow_and_update();
+
+    // Rejected (duplicate subscription names refuse even under force):
+    // nothing committed, no wake-up.
+    let response = create_router(Arc::clone(&state))
+        .oneshot(put(
+            "subscriptions:\n  - {name: a, url: 'http://127.0.0.1:1/a'}\n  \
+             - {name: a, url: 'http://127.0.0.1:1/b'}\nrules:\n  - MATCH,DIRECT\n",
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(state.config_commits.count(), 1);
+    assert!(!follower.has_changed().unwrap());
 }

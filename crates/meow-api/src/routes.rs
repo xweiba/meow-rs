@@ -107,6 +107,41 @@ pub struct AppState {
     /// after spawning the server; `PUT /configs` hot-swaps the resolver
     /// slot or rebinds the socket on a `dns.listen` change (issue #514).
     pub dns_server: Arc<RwLock<Option<DnsServerHandle>>>,
+    /// Bumped after every committed config change (`PUT /configs` and
+    /// every other mutation that commits a candidate) — background work
+    /// that depends on what the config references (the geodata fetch)
+    /// waits on it.
+    pub config_commits: ConfigCommits,
+}
+
+/// Counter of committed configuration changes. [`Self::notify`] runs after
+/// each commit; a background task follows them with [`Self::subscribe`]
+/// (a `watch` receiver: commits landing while the task is busy coalesce
+/// into one wake-up, none is lost). Clones share the counter.
+#[derive(Clone, Debug)]
+pub struct ConfigCommits(Arc<tokio::sync::watch::Sender<u64>>);
+
+impl Default for ConfigCommits {
+    fn default() -> Self {
+        Self(Arc::new(tokio::sync::watch::channel(0).0))
+    }
+}
+
+impl ConfigCommits {
+    /// A config change was committed.
+    pub fn notify(&self) {
+        self.0.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// Follows the commits from now on (`changed()` wakes on the next one).
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.0.subscribe()
+    }
+
+    /// Commits so far.
+    pub fn count(&self) -> u64 {
+        *self.0.borrow()
+    }
 }
 
 /// Handle to the running standalone DNS server (config `dns.listen`).
@@ -2517,13 +2552,20 @@ async fn spawn_tun_from_raw(
         return Ok(None);
     }
 
+    // The candidate's `sniffer:` section, as startup builds it for the
+    // listener it spawns.
+    let sniffer = match meow_config::sniffer_config_from_raw(raw) {
+        Ok(c) => c,
+        Err(e) => return Err(format!("sniffer config parse error: {e}")),
+    };
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let mut listener = TunListener::new(
         tunnel.clone(),
         crate::tun_config_to_listener_config(&tun_cfg),
         "meow-tun".to_string(),
     )
-    .with_readiness_signal(ready_tx);
+    .with_readiness_signal(ready_tx)
+    .with_sniffer(Arc::new(meow_listener::SnifferRuntime::new(sniffer)));
     if let Some(binding) = binding {
         listener = listener.with_outbound_binding(binding);
     }
@@ -2695,6 +2737,10 @@ async fn swap_config_and_reconcile_tun(
         *guard = candidate;
         (old, tun_changed, snapshot, specs, new_log_level)
     };
+    // The candidate is the committed raw now. Followers (the geodata
+    // fetch) read it themselves and serialize their own commits on the
+    // lane this caller still holds, so waking them here is safe.
+    state.config_commits.notify();
 
     if let Some(new_log_level) = new_log_level {
         let level = new_log_level.as_deref().unwrap_or("info");
@@ -4508,6 +4554,7 @@ mod outbound_flush_tests {
             listeners: vec![],
             external_ui: None,
             traffic_feed: TrafficFeed::default(),
+            config_commits: Default::default(),
             dns_server: Default::default(),
         })
     }
@@ -4652,6 +4699,7 @@ mod global_route_binding_tests {
             listeners: vec![],
             external_ui: None,
             traffic_feed: TrafficFeed::default(),
+            config_commits: Default::default(),
             dns_server: Default::default(),
         })
     }

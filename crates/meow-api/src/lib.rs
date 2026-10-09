@@ -280,6 +280,9 @@ pub struct ApiServer {
     /// Provider-dialer cell `PUT /configs` rebuilds hand to newly declared
     /// providers (issue #489).
     provider_dialer_registry: meow_proxy::dialer::ProxyRegistry,
+    /// Bumped after every committed config change; see
+    /// [`Self::with_config_commits`].
+    config_commits: routes::ConfigCommits,
 }
 
 impl ApiServer {
@@ -322,7 +325,16 @@ impl ApiServer {
             external_ui,
             dns_server,
             provider_dialer_registry,
+            config_commits: routes::ConfigCommits::default(),
         }
+    }
+
+    /// Share `commits` with the embedder: the server bumps it after every
+    /// committed config change, so background work started before the
+    /// server (the geodata fetch) can follow reloads.
+    pub fn with_config_commits(mut self, commits: routes::ConfigCommits) -> Self {
+        self.config_commits = commits;
+        self
     }
 
     /// Bind and serve in one call. Kept for callers that await `run()`
@@ -353,6 +365,7 @@ impl ApiServer {
             listeners: self.listeners.clone(),
             external_ui: self.resolve_external_ui(),
             traffic_feed: Default::default(),
+            config_commits: self.config_commits.clone(),
             dns_server: Arc::clone(&self.dns_server),
             provider_dialer_registry: self.provider_dialer_registry.clone(),
         });
