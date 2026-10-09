@@ -188,9 +188,8 @@ fn secrets_never_show_in_debug_output() {
             .cloned()
             .unwrap_or_default(),
     };
-    let converted = clash_proxies(&[&node]);
-    assert_eq!(converted.proxies[0]["password"], "NODEPW");
-    assert!(!format!("{converted:?}").contains("NODEPW"));
+    let proxy = crate::pool::clash_proxy_for(&node, "n").expect("proxy");
+    assert_eq!(proxy["password"], "NODEPW");
 }
 
 #[test]

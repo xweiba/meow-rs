@@ -2,8 +2,8 @@
 //!
 //! - `tests/fixtures/l4_helpers.json`: Dart's answers for many inputs
 //!   (`clashProxyFor` over every parse-golden node plus edge cases, the
-//!   `unique()` naming, `clashSshProxies`, `paopaoHosts`, `moduleConfig`,
-//!   `ScriptModule.name`), written once by a throwaway Dart script
+//!   `unique()` naming (now the pool's one tag scheme, B1),
+//!   `clashSshProxies`, `paopaoHosts`, `moduleConfig`, `ScriptModule.name`), written once by a throwaway Dart script
 //!   (`tests/fixtures/l4_helpers_dump.dart`, run from `paopao_proxy/test`).
 //!   Where Dart threw (`{"throws": …}`), Rust's documented divergence is
 //!   checked instead.
@@ -17,8 +17,8 @@ use meow_paopao::rules::{
     custom_rule_line, private_cidr_rules, rule_target_tag, ssh_proxies, ModuleConfig, SshProxy,
 };
 use meow_paopao::{
-    build_pool, clash_proxies, clash_proxy_for, effective_settings, module_config, paopao_hosts,
-    NetworkInfo, PoolInput, ProxyNode, ProxySettings, ScriptModule, SshSecrets,
+    build_pool, clash_proxy_for, effective_settings, module_config, paopao_hosts, NetworkInfo,
+    PoolInput, PoolSource, ProxyNode, ProxySettings, ScriptModule, SshSecrets,
 };
 use serde_json::{Map, Value};
 
@@ -78,8 +78,12 @@ fn clash_proxy_for_matches_dart() {
     report("clashProxyFor", &failures, cases.len());
 }
 
+/// Dart's `unique()` naming against the one tag scheme (B1): the same
+/// names, the unconvertible nodes left out, except that a line no longer
+/// takes a name our own outbounds use (`direct`, `block`, `speedtest`,
+/// `auto~fastest` were free in the config).
 #[test]
-fn proxy_names_match_dart() {
+fn proxy_names_follow_dart_unique() {
     let f = fixture();
     let cases = f["unique"].as_array().expect("cases");
     let mut failures = Vec::new();
@@ -90,11 +94,31 @@ fn proxy_names_match_dart() {
             .iter()
             .map(node)
             .collect();
-        let refs: Vec<&ProxyNode> = nodes.iter().collect();
-        let got = clash_proxies(&refs);
-        let want = &c["got"]["ok"];
-        let got = serde_json::json!({"names": got.names, "unsupported": got.unsupported});
-        if let Some(d) = common::first_diff(&got, want) {
+        let input = PoolInput {
+            subscriptions: vec![PoolSource {
+                // Distinct servers: `unique()` saw no de-duplication.
+                nodes: nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| {
+                        let mut n = n.clone();
+                        n.outbound.insert("server_port".into(), (i + 1).into());
+                        n
+                    })
+                    .collect(),
+                usage: None,
+            }],
+            ..PoolInput::default()
+        };
+        let pool = build_pool(&input);
+        let mut want = c["got"]["ok"].clone();
+        for n in want["names"].as_array_mut().expect("names") {
+            if let Some(s @ ("direct" | "block" | "speedtest" | "auto~fastest")) = n.as_str() {
+                *n = format!("{s} 2").into();
+            }
+        }
+        let got = serde_json::json!({"names": pool.tags, "unsupported": pool.unsupported});
+        if let Some(d) = common::first_diff(&got, &want) {
             failures.push(format!("{}: {d}", c["nodes"]));
         }
     }
@@ -191,12 +215,11 @@ fn pieces_match_build_goldens() {
         // Node proxies first.
         let pool_input: PoolInput = serde_json::from_value(input.clone()).expect("input");
         let pool = build_pool(&pool_input);
-        let nodes: Vec<&ProxyNode> = pool.nodes.iter().map(|n| &n.node).collect();
-        let converted = clash_proxies(&nodes);
-        let mut got: Vec<Value> = converted
-            .proxies
+        let mut got: Vec<Value> = pool
+            .nodes
             .iter()
-            .cloned()
+            .zip(&pool.tags)
+            .filter_map(|(n, t)| clash_proxy_for(&n.node, t))
             .map(Value::Object)
             .collect();
 

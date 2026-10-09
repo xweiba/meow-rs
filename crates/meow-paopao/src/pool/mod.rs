@@ -3,6 +3,7 @@
 //! `nodeTagsFor` in `config.dart` and `ProxyController._pool`).
 
 mod groups;
+mod proxy;
 mod regions;
 
 use indexmap::IndexMap;
@@ -14,6 +15,7 @@ use crate::model::node::ProxyNode;
 use crate::model::usage::Usage;
 
 pub use groups::{classify, group_names, LineKind, NodeGroup, LINE_KINDS};
+pub use proxy::clash_proxy_for;
 pub use regions::{
     is_flagged_node, is_usable_node, region_for_code, region_of, region_of_node, Region, REGIONS,
 };
@@ -123,9 +125,14 @@ impl PoolNode {
 }
 
 /// The line pool and what screens derive from it.
+///
+/// One tag scheme (B1): a line's tag is assigned here once, and the same
+/// name is its `proxies:` entry in the config, its member name in every
+/// group and what the subscriptions' rules point at.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pool {
-    /// One line per server, in priority order, with measured exits.
+    /// One line per server, in priority order, with measured exits; only
+    /// lines the core can run ([`can_output`]).
     pub nodes: Vec<PoolNode>,
     /// Each node's outbound tag (same order as `nodes`), see [`node_tags_for`].
     pub tags: Vec<String>,
@@ -133,6 +140,9 @@ pub struct Pool {
     pub groups: Vec<NodeGroup>,
     /// Each tag's region (name first, else measured exit); None = unknown.
     pub region_by_tag: IndexMap<String, Option<Region>>,
+    /// Usable lines left out because the core can't run them (plain HTTP,
+    /// an unsupported transport …), before de-duplication.
+    pub unsupported: usize,
 }
 
 impl Pool {
@@ -159,7 +169,8 @@ impl Pool {
 /// Dart parity: the controller asks `poolNodes` with the wall clock; here
 /// the input's `now` is used.
 pub fn build_pool(input: &PoolInput) -> Pool {
-    let nodes: Vec<PoolNode> = pool_nodes(&input.subscriptions, input.now)
+    let (lines, unsupported) = pool_nodes_counted(&input.subscriptions, input.now);
+    let nodes: Vec<PoolNode> = lines
         .into_iter()
         .filter(|n| input.ipv6 || !needs_ipv6(n))
         .map(|n| {
@@ -185,6 +196,7 @@ pub fn build_pool(input: &PoolInput) -> Pool {
         tags,
         groups,
         region_by_tag,
+        unsupported,
     }
 }
 
@@ -221,24 +233,45 @@ pub fn remaining_of(u: Option<&Usage>, now: i64) -> Option<i64> {
     Some(u.total.wrapping_sub(u.used()).max(0))
 }
 
+/// Whether the core can run `n` (B4): only these get a tag and enter the
+/// groups; the rest stay in their subscription, shown as not supported.
+pub fn can_output(n: &ProxyNode) -> bool {
+    clash_proxy_for(n, "").is_some()
+}
+
 /// All subscriptions' lines as one pool: one line per server
 /// ([`endpoint`]). Sources come in the user's priority order; where several
 /// reach the same server the earlier one serves it. Used-up or expired
 /// accounts (at `now`, Unix ms) only count when no account is left with
-/// traffic or unknown traffic. Info rows ("剩余流量…") are left out.
+/// traffic or unknown traffic. Info rows ("剩余流量…") and lines the core
+/// can't run ([`can_output`]) are left out; the latter before
+/// de-duplication, so a runnable line of the same server still serves it.
 pub fn pool_nodes(sources: &[PoolSource], now: i64) -> Vec<&ProxyNode> {
+    pool_nodes_counted(sources, now).0
+}
+
+/// [`pool_nodes`] and how many usable lines it left out as unsupported.
+fn pool_nodes_counted(sources: &[PoolSource], now: i64) -> (Vec<&ProxyNode>, usize) {
     // Dart sorts alive (≥ 0 left or unknown) before used-up, each by index,
     // then keeps the alive ones unless there are none: the index order
     // either way.
     let dead = |s: &PoolSource| remaining_of(s.usage.as_ref(), now) == Some(0);
     let any_alive = sources.iter().any(|s| !dead(s));
     let mut seen = std::collections::HashSet::new();
-    sources
+    let mut unsupported = 0;
+    let lines = sources
         .iter()
         .filter(|s| !any_alive || !dead(s))
         .flat_map(|s| &s.nodes)
-        .filter(|n| is_usable_node(n) && seen.insert(endpoint(n)))
-        .collect()
+        .filter(|n| is_usable_node(n))
+        .filter(|n| {
+            let ok = can_output(n);
+            unsupported += usize::from(!ok);
+            ok
+        })
+        .filter(|n| seen.insert(endpoint(n)))
+        .collect();
+    (lines, unsupported)
 }
 
 /// The line only works over IPv6: its server is an IPv6 address (brackets
@@ -272,14 +305,25 @@ pub fn exit_key(n: &ProxyNode, resolved: &IndexMap<String, String>) -> Option<St
     })
 }
 
-/// Tags reserved for our own outbounds, which a node never takes.
-const RESERVED_TAGS: [&str; 6] = [
+/// Names a line never takes: our own groups and outbounds (as the
+/// settings and the route API write them, and as the config does), the
+/// core's built-in outbounds, and the rewrite modules' proxies.
+const RESERVED_TAGS: [&str; 15] = [
     "proxy",
     "auto",
+    "auto~smart",
+    "auto~balance",
     "auto~fastest",
     "speedtest",
     "direct",
     "block",
+    "DIRECT",
+    "REJECT",
+    "REJECT-DROP",
+    "PASS",
+    "COMPATIBLE",
+    "paopao-mitm",
+    "paopao-mitm-return",
 ];
 
 /// Prefixes of our own tags (`region:…`, a user group's `group:…`, …).
@@ -292,16 +336,11 @@ pub fn clashes_with_our_tags(name: &str) -> bool {
     OUR_PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
-/// The outbound tag each node gets (Dart: `nodeTagsFor`): its trimmed name
-/// (`node` when blank), a leading space when it starts like one of our own
-/// tags, then ` 2`, ` 3`, … until unique among the earlier tags and the
-/// reserved outbound tags.
-///
-/// Known divergence (B1): Clash config generation (`unique()` in
-/// `buildClashConfig`) numbers names with its own scheme — it reserves
-/// `proxy`, `auto`, `DIRECT`, `REJECT` instead of `auto~fastest`,
-/// `speedtest`, `direct`, `block`, and frees the tag of a node it cannot
-/// convert — so the two can name the same node differently.
+/// The tag each line gets, which is also its proxy name in the config
+/// (Dart had two schemes, `nodeTagsFor` and `unique()`; B1): its trimmed
+/// name (`node` when blank), a leading space when it starts like one of
+/// our own tags, then ` 2`, ` 3`, … until unique among the earlier tags
+/// and [`RESERVED_TAGS`]. `nodes` are the pool's lines (all runnable).
 pub fn node_tags_for(nodes: &[&ProxyNode]) -> Vec<String> {
     let mut used: std::collections::HashSet<String> =
         RESERVED_TAGS.iter().map(|s| (*s).to_owned()).collect();

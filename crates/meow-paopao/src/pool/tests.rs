@@ -377,6 +377,98 @@ fn tags_like_dart() {
     assert_eq!(node_tags_for(&refs), TAGS);
 }
 
+/// B1 / B4: one tag per runnable line, and it is the line's proxy name.
+/// Dart named a plain-HTTP "HK" and a vless "HK" `HK` / `HK 2` in the pool
+/// but left the HTTP one out of the config, where the vless one was `HK`.
+#[test]
+fn only_runnable_lines_get_tags() {
+    let http = ProxyNode::from_json(&json!({
+        "name": "HK",
+        "outbound": {"type": "http", "server": "h", "server_port": 80},
+    }))
+    .expect("http");
+    let h2_trojan = ProxyNode::from_json(&json!({
+        "name": "JP",
+        "outbound": {"type": "trojan", "server": "j", "server_port": 1, "password": "p",
+                     "transport": {"type": "http"}},
+    }))
+    .expect("trojan");
+    let vless = |name: &str, server: &str| {
+        ProxyNode::from_json(&json!({
+            "name": name,
+            "outbound": {"type": "vless", "server": server, "server_port": 443, "uuid": "u"},
+        }))
+        .expect("vless")
+    };
+    let input = PoolInput {
+        subscriptions: vec![PoolSource {
+            nodes: vec![
+                http,
+                vless("HK", "a"),
+                h2_trojan,
+                vless("JP", "b"),
+                vless("DIRECT", "c"),
+                vless("REJECT", "d"),
+                vless("paopao-mitm", "e"),
+                vless("auto~smart", "f"),
+            ],
+            usage: None,
+        }],
+        ..PoolInput::default()
+    };
+    let pool = build_pool(&input);
+    assert_eq!(
+        pool.tags,
+        [
+            "HK",
+            "JP",
+            "DIRECT 2",
+            "REJECT 2",
+            "paopao-mitm 2",
+            "auto~smart 2"
+        ]
+    );
+    assert_eq!(pool.unsupported, 2);
+    assert_eq!(pool.nodes.len(), pool.tags.len());
+    // Groups list only those tags.
+    let hk = pool
+        .groups
+        .iter()
+        .find(|g| g.tag == "region:HK")
+        .expect("HK");
+    assert_eq!(hk.members, ["HK"]);
+    let jp = pool
+        .groups
+        .iter()
+        .find(|g| g.tag == "region:JP")
+        .expect("JP");
+    assert_eq!(jp.members, ["JP"]);
+    for (n, t) in pool.nodes.iter().zip(&pool.tags) {
+        assert_eq!(clash_proxy_for(&n.node, t).expect("runnable")["name"], *t);
+    }
+}
+
+/// A server whose first entry can't run is served by a later one that can.
+#[test]
+fn unrunnable_entry_does_not_hide_its_server() {
+    let trojan = |name: &str, transport: Option<&str>| {
+        let mut o = json!({"type": "trojan", "server": "s", "server_port": 1, "password": "p"});
+        if let Some(t) = transport {
+            o["transport"] = json!({"type": t});
+        }
+        ProxyNode::from_json(&json!({"name": name, "outbound": o})).expect("node")
+    };
+    let sources = [PoolSource {
+        nodes: vec![trojan("bad", Some("http")), trojan("good", None)],
+        usage: None,
+    }];
+    let names: Vec<&str> = pool_nodes(&sources, 0)
+        .iter()
+        .map(|n| n.name.as_str())
+        .collect();
+    assert_eq!(names, ["good"]);
+}
+
 // Ported from paopao_proxy test/pool_test.dart.
 
 #[test]

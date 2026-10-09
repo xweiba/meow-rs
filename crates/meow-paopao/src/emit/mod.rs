@@ -5,11 +5,12 @@
 //!
 //! Rule order (first match wins), see [`RULE_ORDER`].
 //!
+//! Lines are named by the pool's tags ([`crate::pool::node_tags_for`]):
+//! the config, the screen's tree and the subscriptions' split all use the
+//! same names (B1).
+//!
 //! Known Dart behaviours kept for parity:
 //!
-//! - B1: lines are named here by [`clash_proxies`] (`unique()`), not by the
-//!   pool's tags; the config's tree is built over those names while the
-//!   subscriptions' split points at pool tags.
 //! - B2: the config's tree always has the split (the screen's only in smart
 //!   mode).
 //! - Device exits and `allowLan` are not ported (the controller never
@@ -29,11 +30,11 @@ use crate::plan::{
     build_group_tree, final_policy, outbound_tags, AutoStrategy, GroupTree, ImportedSplit, Policy,
     RoutePolicy, RuntimeOptions, TreeInput, POLICIES,
 };
-use crate::pool::{classify, is_usable_node, PoolNode};
+use crate::pool::{clash_proxy_for, is_usable_node, Pool};
 use crate::rules::{
-    clash_proxies, custom_rule_line, geo_rule, iface_tag, module_config, private_cidr_rules,
-    rule_matcher, rule_target, rule_target_tag, ssh_proxies, without_sites, ModuleConfig,
-    ScriptModule, SshSecrets, PRIVATE_RULE_SET,
+    custom_rule_line, geo_rule, iface_tag, module_config, private_cidr_rules, rule_matcher,
+    rule_target, rule_target_tag, ssh_proxies, without_sites, ModuleConfig, ScriptModule,
+    SshSecrets, PRIVATE_RULE_SET,
 };
 
 pub use groups::{clash_auto_group, clash_group};
@@ -73,8 +74,9 @@ const STUN_PORTS: &str = "3478/5349/19302-19309";
 /// as `ProxyController._launch` passes them).
 #[derive(Clone, Copy)]
 pub struct EmitInput<'a> {
-    /// The pool's lines (with measured exits), in pool order.
-    pub nodes: &'a [PoolNode],
+    /// The line pool: its lines, their tags (the proxies' names) and
+    /// groups.
+    pub pool: &'a Pool,
     /// The settings in force ([`crate::plan::BuildInput::effective`]).
     pub settings: &'a ProxySettings,
     pub runtime: &'a RuntimeOptions,
@@ -97,7 +99,7 @@ pub struct ClashConfig {
     /// The meow config, keys in Dart's order. Holds secrets (API secret,
     /// SSH credentials, node passwords): never log it.
     pub config: Map<String, Value>,
-    /// Lines the core can't run (plain HTTP …).
+    /// Lines the core can't run (plain HTTP …), left out of the pool.
     pub unsupported: usize,
 }
 
@@ -114,10 +116,8 @@ impl std::fmt::Debug for ClashConfig {
 /// names, the config's tree and what rules may point at.
 struct Plan<'a> {
     input: &'a EmitInput<'a>,
-    /// The converted lines' `proxies:` entries and names.
+    /// The lines' `proxies:` entries, named by their tags.
     proxies: Vec<Map<String, Value>>,
-    names: Vec<String>,
-    unsupported: usize,
     tree: GroupTree,
     /// Any line, chain or group a rule may point at.
     choices: HashSet<String>,
@@ -126,26 +126,27 @@ struct Plan<'a> {
 impl<'a> Plan<'a> {
     fn new(input: &'a EmitInput<'a>) -> Self {
         let s = input.settings;
-        let nodes: Vec<_> = input.nodes.iter().map(|n| &n.node).collect();
-        let converted = clash_proxies(&nodes);
-        let names = converted.names;
-        let lines: Vec<_> = converted
-            .converted
+        let pool = input.pool;
+        let names = &pool.tags;
+        // The pool holds only lines the core can run.
+        let proxies: Vec<Map<String, Value>> = pool
+            .nodes
             .iter()
-            .map(|i| (&input.nodes[*i].node, input.nodes[*i].exit.as_deref()))
+            .zip(names)
+            .filter_map(|(n, t)| clash_proxy_for(&n.node, t))
             .collect();
-        let usable: Vec<String> = lines
+        let usable: Vec<String> = pool
+            .nodes
             .iter()
-            .zip(&names)
-            .filter(|((n, _), _)| is_usable_node(n))
+            .zip(names)
+            .filter(|(n, _)| is_usable_node(&n.node))
             .map(|(_, t)| t.clone())
             .collect();
-        let groups = classify(&lines, &names);
         let ssh_names: Vec<String> = s.ssh_chains.iter().map(SshChain::tag).collect();
         let tree = build_group_tree(&TreeInput {
-            lines: &names,
+            lines: names,
             usable: &usable,
-            base: &groups,
+            base: &pool.groups,
             settings: s,
             split: input.split,
             extras: &ssh_names,
@@ -159,9 +160,7 @@ impl<'a> Plan<'a> {
             .collect();
         Self {
             input,
-            proxies: converted.proxies,
-            names,
-            unsupported: converted.unsupported,
+            proxies,
             tree,
             choices,
         }
@@ -369,7 +368,7 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
     let s = input.settings;
     let rt = input.runtime;
     let mods = plan.modules(rt.mitm_port);
-    let speed_test = rt.speed_test_port.filter(|_| !plan.names.is_empty());
+    let speed_test = rt.speed_test_port.filter(|_| !input.pool.tags.is_empty());
     let route = rt.route.as_ref();
     let lan = route.is_some_and(|r| r.lan);
 
@@ -476,7 +475,7 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
         let mut g = Map::new();
         g.insert("name".into(), outbound_tags::SPEED_TEST.into());
         g.insert("type".into(), "select".into());
-        g.insert("proxies".into(), plan.names.clone().into());
+        g.insert("proxies".into(), input.pool.tags.clone().into());
         groups.push(Value::Object(g));
     }
     c.insert("proxy-groups".into(), groups.into());
@@ -486,7 +485,7 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
     c.insert("rules".into(), rules.into());
     ClashConfig {
         config: c,
-        unsupported: plan.unsupported,
+        unsupported: input.pool.unsupported,
     }
 }
 

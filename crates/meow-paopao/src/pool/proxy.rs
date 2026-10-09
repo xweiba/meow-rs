@@ -1,13 +1,10 @@
-//! Pool nodes as Clash `proxies:` entries (Dart: `clashProxyFor` and the
-//! `unique()` naming in `buildClashConfig`).
-
-use std::collections::HashSet;
+//! Nodes as meow `proxies:` entries (Dart: `clashProxyFor`). The pool
+//! takes only nodes this can convert, so a line's tag is its proxy name.
 
 use serde_json::{Map, Value};
 
-use crate::dart::{trim, Dv};
+use crate::dart::Dv;
 use crate::model::node::ProxyNode;
-use crate::pool::clashes_with_our_tags;
 
 /// One node as a meow `proxies:` entry named `name`; None when the core
 /// can't take it (plain HTTP, transports other than ws / grpc / h2, h2 for
@@ -254,78 +251,4 @@ fn net(transport: Option<&Map<String, Value>>) -> Option<Map<String, Value>> {
     out.insert("network".into(), network.into());
     out.insert(opts_key.into(), Value::Object(opts));
     Some(out)
-}
-
-/// The nodes as Clash proxies with their names (Dart: the node loop of
-/// `buildClashConfig`).
-#[derive(Clone, PartialEq)]
-pub struct ClashProxies {
-    /// The converted nodes' `proxies:` entries, in node order.
-    pub proxies: Vec<Map<String, Value>>,
-    /// Each entry's name (same order as `proxies`).
-    pub names: Vec<String>,
-    /// Indexes (into the input) of the nodes that converted, same order.
-    pub converted: Vec<usize>,
-    /// Nodes the core can't take (counted like unsupported subscription
-    /// entries).
-    pub unsupported: usize,
-}
-
-// Entries carry the nodes' credentials: names and counts only.
-impl std::fmt::Debug for ClashProxies {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClashProxies")
-            .field("names", &self.names)
-            .field("converted", &self.converted)
-            .field("unsupported", &self.unsupported)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Converts `nodes` with [`clash_proxy_for`], naming each like Dart's
-/// `unique()`: the trimmed name (`node` when blank), a leading space when it
-/// starts like one of our own tags, then ` 2`, ` 3`, … until unique among
-/// the earlier names and `proxy`, `auto`, `DIRECT`, `REJECT`. A node that
-/// does not convert gives its name back.
-///
-/// Known divergence from the pool's tags (B1): see
-/// [`crate::pool::node_tags_for`].
-pub fn clash_proxies(nodes: &[&ProxyNode]) -> ClashProxies {
-    let mut used: HashSet<String> = ["proxy", "auto", "DIRECT", "REJECT"]
-        .iter()
-        .map(|s| (*s).to_owned())
-        .collect();
-    let mut out = ClashProxies {
-        proxies: Vec::new(),
-        names: Vec::new(),
-        converted: Vec::new(),
-        unsupported: 0,
-    };
-    for (i, n) in nodes.iter().enumerate() {
-        let name = trim(&n.name);
-        let mut tag = if name.is_empty() {
-            "node".to_owned()
-        } else {
-            name.to_owned()
-        };
-        if clashes_with_our_tags(&tag) {
-            tag.insert(0, ' ');
-        }
-        let mut candidate = tag.clone();
-        let mut k = 2;
-        while used.contains(&candidate) {
-            candidate = format!("{tag} {k}");
-            k += 1;
-        }
-        match clash_proxy_for(n, &candidate) {
-            Some(p) => {
-                used.insert(candidate.clone());
-                out.proxies.push(p);
-                out.names.push(candidate);
-                out.converted.push(i);
-            }
-            None => out.unsupported += 1,
-        }
-    }
-    out
 }

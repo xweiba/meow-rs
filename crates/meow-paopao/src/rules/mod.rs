@@ -1,7 +1,6 @@
 //! L4: the config pieces that need no group tree (Dart: `hosts.dart`,
 //! `ssh.dart`, `moduleConfig` in `script_module.dart`, and the helpers of
-//! `clash_config.dart`): nodes as Clash proxies with their unique names,
-//! SSH chains as proxies, hosts entries, what the rewrite modules add, and
+//! `clash_config.dart`): SSH chains as proxies, hosts entries, what the rewrite modules add, and
 //! rule lines built from the user's rules.
 //!
 //! Everything here returns the meow (Clash) shapes key for key; L5
@@ -9,7 +8,6 @@
 
 mod hosts;
 mod modules;
-mod proxies;
 mod ssh;
 
 pub use hosts::paopao_hosts;
@@ -18,7 +16,6 @@ pub use modules::{
     ModuleSpec, ScriptModule, BUILTIN_SCRIPT_PATH, MITM_PROXY_NAME, MITM_RETURN_IN,
     MITM_RETURN_PROXY, MODULE_NOTIFICATIONS_PATH, MODULE_STORE_PATH,
 };
-pub use proxies::{clash_proxies, clash_proxy_for, ClashProxies};
 pub use ssh::{ssh_proxies, SshProxy, SshSecrets};
 
 use crate::model::settings::{CustomRule, RuleMatch, RuleTarget};

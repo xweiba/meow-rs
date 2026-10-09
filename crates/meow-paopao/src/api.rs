@@ -112,7 +112,7 @@ pub fn build(input: &BuildInput) -> BuildOutput {
         secrets.insert(k.clone(), v.clone());
     }
     let emit = EmitInput {
-        nodes: &pool.nodes,
+        pool: &pool,
         settings: &settings,
         runtime: &input.runtime,
         route_policies: &route_policies,

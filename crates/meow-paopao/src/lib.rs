@@ -6,10 +6,11 @@
 //!
 //! - [`model`] (L0): nodes, subscriptions' split and usage, settings, network.
 //! - [`ingest`] (L1): subscription bodies and share links → nodes.
-//! - [`pool`] (L2): subscriptions → one line pool, tags, region / kind groups.
+//! - [`pool`] (L2): subscriptions → one line pool of what the core can run
+//!   (nodes as `proxies:` entries), tags, region / kind groups.
 //! - [`plan`] (L3): business policies, the subscriptions' merged split, the
 //!   group tree.
-//! - [`rules`] (L4): config pieces without the tree: nodes and SSH chains as
+//! - [`rules`] (L4): config pieces without the tree: SSH chains as
 //!   proxies, hosts, rewrite modules, rule lines.
 //! - [`emit`] (L5): the meow config assembled from all of the above.
 //! - [`api`] (L6): [`build`] and the JSON entry points; `ffi` (feature
@@ -41,8 +42,7 @@ pub use plan::{
     build_tree, imported_split, route_catalog, AutoStrategy, BuildInput, GroupKind, GroupSpec,
     GroupTree, ImportedGroup, ImportedSplit, RoutePolicy, RuntimeOptions,
 };
-pub use pool::{build_pool, NodeGroup, Pool, PoolInput, PoolNode, PoolSource, Region};
-pub use rules::{
-    clash_proxies, clash_proxy_for, module_config, paopao_hosts, ssh_proxies, ClashProxies,
-    ModuleConfig, ScriptModule, SshSecrets,
+pub use pool::{
+    build_pool, clash_proxy_for, NodeGroup, Pool, PoolInput, PoolNode, PoolSource, Region,
 };
+pub use rules::{module_config, paopao_hosts, ssh_proxies, ModuleConfig, ScriptModule, SshSecrets};
