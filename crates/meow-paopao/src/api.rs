@@ -6,6 +6,8 @@
 //!   (what `ProxyController` stores for a subscription).
 //! - [`build_json`]: `ProxyController.configInput()` → `{config, pool, tree,
 //!   rules, routePolicies}`.
+//! - [`explain_json`]: the same input and a connection → the rule that
+//!   decides it and where it goes ([`explain`]).
 //!
 //! Failures are `{"error": "..."}`, never a panic across the boundary.
 
@@ -17,6 +19,7 @@ use crate::plan::{
     RoutePolicy,
 };
 use crate::pool::{build_pool, Pool};
+use crate::rules::matcher::{Connection, Rule, Verdict};
 use crate::rules::{ScriptModule, SshSecrets};
 use crate::{parse_subscription, usage_from_names};
 
@@ -150,4 +153,122 @@ pub fn build_json(input: &str) -> Value {
         Ok(_) => json!({ "error": "input is not a JSON object" }),
         Err(e) => json!({ "error": format!("input is not JSON: {e}") }),
     }
+}
+
+/// The rule deciding a connection, and where it leads ([`explain`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Explanation {
+    /// The rule line as the config has it.
+    pub rule: String,
+    /// Its type (`DOMAIN-SUFFIX`, `GEOSITE`, `AND`, `MATCH` …).
+    pub kind: String,
+    /// What it matches (empty for `MATCH`).
+    pub payload: String,
+    /// Where it sends the connection.
+    pub target: String,
+    /// Its place in the config's `rules:`.
+    pub index: usize,
+    /// `target`, then each select group's pick down to a line, DIRECT,
+    /// REJECT or an automatic group (which picks at run time).
+    pub path: Vec<String>,
+    /// False when only the core can tell whether this rule takes the
+    /// connection (a rule set, a domain to look up): the rules after it
+    /// may decide instead, so the answer is "not known".
+    pub decided: bool,
+}
+
+impl Explanation {
+    /// `{rule, type, payload, target, index, path, decided}`.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "rule": self.rule,
+            "type": self.kind,
+            "payload": self.payload,
+            "target": self.target,
+            "index": self.index,
+            "path": self.path,
+            "decided": self.decided,
+        })
+    }
+}
+
+/// Which rule of the config built from `input` decides connection `c`, the
+/// first that takes it (B5 / D6; Dart's `_roughMatch` looked at the user's
+/// rules and the policies' names only). It walks the config's real rule
+/// list: private ranges, the user's rules, the modules', the business
+/// policies minus their excluded sites, the subscriptions', the basic
+/// split, `MATCH`. A rule only the core can evaluate (`GEOSITE`, `GEOIP`,
+/// an IP rule for a domain without `no-resolve`, an unknown type) stops
+/// the walk undecided. None only when no rule could take it at all.
+pub fn explain(input: &BuildInput, c: &Connection) -> Option<Explanation> {
+    let out = build(input);
+    let rules = out.config.get("rules").and_then(Value::as_array)?;
+    rules.iter().enumerate().find_map(|(index, line)| {
+        let line = line.as_str()?;
+        let rule = Rule::parse(line)?;
+        let decided = match rule.check(c) {
+            Verdict::No => return None,
+            Verdict::Yes => true,
+            Verdict::Unknown => false,
+        };
+        Some(Explanation {
+            rule: line.to_owned(),
+            kind: rule.kind.to_owned(),
+            payload: rule.payload.to_owned(),
+            target: rule.target.to_owned(),
+            index,
+            path: group_path(&out.tree, rule.target),
+            decided,
+        })
+    })
+}
+
+/// `target`, then the pick of each select group on the way.
+fn group_path(tree: &GroupTree, target: &str) -> Vec<String> {
+    let mut path = vec![target.to_owned()];
+    let mut at = target;
+    while let Some(g) = tree.by_tag(at) {
+        if g.kind != crate::plan::GroupKind::Select {
+            break;
+        }
+        let Some(pick) = g.pick.as_deref() else { break };
+        if path.iter().any(|p| p == pick) {
+            break;
+        }
+        path.push(pick.to_owned());
+        at = pick;
+    }
+    path
+}
+
+/// [`explain`] over JSON: `input` as for [`build_json`], `query`
+/// `{host, port?, process?, network?}` (`network`: `tcp` by default or
+/// `udp`) → [`Explanation::to_json`], `null` when no rule takes it, or
+/// `{"error": ...}`.
+pub fn explain_json(input: &str, query: &str) -> Value {
+    let input = match serde_json::from_str::<Value>(input) {
+        Ok(v) if v.is_object() => v,
+        Ok(_) => return json!({ "error": "input is not a JSON object" }),
+        Err(e) => return json!({ "error": format!("input is not JSON: {e}") }),
+    };
+    let q = match serde_json::from_str::<Value>(query) {
+        Ok(v) if v.is_object() => v,
+        _ => return json!({ "error": "query is not a JSON object" }),
+    };
+    let Some(host) = q.get("host").and_then(Value::as_str) else {
+        return json!({ "error": "query has no host" });
+    };
+    let c = Connection {
+        host: host.to_owned(),
+        port: q
+            .get("port")
+            .and_then(Value::as_u64)
+            .and_then(|p| u16::try_from(p).ok()),
+        process: q.get("process").and_then(Value::as_str).map(str::to_owned),
+        udp: q
+            .get("network")
+            .and_then(Value::as_str)
+            .is_some_and(|n| n.eq_ignore_ascii_case("udp")),
+    };
+    explain(&BuildInput::from_json(&input), &c).map_or(Value::Null, |e| e.to_json())
 }

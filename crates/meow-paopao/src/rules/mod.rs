@@ -1,12 +1,14 @@
 //! L4: the config pieces that need no group tree (Dart: `hosts.dart`,
 //! `ssh.dart`, `moduleConfig` in `script_module.dart`, and the helpers of
 //! `clash_config.dart`): SSH chains as proxies, hosts entries, what the rewrite modules add, and
-//! rule lines built from the user's rules.
+//! rule lines built from the user's rules, and whether a rule line takes a
+//! connection ([`matcher`]).
 //!
 //! Everything here returns the meow (Clash) shapes key for key; L5
 //! assembles them into the config.
 
 mod hosts;
+pub mod matcher;
 mod modules;
 mod ssh;
 

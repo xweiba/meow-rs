@@ -7,7 +7,7 @@ mod common;
 
 use std::ffi::{c_char, CStr, CString};
 
-use meow_paopao::ffi::{paopao_build, paopao_free, paopao_parse};
+use meow_paopao::ffi::{paopao_build, paopao_explain, paopao_free, paopao_parse};
 use serde_json::Value;
 
 /// Calls `f` with `arg` as a C string, reads the result and frees it.
@@ -63,5 +63,27 @@ fn bad_input_is_an_error_not_a_crash() {
         assert!(!out.is_null());
         paopao_free(out);
         paopao_free(std::ptr::null_mut());
+    }
+}
+
+#[test]
+fn explain_through_the_c_abi() {
+    let files = common::golden_files("build");
+    let case = common::read_json(&files[0]);
+    let input = CString::new(case["input"].to_string()).expect("no NUL");
+    let query = CString::new(r#"{"host": "10.1.2.3"}"#).expect("no NUL");
+    // SAFETY: both arguments are NUL-terminated and outlive the call; the
+    // result is read before it is freed, once. Null arguments are answered
+    // with an error.
+    unsafe {
+        let out = paopao_explain(input.as_ptr(), query.as_ptr());
+        let text = CStr::from_ptr(out).to_str().expect("UTF-8").to_owned();
+        paopao_free(out);
+        let v: Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(v["rule"], "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve", "{v}");
+        let out = paopao_explain(input.as_ptr(), std::ptr::null());
+        let text = CStr::from_ptr(out).to_str().expect("UTF-8").to_owned();
+        paopao_free(out);
+        assert!(text.contains("error"));
     }
 }

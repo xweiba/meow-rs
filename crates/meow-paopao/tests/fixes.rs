@@ -314,3 +314,98 @@ fn b22_no_auto_child_never_direct() {
         .expect("google");
     assert_eq!(g.pick.as_deref(), Some("policy:google~auto"));
 }
+
+/// B5 / D6: `explain` walks the config's real rules. Dart's `_roughMatch`
+/// missed private ranges, module and subscription rules, compared CIDRs
+/// for equality, and guessed rule-set sites by the policies' names.
+#[test]
+fn b5_explain_walks_the_real_rules() {
+    use meow_paopao::{explain, Connection};
+    let mut v = input(
+        &json!([vless("US 01", "a"), vless("JP 01", "b")]),
+        &json!({}),
+        &json!({"rules": [
+            {"match": "domain", "value": "a.example", "target": "direct"},
+            {"match": "ip", "value": "1.2.3.0/24", "target": "block"},
+            {"match": "process", "value": "Telegram", "target": "proxy"},
+        ]}),
+    );
+    v["modules"] = json!([{
+        "id": "m", "url": "https://m.example/a.sgmodule", "enabled": true,
+        "spec": {"name": "m", "scripts": [], "rewrites": [], "hostnames": [],
+                 "rules": ["DOMAIN-SUFFIX,ad.example.com,REJECT"]},
+    }]);
+    let ask = |v: &Value, host: &str| {
+        explain(
+            &BuildInput::from_json(v),
+            &Connection {
+                host: host.into(),
+                ..Connection::default()
+            },
+        )
+        .expect("a rule")
+    };
+    // Private range.
+    let e = ask(&v, "192.168.1.5");
+    assert_eq!(
+        (e.rule.as_str(), e.decided),
+        ("IP-CIDR,192.168.0.0/16,DIRECT,no-resolve", true)
+    );
+    // The user's rule, a subdomain.
+    let e = ask(&v, "www.a.example");
+    assert_eq!(e.target, "DIRECT");
+    assert_eq!(
+        (e.kind.as_str(), e.payload.as_str()),
+        ("DOMAIN-SUFFIX", "a.example")
+    );
+    // Its place in the config: after the speed test's and the private ranges.
+    assert_eq!(e.index, 10);
+    // A range, not just its own address.
+    assert_eq!(ask(&v, "1.2.3.200").target, "REJECT");
+    // A module's rule.
+    assert_eq!(
+        ask(&v, "x.ad.example.com").rule,
+        "DOMAIN-SUFFIX,ad.example.com,REJECT"
+    );
+    // The built-in groups start with rule sets: only the core can tell.
+    let e = ask(&v, "ipinfo.io");
+    assert!(!e.decided);
+    assert_eq!(e.kind, "GEOSITE");
+    // A program.
+    let e = explain(
+        &BuildInput::from_json(&v),
+        &Connection {
+            host: "t.me".into(),
+            process: Some("Telegram".into()),
+            ..Connection::default()
+        },
+    )
+    .expect("rule");
+    assert_eq!(e.rule, "PROCESS-NAME,Telegram,proxy");
+    assert_eq!(e.path[0], "proxy");
+
+    // Global mode: everything else to 🚀 节点选择, down its picks.
+    v["settings"]["mode"] = json!("global");
+    let e = ask(&v, "google.com");
+    assert_eq!(e.rule, "MATCH,proxy");
+    assert!(e.decided);
+    assert_eq!(e.path, ["proxy", "auto", "auto~smart"]);
+}
+
+/// The JSON entry: `{host, port?, process?, network?}`.
+#[test]
+fn b5_explain_json() {
+    let v = input(
+        &json!([vless("US 01", "a")]),
+        &json!({}),
+        &json!({"mode": "direct"}),
+    );
+    let out = meow_paopao::explain_json(&v.to_string(), r#"{"host": "example.com", "port": 443}"#);
+    assert_eq!(out["rule"], "MATCH,DIRECT");
+    assert_eq!(out["type"], "MATCH");
+    assert_eq!(out["target"], "DIRECT");
+    assert_eq!(out["path"], json!(["DIRECT"]));
+    assert_eq!(out["decided"], true);
+    assert!(meow_paopao::explain_json("[]", "{}")["error"].is_string());
+    assert!(meow_paopao::explain_json(&v.to_string(), "{}")["error"].is_string());
+}
