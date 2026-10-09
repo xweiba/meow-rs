@@ -7,6 +7,8 @@
 //!   when the core came up, else the reason.
 //! - `stop()`, `running()`.
 
+// The config builder's C ABI, linked in so this library exports it too.
+pub use meow_paopao::ffi::{paopao_build, paopao_free, paopao_parse};
 use std::sync::mpsc;
 use std::time::Duration;
 

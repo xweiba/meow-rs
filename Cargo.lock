@@ -2961,6 +2961,7 @@ dependencies = [
  "jni 0.21.1",
  "meow-app",
  "meow-common",
+ "meow-paopao",
  "meow-proxy",
  "parking_lot",
 ]

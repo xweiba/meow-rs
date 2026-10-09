@@ -15,6 +15,9 @@ meow-app = { path = "../meow-app", features = ["embed"] }
 meow-common = { workspace = true }
 # The site of a host (Public Suffix List), exported to the app below.
 meow-proxy = { workspace = true, default-features = false }
+# Config generation for the app (dart:ffi `paopao_build` / `paopao_parse` /
+# `paopao_free`), exported from this same library: the app already loads it.
+meow-paopao = { path = "../meow-paopao", features = ["ffi"] }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
 
