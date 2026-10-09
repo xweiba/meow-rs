@@ -280,6 +280,7 @@ async fn run_async(opts: &Options, host: Arc<dyn CoreHost>) -> anyhow::Result<()
         ))),
     };
 
+    tasks.spawn(Arc::clone(&app).ensure_rule_data());
     {
         let app = Arc::clone(&app);
         tasks.spawn(async move {

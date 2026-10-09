@@ -20,6 +20,9 @@ pub struct Runtime {
     pub secret: String,
     /// The core's DNS listener (127.0.0.1) the DNS front forwards to.
     pub dns: SocketAddr,
+    /// The core's SOCKS listener (127.0.0.1): the DNS front asks foreign
+    /// resolvers through it, so the core's rules pick a line.
+    pub socks: SocketAddr,
     /// The core's end of the socket pair.
     pub tun_fd: i32,
     /// The box's address, when it has one (subnet conditions in the
@@ -33,6 +36,7 @@ impl std::fmt::Debug for Runtime {
             .field("controller", &self.controller)
             .field("secret", &"<redacted>")
             .field("dns", &self.dns)
+            .field("socks", &self.socks)
             .field("tun_fd", &self.tun_fd)
             .field("addr", &self.addr)
             .finish()
@@ -82,6 +86,29 @@ pub struct CoreConfig {
     pub hosts: Option<Value>,
     /// Names of the lines (proxies) in it.
     pub lines: usize,
+    /// Where the rule data comes from: `geodata.url` (`mmdb`, `geosite`).
+    pub geodata_urls: GeodataUrls,
+}
+
+/// The rule data's download links (the app's, from the built config).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeodataUrls {
+    /// GeoIP (`Country.mmdb`).
+    pub mmdb: String,
+    /// GeoSite (`geosite.dat`).
+    pub geosite: String,
+}
+
+/// Used when a config names no links (the app's defaults).
+const DEFAULT_GEODATA: &str = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release";
+
+impl Default for GeodataUrls {
+    fn default() -> Self {
+        Self {
+            mmdb: format!("{DEFAULT_GEODATA}/country.mmdb"),
+            geosite: format!("{DEFAULT_GEODATA}/geosite.dat"),
+        }
+    }
 }
 
 /// The core's config for these settings and subscriptions.
@@ -95,8 +122,11 @@ pub fn core_config(
     let input = build_input(settings, subscriptions, rt, now_ms, utc_offset_min);
     let out = meow_paopao::build(&meow_paopao::BuildInput::from_json(&input));
     let mut c: Map<String, Value> = out.config;
-    // Nothing on the host's ports: devices come in through the TUN.
+    // Nothing on the host's ports: devices come in through the TUN. The
+    // SOCKS port is the DNS front's way through a line (127.0.0.1 only:
+    // `allow-lan: false` binds the loopback whatever `bind-address` says).
     c.shift_remove("mixed-port");
+    c.insert("socks-port".into(), rt.socks.port().into());
     c.insert("allow-lan".into(), false.into());
     c.insert("bind-address".into(), "127.0.0.1".into());
     c.insert(
@@ -127,8 +157,24 @@ pub fn core_config(
         .get("proxies")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
+    let url = |k: &str, file: &str| {
+        c.get("geodata")
+            .and_then(|g| g.get("url"))
+            .and_then(|u| u.get(k))
+            .and_then(Value::as_str)
+            .map_or_else(|| format!("{DEFAULT_GEODATA}/{file}"), str::to_owned)
+    };
+    let geodata_urls = GeodataUrls {
+        mmdb: url("mmdb", "country.mmdb"),
+        geosite: url("geosite", "geosite.dat"),
+    };
     let yaml = serde_yaml::to_string(&Value::Object(c)).context("config to YAML")?;
-    Ok(CoreConfig { yaml, hosts, lines })
+    Ok(CoreConfig {
+        yaml,
+        hosts,
+        lines,
+        geodata_urls,
+    })
 }
 
 #[cfg(test)]
@@ -140,6 +186,7 @@ mod tests {
             controller: "127.0.0.1:41000".parse().unwrap(),
             secret: "s3cret".into(),
             dns: "127.0.0.1:41001".parse().unwrap(),
+            socks: "127.0.0.1:41002".parse().unwrap(),
             tun_fd: 9,
             addr: Some(Ipv4Addr::new(192, 168, 1, 50)),
         }
@@ -167,6 +214,10 @@ mod tests {
         assert_eq!(y["external-controller"], "127.0.0.1:41000");
         assert_eq!(y["secret"], "s3cret");
         assert_eq!(y["dns"]["listen"], "127.0.0.1:41001");
+        assert_eq!(y["socks-port"], 41002);
+        assert_eq!(y["bind-address"], "127.0.0.1");
+        assert!(c.geodata_urls.mmdb.ends_with("/country.mmdb"));
+        assert!(c.geodata_urls.geosite.ends_with("/geosite.dat"));
         assert_eq!(y["dns"]["enhanced-mode"], "fake-ip", "the app's TUN DNS");
         assert_eq!(y["tun"]["file-descriptor"], 9);
         assert_eq!(y["tun"]["auto-route"], false);

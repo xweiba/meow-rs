@@ -42,6 +42,8 @@ mod dns;
 #[cfg(target_os = "linux")]
 mod frame;
 #[cfg(target_os = "linux")]
+mod geodata;
+#[cfg(target_os = "linux")]
 mod run;
 #[cfg(target_os = "linux")]
 mod stack;

@@ -32,3 +32,5 @@ dh_out.json
 website/node_modules
 website/.vitepress/cache
 website/.vitepress/dist
+# meow box static builds (crates/meow-box/build-static.sh)
+/dist/box/

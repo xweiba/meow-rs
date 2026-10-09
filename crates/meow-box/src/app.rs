@@ -13,7 +13,7 @@ use rand::Rng as _;
 use serde_json::{json, Map, Value};
 use tracing::{info, warn};
 
-use crate::config::{core_config, Runtime};
+use crate::config::{core_config, GeodataUrls, Runtime};
 use crate::ctl::Api;
 use crate::dns::{upstream_addr, Front, HostRule};
 use crate::store::{BoxFile, Store, ADMIN_USER};
@@ -97,6 +97,11 @@ pub struct App {
     pub net: RwLock<Option<Net>>,
     pub api: Api,
     core_dns: SocketAddr,
+    /// The core's SOCKS listener (127.0.0.1): the DNS front's way through
+    /// a line.
+    core_socks: SocketAddr,
+    /// Where the rule data comes from (the last applied config's links).
+    geodata_urls: RwLock<GeodataUrls>,
     secret: String,
     /// The core's end of the socket pair; each start gets a duplicate.
     core_end: OwnedFd,
@@ -155,6 +160,13 @@ impl App {
             secret.clone(),
         );
         let core_dns = SocketAddr::from((Ipv4Addr::LOCALHOST, free_port()?));
+        let core_socks = loop {
+            // Ports picked one after the other can repeat once released.
+            let a = SocketAddr::from((Ipv4Addr::LOCALHOST, free_port()?));
+            if a != core_dns && a != api.addr {
+                break a;
+            }
+        };
         Ok(Self {
             settings: RwLock::new(store.settings()),
             subs: RwLock::new(store.subscriptions()),
@@ -167,6 +179,8 @@ impl App {
             net: RwLock::new(None),
             api,
             core_dns,
+            core_socks,
+            geodata_urls: RwLock::new(GeodataUrls::default()),
             secret,
             core_end,
             core: tokio::sync::Mutex::new(None),
@@ -200,6 +214,7 @@ impl App {
             controller: self.api.addr,
             secret: self.secret.clone(),
             dns: self.core_dns,
+            socks: self.core_socks,
             tun_fd: fd,
             addr: r!(self.net).map(|n| n.addr.ip),
         }
@@ -225,6 +240,7 @@ impl App {
                     tokio::task::spawn_blocking(move || me.host.stop()).await?;
                     *core = None;
                     self.dns.set_core(None);
+                    self.dns.set_line(None);
                 }
             }
         }
@@ -253,6 +269,101 @@ impl App {
         self.dns
             .set_hosts(HostRule::from_config(cfg.hosts.as_ref()));
         *w!(self.lines) = cfg.lines;
+        *w!(self.geodata_urls) = cfg.geodata_urls.clone();
+        // Foreign names through a line once there is one (in 直连 mode
+        // nothing goes through a line).
+        let line = cfg.lines > 0 && self.mode() != "direct";
+        self.dns.set_line(line.then_some(self.core_socks));
+    }
+
+    /// Whether the rule data files (GeoIP, GeoSite) are in the core's home.
+    pub fn rule_data(&self) -> (bool, bool) {
+        self.store.core_home().map_or((false, false), |h| {
+            (
+                h.join(crate::geodata::MMDB).is_file(),
+                h.join(crate::geodata::GEOSITE).is_file(),
+            )
+        })
+    }
+
+    /// Gets the rule data into the core's home and the domestic list into
+    /// the DNS front: downloads what is missing (mirrors, retried with
+    /// backoff until it arrives), reloads the core after a download.
+    /// Returns once both files are here and the list is loaded.
+    pub async fn ensure_rule_data(self: Arc<Self>) {
+        use crate::geodata::{backoff, domestic_list, load_domestic, mirrors, mmdb_ok, save};
+        use crate::geodata::{GEOSITE, MMDB, RETRY_FIRST};
+        let mut wait = RETRY_FIRST;
+        loop {
+            let home = match self.store.core_home() {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!("rule data: no core home: {e:#}");
+                    tokio::time::sleep(wait).await;
+                    wait = backoff(wait);
+                    continue;
+                }
+            };
+            // The core may have fetched GeoSite itself (its startup fetch).
+            if !self.dns.has_domestic() {
+                if let Some(db) = load_domestic(&home.join(GEOSITE)).await {
+                    self.dns.set_domestic(Some(db));
+                    info!("DNS domestic list loaded");
+                }
+            }
+            let urls = r!(self.geodata_urls).clone();
+            let mut missing: Vec<(&str, String)> = Vec::new();
+            if !home.join(MMDB).is_file() {
+                missing.push((MMDB, urls.mmdb));
+            }
+            // Absent, or here but unusable: fetched (again).
+            if !self.dns.has_domestic() {
+                missing.push((GEOSITE, urls.geosite));
+            }
+            if missing.is_empty() {
+                info!("rule data ready");
+                return;
+            }
+            let mut got = false;
+            for (file, url) in missing {
+                for link in mirrors(&url) {
+                    let bytes = match self.host.fetch(&link).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!("rule data: {link}: {e:#}");
+                            continue;
+                        }
+                    };
+                    let usable = if file == MMDB {
+                        mmdb_ok(&bytes)
+                    } else {
+                        domestic_list(&bytes).is_some()
+                    };
+                    if !usable {
+                        warn!("rule data: {link}: not a usable {file}");
+                        continue;
+                    }
+                    match save(&home, file, &bytes) {
+                        Ok(()) => {
+                            info!("rule data: {file} downloaded ({} bytes)", bytes.len());
+                            got = true;
+                            break;
+                        }
+                        Err(e) => warn!("rule data: saving {file}: {e}"),
+                    }
+                }
+            }
+            if got {
+                // The rules read the files when the config is applied.
+                if let Err(e) = self.apply().await {
+                    warn!("rule data: core reload: {e:#}");
+                }
+                wait = RETRY_FIRST;
+                continue;
+            }
+            tokio::time::sleep(wait).await;
+            wait = backoff(wait);
+        }
     }
 
     /// Stops the core (on exit).
@@ -260,6 +371,7 @@ impl App {
         let mut core = self.core.lock().await;
         if core.take().is_some() {
             self.dns.set_core(None);
+            self.dns.set_line(None);
             let me = Arc::clone(self);
             let _ = tokio::task::spawn_blocking(move || me.host.stop()).await;
         }
@@ -439,6 +551,7 @@ impl App {
             }
             line = self.api.current_line().await.ok().flatten();
         }
+        let (geoip, geosite) = self.rule_data();
         let subs: Vec<Value> = r!(self.subs)
             .iter()
             .map(|s| {
@@ -469,6 +582,7 @@ impl App {
             "down": down.round(),
             "clients": clients,
             "dns": self.dns.status(),
+            "ruleData": { "geoip": geoip, "geosite": geosite, "ready": geoip && geosite && self.dns.has_domestic() },
             "subscriptions": subs,
             "uptime": self.started.elapsed().as_secs(),
             "refreshEvery": Duration::from_secs(crate::run::REFRESH_SECS).as_secs(),

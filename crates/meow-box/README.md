@@ -43,13 +43,26 @@ DHCP lease is released on Ctrl-C / SIGTERM.
 - **Config**: `meow_paopao::build` on `settings.json` (the app's
   ProxySettings JSON, `{}` = app defaults) and `subscriptions.json`, as a
   VPN-only device (TUN + fake-ip DNS). Then the box's runtime: TUN fd,
-  `dns.listen` on 127.0.0.1, controller on 127.0.0.1, no mixed port. Changes
+  `dns.listen`, controller and a SOCKS port (the DNS front's way through a line) on 127.0.0.1, no mixed port. Changes
   hot-reload over `PUT /configs` (the TUN section stays the same, so the
   listener is kept).
 - **DNS front**: a device that routes through the box (seen in the last
   30 min) gets the core's answers (fake-ip); any other device gets real
-  addresses (hosts entries, cache, upstreams `223.5.5.5` / `119.29.29.29`,
-  editable under 高级).
+  addresses (hosts entries, cache, upstreams), with a TTL of at most 10 s so
+  a device that has just switched its gateway soon asks again and gets
+  fake-ip. Real addresses are kept clean: names on the domestic list
+  (`geosite.dat`'s `cn`, the core's `GEOSITE,cn`) ask the domestic upstreams
+  (`223.5.5.5` / `119.29.29.29`, editable under 高级); every other name asks
+  `8.8.8.8` / `1.1.1.1` over TCP through a line (the core's SOCKS port on
+  127.0.0.1, so its rules pick the line). No line yet, 直连 mode, or the
+  line fails: the domestic upstreams (such an answer is not cached).
+- **Rule data**: the core fetches only what its config uses when it starts,
+  and the box starts it before there is a subscription (no `GEOIP` rule),
+  then hot-reloads. So the box gets `Country.mmdb` and `geosite.dat` into
+  the core's home itself: direct downloads over the config's link, the other
+  jsDelivr CDNs and the GitHub release, retried with backoff (5 s doubling
+  to 10 min) until both are here, then a reload. The page shows 分流规则
+  已就绪 / 正在下载…; `/api/status` has `ruleData`.
 - **Page**: one embedded HTML page + JSON API (axum), Basic auth `admin` /
   the random password in `box.json` (0600).
 
@@ -57,6 +70,27 @@ DHCP lease is released on Ctrl-C / SIGTERM.
 
 `/var/lib/paopao-box` as root (`--data` to change): `box.json`,
 `settings.json`, `subscriptions.json`, `core/` (the core's home).
+
+## Static build (one file for any Linux)
+
+```sh
+crates/meow-box/build-static.sh      # → dist/box/meow-{x86_64,aarch64}-unknown-linux-musl + SHA256SUMS
+```
+
+musl targets, fully static (BoringSSL, quiche and zig's libc++ included):
+the same file runs on glibc distributions, Alpine and OpenWrt. It uses
+`cargo zigbuild` with zig 0.13.0 as the C/C++ compiler and linker, as the
+release CI does (`.github/workflows/build.yml`). One-time setup:
+
+```sh
+rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+cargo install cargo-zigbuild --locked
+mise use -g zig@0.13.0
+```
+
+Pass one target to build only that. The script checks the result has no
+interpreter and no shared-library deps. To run the LAN test with such a
+build: `MEOW_BIN=dist/box/meow-x86_64-unknown-linux-musl crates/meow-box/lan-test.sh`.
 
 ## Known limits
 

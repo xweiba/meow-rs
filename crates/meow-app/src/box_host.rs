@@ -78,6 +78,7 @@ mod tests {
             controller: "127.0.0.1:41000".parse().unwrap(),
             secret: "x".into(),
             dns: "127.0.0.1:41001".parse().unwrap(),
+            socks: "127.0.0.1:41002".parse().unwrap(),
             tun_fd: 9,
             addr: Some("192.168.1.50".parse().unwrap()),
         };
@@ -95,6 +96,14 @@ mod tests {
             assert_eq!(
                 raw.dns.as_ref().and_then(|d| d.listen.as_deref()),
                 Some("127.0.0.1:41001")
+            );
+            // The DNS front's way through a line: SOCKS on the loopback.
+            let listeners = meow_config::resolve_named_listeners(&raw).unwrap();
+            assert!(
+                listeners
+                    .iter()
+                    .any(|l| l.port == 41002 && l.listen == "127.0.0.1"),
+                "socks listener on 127.0.0.1:41002"
             );
         }
     }

@@ -2,23 +2,48 @@
 //!
 //! Who asks decides the answer: a device that routes through the box gets
 //! the core's answers (fake-ip, so rules see the names); every other device
-//! (DNS pointed at the box, gateway not) gets real addresses — from the
-//! hosts entries, the cache, or the upstreams (domestic resolvers by
-//! default) — because a fake address would leave it with nowhere to go.
+//! (DNS pointed at the box, gateway not — or not yet) gets real addresses,
+//! because a fake address would leave it with nowhere to go.
+//!
+//! Real addresses must be clean: domestic resolvers return poisoned
+//! addresses for blocked foreign names (`www.google.com` → a Facebook IP).
+//! So a name on the domestic list (the core's `GEOSITE,cn`, from the core's
+//! `geosite.dat`) asks the domestic upstreams, and any other name is asked
+//! of [`FOREIGN_UPSTREAMS`] over TCP through one of the lines (the core's
+//! SOCKS port on 127.0.0.1, the core's rules pick the line). With no lines
+//! yet, or when that fails, the domestic upstreams answer (not cached).
+//!
+//! Real answers carry a short TTL ([`REAL_TTL`]): a device that has just
+//! made the box its gateway asks again soon, and is then known and gets
+//! the core's answers.
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use std::sync::{Mutex, RwLock};
 
+use meow_rules::geosite::GeositeDB;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 
-/// Default upstreams for real answers (the app's domestic resolvers).
+/// Default upstreams for real answers to domestic names (the app's
+/// domestic resolvers); editable on the page.
 pub const DEFAULT_UPSTREAMS: [&str; 2] = ["223.5.5.5", "119.29.29.29"];
+/// Resolvers asked through a line for every name off the domestic list
+/// (DNS over TCP; raced, the first answer wins).
+pub const FOREIGN_UPSTREAMS: [SocketAddrV4; 2] = [
+    SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 53),
+    SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 53),
+];
+/// The geosite category of domestic names (the core's `GEOSITE,cn`).
+pub const DOMESTIC_CATEGORY: &str = "cn";
+/// Largest TTL (seconds) of a real answer to a device: one that has just
+/// set its gateway to the box asks again soon and then gets fake-ip.
+pub const REAL_TTL: u32 = 10;
 /// Largest UDP answer sent to a device (no IP fragmentation).
 pub const MAX_UDP_ANSWER: usize = 1472;
 
@@ -27,6 +52,10 @@ const CACHE_MAX_TTL: u32 = 600;
 const NEGATIVE_TTL: u32 = 60;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(2);
 const CORE_TIMEOUT: Duration = Duration::from_secs(5);
+/// A query through a line: the SOCKS handshake, the line's dial and the
+/// answer (devices give up after about 5 s; the domestic fallback needs
+/// the rest).
+const LINE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// A query's question.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -140,7 +169,40 @@ pub fn truncate(answer: Vec<u8>, max: usize) -> Vec<u8> {
     m
 }
 
-/// An A answer for `query` with `ip` (hosts entries), TTL 60.
+/// `answer` with every record's TTL at most `max` (the EDNS OPT record,
+/// whose TTL field holds flags, untouched); as it was when malformed.
+pub fn cap_ttl(mut answer: Vec<u8>, max: u32) -> Vec<u8> {
+    let mut at_ttls: Vec<usize> = Vec::new();
+    let ok = (|| {
+        if answer.len() < 12 {
+            return None;
+        }
+        let count = |i: usize| usize::from(u16::from_be_bytes([answer[i], answer[i + 1]]));
+        let (qd, records) = (count(4), count(6) + count(8) + count(10));
+        let mut at = 12;
+        for _ in 0..qd {
+            at = skip_name(&answer, at)? + 4;
+        }
+        for _ in 0..records {
+            at = skip_name(&answer, at)?;
+            let h = answer.get(at..at + 10)?;
+            if u16::from_be_bytes([h[0], h[1]]) != 41 {
+                at_ttls.push(at + 4);
+            }
+            at += 10 + usize::from(u16::from_be_bytes([h[8], h[9]]));
+        }
+        (at <= answer.len()).then_some(())
+    })();
+    if ok.is_some() {
+        for i in at_ttls {
+            let t = u32::from_be_bytes([answer[i], answer[i + 1], answer[i + 2], answer[i + 3]]);
+            answer[i..i + 4].copy_from_slice(&t.min(max).to_be_bytes());
+        }
+    }
+    answer
+}
+
+/// An A answer for `query` with `ip` (hosts entries), TTL [`REAL_TTL`].
 pub fn answer_a(query: &[u8], q: &Question, ip: Ipv4Addr) -> Vec<u8> {
     let mut m = query[..q.end].to_vec();
     m[2] = 0x80 | (query[2] & 0x01); // QR, keep RD
@@ -151,7 +213,7 @@ pub fn answer_a(query: &[u8], q: &Question, ip: Ipv4Addr) -> Vec<u8> {
     m[8..12].fill(0);
     if answers == 1 {
         m.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1]);
-        m.extend_from_slice(&60u32.to_be_bytes());
+        m.extend_from_slice(&REAL_TTL.to_be_bytes());
         m.extend_from_slice(&4u16.to_be_bytes());
         m.extend_from_slice(&ip.octets());
     }
@@ -230,8 +292,11 @@ pub struct Stats {
     pub cache_hits: AtomicU64,
     /// Answered by the core (devices routing through the box).
     pub via_core: AtomicU64,
-    /// Answered by an upstream (real addresses).
+    /// Answered by a domestic upstream (real addresses).
     pub via_upstream: AtomicU64,
+    /// Answered through a line (real addresses of names off the domestic
+    /// list).
+    pub via_line: AtomicU64,
     pub hosts: AtomicU64,
     pub failed: AtomicU64,
 }
@@ -245,6 +310,12 @@ pub struct Front {
     /// The core's DNS listener (127.0.0.1); None while the core is down.
     core: RwLock<Option<SocketAddr>>,
     hosts: RwLock<Vec<HostRule>>,
+    /// The core's SOCKS listener (127.0.0.1) while it has lines; None:
+    /// domestic upstreams only.
+    line: RwLock<Option<SocketAddr>>,
+    /// The domestic list (`geosite.dat`'s `cn` only); None until the file
+    /// is here.
+    domestic: RwLock<Option<Arc<GeositeDB>>>,
     cache: Mutex<HashMap<CacheKey, (Vec<u8>, Instant)>>,
     pub stats: Stats,
 }
@@ -266,6 +337,8 @@ impl Front {
             upstreams: RwLock::new(Vec::new()),
             core: RwLock::new(None),
             hosts: RwLock::new(Vec::new()),
+            line: RwLock::new(None),
+            domestic: RwLock::new(None),
             cache: Mutex::new(HashMap::new()),
             stats: Stats::default(),
         };
@@ -321,6 +394,54 @@ impl Front {
             .clear();
     }
 
+    /// Where names off the domestic list are asked through a line (the
+    /// core's SOCKS listener), None while there is no line. Clears the
+    /// cache when it changes.
+    pub fn set_line(&self, socks: Option<SocketAddr>) {
+        let mut l = self
+            .line
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *l != socks {
+            *l = socks;
+            self.clear_cache();
+        }
+    }
+
+    /// The domestic list (a geosite DB holding [`DOMESTIC_CATEGORY`]).
+    /// Clears the cache.
+    pub fn set_domestic(&self, db: Option<Arc<GeositeDB>>) {
+        *self
+            .domestic
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = db;
+        self.clear_cache();
+    }
+
+    /// Whether the domestic list is loaded.
+    pub fn has_domestic(&self) -> bool {
+        self.domestic
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// `name` is on the domestic list.
+    fn is_domestic(&self, name: &str) -> bool {
+        self.domestic
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|db| db.lookup(DOMESTIC_CATEGORY, name))
+    }
+
+    fn clear_cache(&self) {
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
     /// The status page's view.
     pub fn status(&self) -> Value {
         let n = |a: &AtomicU64| a.load(Ordering::Relaxed);
@@ -330,9 +451,12 @@ impl Front {
             "cacheHits": n(&s.cache_hits),
             "viaCore": n(&s.via_core),
             "viaUpstream": n(&s.via_upstream),
+            "viaLine": n(&s.via_line),
             "hosts": n(&s.hosts),
             "failed": n(&s.failed),
             "upstreams": self.upstreams().iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "throughLine": self.line.read().unwrap_or_else(std::sync::PoisonError::into_inner).is_some(),
+            "domesticList": self.has_domestic(),
         })
     }
 
@@ -357,14 +481,34 @@ impl Front {
                 }
             }
         }
+        Some(cap_ttl(self.real(query, &q).await, REAL_TTL))
+    }
+
+    /// A real answer: hosts, cache, then a line (names off the domestic
+    /// list) or the domestic upstreams. SERVFAIL when nothing answered.
+    async fn real(&self, query: &[u8], q: &Question) -> Vec<u8> {
         if let Some(ip) = self.host(&q.name) {
             self.stats.hosts.fetch_add(1, Ordering::Relaxed);
-            return Some(answer_a(query, &q, ip));
+            return answer_a(query, q, ip);
         }
         let key = (q.name.clone(), q.qtype, q.qclass);
         if let Some(hit) = self.cached(&key) {
             self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-            return Some(with_id(hit, query));
+            return with_id(hit, query);
+        }
+        let line = *self
+            .line
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let line = line.filter(|_| !self.is_domestic(&q.name));
+        if let Some(socks) = line {
+            if let Some(a) = line_query(socks, query).await {
+                self.stats.via_line.fetch_add(1, Ordering::Relaxed);
+                if let Some(ttl) = cache_ttl(&a) {
+                    self.store(key, a.clone(), ttl);
+                }
+                return a;
+            }
         }
         for up in self.upstreams() {
             let Ok(mut a) = udp_query(up, query, UPSTREAM_TIMEOUT).await else {
@@ -376,13 +520,17 @@ impl Front {
                 }
             }
             self.stats.via_upstream.fetch_add(1, Ordering::Relaxed);
-            if let Some(ttl) = cache_ttl(&a) {
-                self.store(key, a.clone(), ttl);
+            // A foreign name the line could not answer: possibly poisoned,
+            // so not kept (the next query tries the line again).
+            if line.is_none() {
+                if let Some(ttl) = cache_ttl(&a) {
+                    self.store(key, a.clone(), ttl);
+                }
             }
-            return Some(a);
+            return a;
         }
         self.stats.failed.fetch_add(1, Ordering::Relaxed);
-        Some(servfail(query, &q))
+        servfail(query, q)
     }
 
     fn host(&self, name: &str) -> Option<Ipv4Addr> {
@@ -453,18 +601,92 @@ async fn udp_query(to: SocketAddr, query: &[u8], wait: Duration) -> std::io::Res
 async fn tcp_query(to: SocketAddr, query: &[u8], wait: Duration) -> std::io::Result<Vec<u8>> {
     tokio::time::timeout(wait, async {
         let mut s = TcpStream::connect(to).await?;
-        let len = u16::try_from(query.len()).unwrap_or(u16::MAX);
-        let mut out = len.to_be_bytes().to_vec();
-        out.extend_from_slice(query);
-        s.write_all(&out).await?;
-        let mut l = [0u8; 2];
-        s.read_exact(&mut l).await?;
-        let mut a = vec![0u8; usize::from(u16::from_be_bytes(l))];
-        s.read_exact(&mut a).await?;
-        Ok(a)
+        tcp_exchange(&mut s, query).await
     })
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "dns timeout"))?
+}
+
+/// One length-prefixed query and its answer on `s`.
+async fn tcp_exchange(s: &mut TcpStream, query: &[u8]) -> std::io::Result<Vec<u8>> {
+    let len = u16::try_from(query.len()).unwrap_or(u16::MAX);
+    let mut out = len.to_be_bytes().to_vec();
+    out.extend_from_slice(query);
+    s.write_all(&out).await?;
+    let mut l = [0u8; 2];
+    s.read_exact(&mut l).await?;
+    let mut a = vec![0u8; usize::from(u16::from_be_bytes(l))];
+    s.read_exact(&mut a).await?;
+    if a.len() < 12 || a[..2] != query[..2] {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "not the answer to the query",
+        ));
+    }
+    Ok(a)
+}
+
+/// `query` asked of [`FOREIGN_UPSTREAMS`] through the SOCKS listener
+/// `socks` (all at once, the first answer wins); None when none answered
+/// within [`LINE_TIMEOUT`].
+async fn line_query(socks: SocketAddr, query: &[u8]) -> Option<Vec<u8>> {
+    let mut asks = tokio::task::JoinSet::new();
+    for up in FOREIGN_UPSTREAMS {
+        let query = query.to_vec();
+        asks.spawn(async move { socks_query(socks, up, &query).await });
+    }
+    tokio::time::timeout(LINE_TIMEOUT, async {
+        while let Some(r) = asks.join_next().await {
+            if let Ok(Ok(a)) = r {
+                return Some(a);
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten()
+    // Dropping the set aborts the slower asks.
+}
+
+/// One query over TCP to `to` through the SOCKS5 server `socks` (no
+/// authentication: the core's listener on 127.0.0.1).
+async fn socks_query(
+    socks: SocketAddr,
+    to: SocketAddrV4,
+    query: &[u8],
+) -> std::io::Result<Vec<u8>> {
+    let bad = |what: &str| std::io::Error::other(format!("socks: {what}"));
+    let mut s = TcpStream::connect(socks).await?;
+    s.write_all(&[5, 1, 0]).await?;
+    let mut hello = [0u8; 2];
+    s.read_exact(&mut hello).await?;
+    if hello != [5, 0] {
+        return Err(bad("refused the no-auth method"));
+    }
+    let mut connect = vec![5, 1, 0, 1];
+    connect.extend_from_slice(&to.ip().octets());
+    connect.extend_from_slice(&to.port().to_be_bytes());
+    s.write_all(&connect).await?;
+    let mut head = [0u8; 4];
+    s.read_exact(&mut head).await?;
+    if head[1] != 0 {
+        return Err(bad("connect failed"));
+    }
+    // The bound address that follows: IPv4, IPv6 or a name, then a port.
+    let rest = match head[3] {
+        1 => 4 + 2,
+        4 => 16 + 2,
+        3 => {
+            let mut n = [0u8; 1];
+            s.read_exact(&mut n).await?;
+            usize::from(n[0]) + 2
+        }
+        _ => return Err(bad("unknown address type")),
+    };
+    let mut skip = vec![0u8; rest];
+    s.read_exact(&mut skip).await?;
+    tcp_exchange(&mut s, query).await
 }
 
 #[cfg(test)]
@@ -573,7 +795,7 @@ pub(crate) mod tests {
         assert_eq!(a[2] & 0x80, 0x80);
         assert_eq!(u16::from_be_bytes([a[6], a[7]]), 1);
         assert_eq!(&a[a.len() - 4..], &[192, 168, 1, 10]);
-        assert_eq!(cache_ttl(&a), Some(60));
+        assert_eq!(cache_ttl(&a), Some(REAL_TTL));
         // AAAA for a hosts name: no data rather than a real lookup.
         let q6 = query("nas.home", 28);
         let a6 = answer_a(&q6, &question(&q6).unwrap(), Ipv4Addr::new(192, 168, 1, 10));
@@ -647,6 +869,170 @@ pub(crate) mod tests {
             assert!(f.answer(&[1, 2, 3], false).await.is_none());
             assert!(f.answer(&real, false).await.is_none());
             assert_eq!(f.status()["queries"], 4);
+        });
+    }
+
+    /// The TTL fields of every record of `m` (OPT included).
+    fn ttls(m: &[u8]) -> Vec<u32> {
+        let count = |i: usize| usize::from(u16::from_be_bytes([m[i], m[i + 1]]));
+        let mut at = skip_name(m, 12).unwrap() + 4;
+        let mut out = Vec::new();
+        for _ in 0..count(6) + count(8) + count(10) {
+            at = skip_name(m, at).unwrap();
+            out.push(u32::from_be_bytes([
+                m[at + 4],
+                m[at + 5],
+                m[at + 6],
+                m[at + 7],
+            ]));
+            at += 10 + usize::from(u16::from_be_bytes([m[at + 8], m[at + 9]]));
+        }
+        out
+    }
+
+    #[test]
+    fn real_answers_get_a_short_ttl_and_opt_is_kept() {
+        let q = query("a.cn", 1);
+        let mut a = answer(&q, &[300, 5]);
+        // An EDNS OPT record (root name, type 41, "TTL" = flags).
+        a[11] = 1;
+        a.extend_from_slice(&[0, 0, 41, 0x10, 0, 0x00, 0x00, 0x80, 0x00, 0, 0]);
+        let capped = cap_ttl(a.clone(), REAL_TTL);
+        assert_eq!(ttls(&capped), vec![REAL_TTL, 5, 0x8000]);
+        assert_eq!(capped.len(), a.len());
+        // Malformed: left as it is.
+        let mut cut = a;
+        cut.truncate(cut.len() - 3);
+        assert_eq!(cap_ttl(cut.clone(), 1), cut);
+    }
+
+    /// A SOCKS5 stand-in for the core: answers DNS over TCP itself with
+    /// 9.9.9.9 (TTL 300) whatever the target, and counts the targets.
+    async fn fake_line() -> (SocketAddr, Arc<Mutex<Vec<SocketAddrV4>>>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = l.accept().await.unwrap();
+                let log = Arc::clone(&log);
+                tokio::spawn(async move {
+                    let mut b = [0u8; 3];
+                    s.read_exact(&mut b).await.unwrap();
+                    s.write_all(&[5, 0]).await.unwrap();
+                    let mut c = [0u8; 10];
+                    s.read_exact(&mut c).await.unwrap();
+                    let to = SocketAddrV4::new(
+                        Ipv4Addr::new(c[4], c[5], c[6], c[7]),
+                        u16::from_be_bytes([c[8], c[9]]),
+                    );
+                    log.lock().unwrap().push(to);
+                    s.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 1])
+                        .await
+                        .unwrap();
+                    let mut l = [0u8; 2];
+                    s.read_exact(&mut l).await.unwrap();
+                    let mut q = vec![0u8; usize::from(u16::from_be_bytes(l))];
+                    s.read_exact(&mut q).await.unwrap();
+                    let mut a = answer(&q, &[300]);
+                    let at = a.len() - 4;
+                    a[at..].copy_from_slice(&[9, 9, 9, 9]);
+                    let mut out = u16::try_from(a.len()).unwrap().to_be_bytes().to_vec();
+                    out.extend_from_slice(&a);
+                    s.write_all(&out).await.unwrap();
+                });
+            }
+        });
+        (addr, seen)
+    }
+
+    /// A domestic upstream stand-in answering 1.2.3.4.
+    async fn fake_upstream() -> SocketAddr {
+        let up = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = up.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut b = [0u8; 512];
+            loop {
+                let (n, from) = up.recv_from(&mut b).await.unwrap();
+                let _ = up.send_to(&answer(&b[..n], &[300]), from).await;
+            }
+        });
+        addr
+    }
+
+    fn tail(a: &[u8]) -> [u8; 4] {
+        a[a.len() - 4..].try_into().unwrap()
+    }
+
+    #[test]
+    fn foreign_names_go_through_a_line_domestic_ones_do_not() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let up = fake_upstream().await;
+            let (line, seen) = fake_line().await;
+            let f = Front::new(&[up.to_string()]);
+            let mut db = GeositeDB::empty();
+            db.insert(DOMESTIC_CATEGORY, "+.baidu.com");
+            f.set_domestic(Some(Arc::new(db)));
+            // No line yet: everything from the domestic upstreams.
+            let g = f.answer(&query("www.google.com", 1), false).await.unwrap();
+            assert_eq!(tail(&g), [1, 2, 3, 4]);
+            assert_eq!(ttls(&g), vec![REAL_TTL], "short TTL to the device");
+            f.set_line(Some(line));
+            let g = f.answer(&query("www.google.com", 1), false).await.unwrap();
+            assert_eq!(
+                tail(&g),
+                [9, 9, 9, 9],
+                "through the line, not cached domestic"
+            );
+            assert_eq!(ttls(&g), vec![REAL_TTL]);
+            let b = f.answer(&query("www.baidu.com", 1), false).await.unwrap();
+            assert_eq!(tail(&b), [1, 2, 3, 4], "domestic name");
+            let mut targets = seen.lock().unwrap().clone();
+            targets.sort();
+            let mut want = FOREIGN_UPSTREAMS.to_vec();
+            want.sort();
+            assert!(targets.iter().all(|t| want.contains(t)) && !targets.is_empty());
+            assert_eq!(f.stats.via_line.load(Ordering::Relaxed), 1);
+            // Cached with the line's TTL, still short to the device.
+            let again = f.answer(&query("www.google.com", 1), false).await.unwrap();
+            assert_eq!((tail(&again), ttls(&again)), ([9, 9, 9, 9], vec![REAL_TTL]));
+            assert_eq!(f.stats.cache_hits.load(Ordering::Relaxed), 1);
+            assert_eq!(f.status()["viaLine"], 1);
+            assert_eq!(f.status()["domesticList"], true);
+        });
+    }
+
+    #[test]
+    fn a_dead_line_falls_back_without_caching() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let up = fake_upstream().await;
+            // A port nobody listens on: the connection is refused.
+            let dead = {
+                let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                l.local_addr().unwrap()
+            };
+            let f = Front::new(&[up.to_string()]);
+            f.set_line(Some(dead));
+            let a = f.answer(&query("www.google.com", 1), false).await.unwrap();
+            assert_eq!(tail(&a), [1, 2, 3, 4]);
+            let b = f.answer(&query("www.google.com", 1), false).await.unwrap();
+            assert_eq!(tail(&b), [1, 2, 3, 4]);
+            assert_eq!(f.stats.cache_hits.load(Ordering::Relaxed), 0, "not kept");
+            assert_eq!(f.stats.via_upstream.load(Ordering::Relaxed), 2);
+            // Without the line, the same answer is kept.
+            f.set_line(None);
+            f.answer(&query("www.google.com", 1), false).await.unwrap();
+            f.answer(&query("www.google.com", 1), false).await.unwrap();
+            assert_eq!(f.stats.cache_hits.load(Ordering::Relaxed), 1);
         });
     }
 

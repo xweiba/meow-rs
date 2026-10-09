@@ -242,7 +242,9 @@ impl RawSocket {
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
         msg.msg_control = cmsg.as_mut_ptr().cast();
-        msg.msg_controllen = size_of::<[u64; 16]>();
+        // `msg_controllen` is size_t on glibc but socklen_t (u32) on musl;
+        // 128 fits either.
+        msg.msg_controllen = size_of::<[u64; 16]>() as _;
         // SAFETY: every pointer in `msg` is live for the call.
         let n = unsafe { libc::recvmsg(self.fd.as_raw_fd(), &mut msg, libc::MSG_TRUNC) };
         if n < 0 {

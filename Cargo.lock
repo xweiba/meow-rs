@@ -2909,6 +2909,7 @@ dependencies = [
  "clap",
  "libc",
  "meow-paopao",
+ "meow-rules",
  "rand 0.9.4",
  "serde",
  "serde_json",

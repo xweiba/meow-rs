@@ -41,6 +41,7 @@
   <div class="row"><span>当前线路</span><span id="line">…</span></div>
   <div class="row"><span>速度</span><span id="speed">…</span></div>
   <div class="row"><span>正在使用的设备</span><span id="clients">…</span></div>
+  <div class="row"><span>分流规则</span><span id="rules">…</span></div>
   <div class="row"><span>地址</span><span id="addr">…</span></div>
 </div>
 
@@ -72,9 +73,9 @@
     <div style="margin-top:8px">
       <div class="row"><span>DNS 查询</span><span id="dnsq">…</span></div>
       <div class="row"><span>缓存命中</span><span id="dnsc">…</span></div>
-      <div class="row"><span>走代理规则 / 直接解析 / 失败</span><span id="dnsr">…</span></div>
+      <div class="row"><span>走代理规则 / 经线路解析 / 国内解析 / 失败</span><span id="dnsr">…</span></div>
       <div class="row"><span>网卡</span><span id="nic">…</span></div>
-      <div class="muted" style="margin-top:8px">DNS 上游（只设 DNS 的设备用它们，逗号分隔）</div>
+      <div class="muted" style="margin-top:8px">国内 DNS 上游（只设 DNS 的设备解析国内网站用它们，逗号分隔）</div>
       <div class="line"><input id="ups"><button id="setups">保存</button></div>
     </div>
   </details>
@@ -106,6 +107,7 @@ async function load() {
   $('line').textContent = s.core ? (s.lines ? (s.line || '…') : '还没有节点，先添加订阅') : '内核未运行';
   $('speed').textContent = '↑ ' + rate(s.up) + '　↓ ' + rate(s.down);
   $('clients').textContent = s.clients + ' 台';
+  $('rules').textContent = s.ruleData && s.ruleData.ready ? '已就绪' : '正在下载…';
   $('addr').textContent = s.ip ? (s.ip + '/' + s.prefix + (s.addrSource === 'dhcp' ? '（自动获取）' : '（固定）')) : '…';
   $('nic').textContent = s.iface + (s.wifi ? '（Wi-Fi）' : '') + ' ' + s.mac;
   document.querySelectorAll('[data-mode]').forEach((b) => b.classList.toggle('on', b.dataset.mode === s.mode));
@@ -113,7 +115,7 @@ async function load() {
   const d = s.dns;
   $('dnsq').textContent = d.queries;
   $('dnsc').textContent = d.cacheHits;
-  $('dnsr').textContent = d.viaCore + ' / ' + (d.viaUpstream + d.hosts) + ' / ' + d.failed;
+  $('dnsr').textContent = d.viaCore + ' / ' + d.viaLine + ' / ' + (d.viaUpstream + d.hosts) + ' / ' + d.failed;
   if (!upsDirty) $('ups').value = d.upstreams.map((u) => u.replace(/:53$/, '')).join(', ');
   const subs = s.subscriptions;
   $('subs').innerHTML = subs.length ? subs.map((x) =>
