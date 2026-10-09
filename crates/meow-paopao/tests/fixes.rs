@@ -283,3 +283,34 @@ fn b20_download_is_not_ads() {
         .contains(&"DOMAIN-SUFFIX,ad.example,policy:ads".to_owned()));
     assert!(out.tree.by_tag("sub:Downloads").is_some());
 }
+
+/// B22: Google refuses HK. Lines: two in HK, one in US, one in JP with the
+/// JP one switched off: Google's own 自动选择 needs two lines on, so there
+/// is none; Dart still named it, and the pick fell to DIRECT. Now: the US
+/// region (the first allowed line on); with US off too, 节点选择.
+#[test]
+fn b22_no_auto_child_never_direct() {
+    let nodes = json!([
+        vless("HK 01", "a"),
+        vless("HK 02", "b"),
+        vless("US 01", "c"),
+        vless("JP 01", "d")
+    ]);
+    let pick = |off: &[&str]| {
+        let v = input(&nodes, &json!({}), &json!({"disabled_lines": off}));
+        let out = run(&v);
+        let g = out.tree.by_tag("policy:google").expect("google").clone();
+        assert!(!g.members.contains(&"policy:google~auto".to_owned()));
+        g.pick.expect("pick")
+    };
+    assert_eq!(pick(&["JP 01"]), "region:US");
+    assert_eq!(pick(&["JP 01", "US 01"]), "proxy");
+    // Two lines on: its own 自动选择, as before.
+    let v = input(&nodes, &json!({}), &json!({}));
+    let g = run(&v)
+        .tree
+        .by_tag("policy:google")
+        .cloned()
+        .expect("google");
+    assert_eq!(g.pick.as_deref(), Some("policy:google~auto"));
+}

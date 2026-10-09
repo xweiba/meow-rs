@@ -719,14 +719,23 @@ impl Layers {
                 })
                 .or_else(|| preferred.clone())
                 .unwrap_or_else(|| {
-                    // Dart offers its own 自动选择 when it serves only some
-                    // regions, even when too few lines made none (then the
-                    // pick falls to the first member, DIRECT).
-                    if allowed.len() != c.region_tags.len() && allowed.len() >= 2 {
-                        format!("{tag}{}", group_child::AUTO)
-                    } else {
-                        p.fallback.to_owned()
+                    if allowed.len() == c.region_tags.len() {
+                        return p.fallback.to_owned();
                     }
+                    // Serving only some regions: its own 自动选择 over them;
+                    // without one (fewer than two lines on), the region of
+                    // the first line on there; else 节点选择. Dart named the
+                    // missing 自动选择, so the pick fell to the first member,
+                    // DIRECT: Google / AI went direct unseen (B22).
+                    let auto = format!("{tag}{}", group_child::AUTO);
+                    if members.contains(&auto) {
+                        return auto;
+                    }
+                    allowed
+                        .iter()
+                        .find(|r| !self.enabled(&lines_of(std::slice::from_ref(r))).is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| outbound_tags::PROXY.to_owned())
                 })
         } else {
             p.fallback.to_owned()
