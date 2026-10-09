@@ -127,3 +127,50 @@ fn config_group_names(out: &BuildOutput) -> Vec<&str> {
         .filter(|n| *n != "speedtest")
         .collect()
 }
+
+/// B3: the split follows the settings it is given (the ones in force), not
+/// the input's saved ones: Dart's 分组默认 preview built the split from the
+/// raw settings, so with built-in groups off in the preview a provider's
+/// "🎥 Netflix" still merged into 🎥 NETFLIX.
+#[test]
+fn b3_split_reads_the_settings_in_force() {
+    let v = input(
+        &json!([vless("US 01", "a"), vless("JP 01", "b")]),
+        &json!({
+            "groups": [
+                {"n": "🚀 节点选择", "t": "select", "m": ["US 01", "JP 01"]},
+                {"n": "🎥 Netflix", "t": "select", "m": ["US 01"]},
+            ],
+            "rules": ["DOMAIN-SUFFIX,nflx.example,🎥 Netflix", "MATCH,🚀 节点选择"],
+        }),
+        &json!({}),
+    );
+    let input = BuildInput::from_json(&v);
+    let pool = meow_paopao::build_pool(&input.pool_input());
+    let mut s = input.effective();
+    let on = meow_paopao::imported_split(&input, &pool, &s);
+    assert_eq!(on.rules, ["DOMAIN-SUFFIX,nflx.example,policy:netflix"]);
+    s.built_in_groups = false;
+    let off = meow_paopao::imported_split(&input, &pool, &s);
+    assert_eq!(off.rules, ["DOMAIN-SUFFIX,nflx.example,sub:🎥 Netflix"]);
+}
+
+/// B30: the route API's SSH policies come from the settings in force, like
+/// the config's chains: every `ssh-…` policy targets a chain the config has.
+#[test]
+fn b30_route_policies_follow_the_config() {
+    let v = input(
+        &json!([vless("US 01", "a")]),
+        &json!({}),
+        &json!({"ssh": [{"id": "c1", "name": "jump", "hops": [{"host": "h", "user": "u"}]}]}),
+    );
+    let out = run(&v);
+    let ssh: Vec<&str> = out
+        .route_policies
+        .iter()
+        .filter(|p| p.kind == "ssh")
+        .map(|p| p.target.as_str())
+        .collect();
+    assert_eq!(ssh, ["ssh:c1"]);
+    assert!(proxy_names(&out).iter().any(|n| n.starts_with("ssh:c1")));
+}

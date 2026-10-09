@@ -6,10 +6,9 @@
 //! [`tree_for`] is the one group tree: the screen shows it and the config
 //! runs it (B2).
 //!
-//! Known Dart behaviours kept for parity (see the task's decisions):
+//! The split, the tree and the route policies all read the settings in
+//! force, passed in once (B3, B30).
 //!
-//! - B3: [`imported_split`] reads the raw settings (`group_mode`,
-//!   `built_in_groups`), not the effective ones the tree is built from.
 //! - B5 / B6 live in the controller (rough rule matching, label cache) and
 //!   are not ported here.
 
@@ -100,10 +99,10 @@ pub fn our_group_for(name: &str, settings: &ProxySettings, groups: &[NodeGroup])
 /// onto the pooled lines (Dart `ProxyController.importedSplit`). Only
 /// subscriptions with `use_split` and a non-empty split take part.
 ///
-/// B3 (kept for parity): reads the raw `input.settings` (`group_mode` for
-/// following the subscription exactly, `built_in_groups` for aliases),
-/// not the effective settings the tree is built from.
-pub fn imported_split(input: &BuildInput, pool: &Pool) -> ImportedSplit {
+/// `settings` are the ones in force (`group_mode` for following the
+/// subscription exactly, `built_in_groups` for aliases), the same the tree
+/// is built from; Dart read the raw saved ones here (B3).
+pub fn imported_split(input: &BuildInput, pool: &Pool, settings: &ProxySettings) -> ImportedSplit {
     let tag_of: IndexMap<String, &String> = pool
         .nodes
         .iter()
@@ -137,7 +136,6 @@ pub fn imported_split(input: &BuildInput, pool: &Pool) -> ImportedSplit {
             line_of: l,
         })
         .collect();
-    let settings = &input.settings;
     let built_in_of = |name: &str| our_group_for(name, settings, &pool.groups);
     merge_subscription_splits(
         &splits,
@@ -154,7 +152,8 @@ pub fn imported_split(input: &BuildInput, pool: &Pool) -> ImportedSplit {
 /// The group tree of a build ([`tree_for`] with the effective settings
 /// and the subscriptions' split).
 pub fn build_tree(input: &BuildInput, pool: &Pool) -> GroupTree {
-    tree_for(&input.effective(), pool, &imported_split(input, pool))
+    let s = input.effective();
+    tree_for(&s, pool, &imported_split(input, pool, &s))
 }
 
 /// The one group tree (B2): what the screen shows and the config runs,

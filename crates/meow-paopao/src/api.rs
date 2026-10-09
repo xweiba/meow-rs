@@ -92,19 +92,16 @@ impl std::fmt::Debug for BuildOutput {
 /// controller derives): the pool from the subscriptions, the effective
 /// settings, the subscriptions' split, then the config.
 ///
-/// Dart parity: the route policies are listed from the raw settings' SSH
-/// chains (`_settings`), the config from the effective settings.
+/// Everything reads the effective settings: the split, the tree, the
+/// config and the route policies' SSH chains (Dart listed those from the
+/// raw settings, B30).
 pub fn build(input: &BuildInput) -> BuildOutput {
     let pool = build_pool(&input.pool_input());
     let settings = input.effective();
-    let split = imported_split(input, &pool);
+    let split = imported_split(input, &pool, &settings);
     // One tree: the screen's and the config's (B2).
     let tree = tree_for(&settings, &pool, &split);
-    let route_policies = route_catalog(
-        &pool.groups,
-        !pool.nodes.is_empty(),
-        &input.settings.ssh_chains,
-    );
+    let route_policies = route_catalog(&pool.groups, !pool.nodes.is_empty(), &settings.ssh_chains);
     let modules: Vec<ScriptModule> = input
         .modules
         .iter()
