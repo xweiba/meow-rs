@@ -1,5 +1,6 @@
 //! Expected values printed by the Dart VM (Dart 3.13, paopao_proxy) for
-//! names and servers the golden corpus does not cover.
+//! names and servers the golden corpus does not cover; rows marked with a
+//! fix (B17 …) differ from Dart on purpose.
 
 use super::*;
 use crate::dart::{internet_address_try_parse, to_lower_case, IpKind};
@@ -8,7 +9,8 @@ use serde_json::json;
 const REGION_OF: &[(&str, Option<&str>)] = &[
     ("", None),
     ("HK", Some("HK")),
-    ("hk 01", Some("HK")),
+    // B17: Dart had Some("HK").
+    ("hk 01", None),
     ("HK01", Some("HK")),
     ("01HK", Some("HK")),
     ("HKG 01", None),
@@ -18,27 +20,35 @@ const REGION_OF: &[(&str, Option<&str>)] = &[
     ("🇭🇰 Hong Kong 01", Some("HK")),
     ("HK🇭🇰", Some("HK")),
     ("🇺🇸US", Some("US")),
-    ("Hongkong", None),
-    ("HONG KONG", None),
+    // B17: Dart had None.
+    ("Hongkong", Some("HK")),
+    // B17: Dart had None.
+    ("HONG KONG", Some("HK")),
     ("hong  kong", None),
-    ("hong kong", None),
+    // B17: Dart had None.
+    ("hong kong", Some("HK")),
     ("USA-01", Some("US")),
     ("US01", Some("US")),
     ("aUS", None),
     ("Plus", None),
-    ("RUSSIA", None),
-    ("Ru\u{17f}sia", Some("RU")),
+    // B17: Dart had None.
+    ("RUSSIA", Some("RU")),
+    // B17: Dart had Some("RU").
+    ("Ru\u{17f}sia", None),
     ("JPN", None),
     ("Japan", Some("JP")),
     ("japanese", None),
-    ("TOKYO", None),
-    ("tokyo", None),
+    // B17: Dart had None.
+    ("TOKYO", Some("JP")),
+    // B17: Dart had None.
+    ("tokyo", Some("JP")),
     ("IN 01", Some("IN")),
     ("India", Some("IN")),
     ("Indonesia", Some("ID")),
     ("IT 01", Some("IT")),
     ("IT之家", Some("IT")),
-    ("ITALY", None),
+    // B17: Dart had None.
+    ("ITALY", Some("IT")),
     ("Italy", Some("IT")),
     ("香港中转 日本", Some("HK")),
     ("日本 (香港中转)", Some("JP")),
@@ -54,31 +64,37 @@ const REGION_OF: &[(&str, Option<&str>)] = &[
     ("(香港 tran\u{17f}it) 日本", Some("HK")),
     ("Türkiye", Some("TR")),
     ("TÜRKIYE", None),
-    ("turkey", None),
+    // B17: Dart had None.
+    ("turkey", Some("TR")),
     ("UAE-01", Some("AE")),
     ("Dubai", Some("AE")),
     ("United States", Some("US")),
-    ("united states", None),
+    // B17: Dart had None.
+    ("united states", Some("US")),
     ("UnitedStates", None),
     ("San Jose", Some("US")),
     ("SanJose", None),
     ("DE 01", Some("DE")),
     ("Deutschland", None),
-    ("de 01", Some("DE")),
+    // B17: Dart had Some("DE").
+    ("de 01", None),
     ("CA 01", Some("CA")),
     ("California CA", Some("US")),
     ("SG-HK", Some("HK")),
     ("GB", Some("GB")),
     ("UK 01", Some("GB")),
-    ("uk", Some("GB")),
+    // B17: Dart had Some("GB").
+    ("uk", None),
     ("台北", Some("TW")),
     ("新北", Some("TW")),
     ("Los Angeles", Some("US")),
     ("LosAngeles", None),
-    ("los angeles", None),
+    // B17: Dart had None.
+    ("los angeles", Some("US")),
     ("ＨＫ", None),
     ("HK", Some("HK")),
-    ("NEW YORK", None),
+    // B17: Dart had None.
+    ("NEW YORK", Some("US")),
     ("Newyork", None),
     ("A Series - HK 07 (IPv6)", Some("HK")),
     ("Z 越南A01 (香港中转)", Some("VN")),
@@ -94,7 +110,8 @@ const REGION_OF: &[(&str, Option<&str>)] = &[
     ("Australia", Some("AU")),
     ("Sydney", Some("AU")),
     ("BR", Some("BR")),
-    ("brazil", None),
+    // B17: Dart had None.
+    ("brazil", Some("BR")),
     ("AR", Some("AR")),
     ("Argentina", Some("AR")),
     ("Moscow", None),

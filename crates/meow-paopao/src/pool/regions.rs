@@ -271,11 +271,9 @@ pub fn is_flagged_node(n: &ProxyNode) -> bool {
 ///
 /// A bracketed transit note doesn't count: "越南A01 (香港中转)" exits in
 /// Vietnam. Chinese words match anywhere; English words must stand alone
-/// ("HK 07" yes, "SHKO" no).
-///
-/// Dart parity: two-letter codes match in any case ("hk 01") while longer
-/// English words are case-sensitive ("Tokyo" yes, "TOKYO" no) — the
-/// reverse of what the Dart comment intends (`caseSensitive: w.length > 2`).
+/// ("HK 07" yes, "SHKO" no). Two-letter codes must be capitals ("HK",
+/// not the "hk" or "de" of ordinary words); longer words match in any
+/// case ("TOKYO", "hong kong"). Dart had it the other way round (B17).
 pub fn region_of(name: &str) -> Option<&'static Region> {
     let text = strip_transit(name);
     REGIONS
@@ -289,8 +287,9 @@ fn word_hit(text: &str, w: &str) -> bool {
     if !ascii {
         return text.contains(w);
     }
-    // `(?<![A-Za-z])word(?![A-Za-z])`, case-sensitive when longer than 2.
-    let case_sensitive = w.len() > 2;
+    // `(?<![A-Za-z])word(?![A-Za-z])`; codes (two letters) as written,
+    // longer words in any (ASCII) case.
+    let case_sensitive = w.len() <= 2;
     let bytes = text.as_bytes();
     let mut from = 0;
     while let Some(i) = if case_sensitive {
