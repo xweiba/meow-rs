@@ -346,6 +346,79 @@ pub(crate) fn utf8_decode(bytes: Vec<u8>) -> Option<String> {
     })
 }
 
+/// `String.toLowerCase()` on the Dart VM: each character's simple lowercase
+/// mapping, so `İ` becomes `i` (not `i̇`) and a final `Σ` becomes `σ` (no
+/// final-sigma rule).
+pub(crate) fn to_lower_case(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| {
+            // U+0130 is the one character whose full lowercase mapping (what
+            // `char::to_lowercase` gives) differs from the simple one.
+            let simple = if c == '\u{130}' { 'i' } else { c };
+            simple.to_lowercase()
+        })
+        .collect()
+}
+
+/// `RegExp(word, caseSensitive: false).hasMatch(text)` for a literal
+/// `word`: in a non-unicode Dart regular expression case folding never
+/// maps a non-ASCII character to an ASCII one (`ſ` does not match `s`, the
+/// Kelvin sign not `k`), so only ASCII letters fold.
+///
+/// Comparing UTF-8 bytes is exact: a multi-byte character's bytes are all
+/// non-ASCII and compare as themselves.
+pub(crate) fn contains_ignore_ascii_case(text: &str, word: &str) -> bool {
+    find_ignore_ascii_case(text, word, 0).is_some()
+}
+
+/// Byte offset of the first `word` in `text` at or after `from`, ASCII
+/// letters folded (see [`contains_ignore_ascii_case`]).
+pub(crate) fn find_ignore_ascii_case(text: &str, word: &str, from: usize) -> Option<usize> {
+    let (t, w) = (text.as_bytes(), word.as_bytes());
+    if w.is_empty() {
+        return Some(from.min(t.len()));
+    }
+    (from..=t.len().checked_sub(w.len())?).find(|&i| t[i..i + w.len()].eq_ignore_ascii_case(w))
+}
+
+/// What `InternetAddress.tryParse` makes of a string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IpKind {
+    V4,
+    V6,
+}
+
+/// `InternetAddress.tryParse(s)?.type` (dart:io on the VM): `inet_pton`,
+/// i.e. strict dotted-quad IPv4 (no leading zeros, no spaces) or IPv6
+/// (with an optional embedded IPv4 tail), no brackets.
+///
+/// A scope (`fe80::1%…`) is allowed on IPv6 only. Dart resolves a named
+/// scope (`%eth0`) against the machine's interfaces, which a pure function
+/// cannot see: here only numeric scopes are accepted.
+pub(crate) fn internet_address_try_parse(s: &str) -> Option<IpKind> {
+    let (addr, scope) = match s.find('%') {
+        // Dart only splits at a `%` past the first character.
+        Some(i) if i > 0 => (&s[..i], Some(&s[i + 1..])),
+        _ => (s, None),
+    };
+    let kind = if addr.parse::<std::net::Ipv4Addr>().is_ok() {
+        IpKind::V4
+    } else if addr.parse::<std::net::Ipv6Addr>().is_ok() {
+        IpKind::V6
+    } else {
+        return None;
+    };
+    match scope {
+        None => Some(kind),
+        Some(id)
+            if kind == IpKind::V6 && !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            Some(kind)
+        }
+        Some(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
