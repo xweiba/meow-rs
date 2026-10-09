@@ -25,6 +25,9 @@ extern crate self as meow_app;
     reason = "the binary's CLI paths stay unused here"
 )]
 mod app_main;
+/// `meow box`: the embedded core as the box's core (crates/meow-box).
+#[cfg(feature = "box")]
+pub mod box_host;
 #[cfg(feature = "embed")]
 pub mod embed;
 pub mod subscription_refresh;

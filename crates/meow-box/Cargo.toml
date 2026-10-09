@@ -1,0 +1,43 @@
+[package]
+name = "meow-box"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "meow box: the core as a small side router on the LAN (Linux): its own IP and MAC through a raw socket, DNS and a config page."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Config generation, the same code the PaoPao app runs (no FFI here).
+meow-paopao = { path = "../meow-paopao", default-features = false }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
+serde_yaml = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+libc = "0.2"
+# The box's own TCP (config page, DNS over TCP), ARP and ping. Pinned: the
+# TCP state machine is what the page rides on. 0.12 keeps the workspace
+# MSRV (0.13+ need Rust 1.91). 0BSD licence.
+smoltcp = { version = "=0.12.0", default-features = false, features = [
+    "std",
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-tcp",
+] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

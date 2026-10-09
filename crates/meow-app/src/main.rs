@@ -126,6 +126,11 @@ enum Command {
         target_mac: String,
         target_ip: std::net::Ipv4Addr,
     },
+    /// Become a small side router on the LAN (Linux): its own IP (DHCP or
+    /// static) and MAC on --iface, a config page and DNS on that IP; devices
+    /// that set their gateway and DNS to it go through the proxy
+    #[cfg(feature = "box")]
+    Box(meow_box::Options),
     /// Install as a system service
     Install {
         /// Config file path for the service
@@ -791,6 +796,8 @@ fn handle_service_command(cmd: &Command, args: &Args) -> Result<()> {
             }
             install_service(config.as_deref(), args)
         }
+        #[cfg(feature = "box")]
+        Command::Box(opts) => meow_app::box_host::run(opts),
         Command::Uninstall => uninstall_service(),
         Command::Status => service_status(),
         #[cfg(target_os = "windows")]

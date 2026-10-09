@@ -30,6 +30,10 @@ dhat-heap = ["dhat"]
 # Library entry for apps embedding the core (Android / iOS VPN): `embed::run`
 # with the platform's TUN fd, `embed::stop`.
 embed = []
+# `meow box`: the core as a small side router on the LAN (Linux only; a
+# stub elsewhere). Runs the embedded core over a socket-pair TUN, with its
+# DNS listener; see crates/meow-box.
+box = ["embed", "dep:meow-box", "listener-tun", "dns-server"]
 
 # Protocol features — forwarded to meow-proxy and meow-config
 ss = ["meow-config/ss", "meow-proxy/ss"]
@@ -112,6 +116,7 @@ dashmap = { workspace = true }
 libc = "0.2"
 serde_json = { workspace = true }
 dhat = { workspace = true, optional = true }
+meow-box = { path = "../meow-box", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 tracing-appender = "0.2.5"
