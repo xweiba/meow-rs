@@ -22,7 +22,7 @@ use std::collections::HashSet;
 use indexmap::IndexSet;
 use serde_json::{Map, Value};
 
-use crate::model::settings::{ProxyMode, ProxySettings, RuleTarget, SshChain};
+use crate::model::settings::{GroupEdit, ProxyMode, ProxySettings, RuleTarget, SshChain};
 use crate::plan::group_tree::BADGE_SUBSCRIPTION;
 use crate::plan::{
     final_policy, outbound_tags, AutoStrategy, GroupTree, ImportedSplit, Policy, RoutePolicy,
@@ -217,8 +217,9 @@ impl<'a> Plan<'a> {
             };
             format!("{kind},{c},{tag},no-resolve")
         }));
+        // Only a group that takes edits leaves sites out (B25).
         match self.settings().group_edits.get(&tag) {
-            Some(e) if !e.exclude.is_empty() => {
+            Some(e) if !e.exclude.is_empty() && GroupEdit::editable(&tag) => {
                 out.iter().map(|r| without_sites(r, &e.exclude)).collect()
             }
             _ => out,

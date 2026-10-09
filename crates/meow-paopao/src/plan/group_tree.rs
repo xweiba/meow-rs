@@ -250,10 +250,8 @@ impl GroupTree {
 /// parameters).
 #[derive(Debug, Clone, Copy)]
 pub struct TreeInput<'a> {
-    /// Every line's tag, in pool order.
+    /// Every line's tag, in pool order (the pool holds no info rows).
     pub lines: &'a [String],
-    /// The usable ones (not info rows); empty = all of `lines`.
-    pub usable: &'a [String],
     /// Region and kind groups of the pool.
     pub base: &'a [NodeGroup],
     pub settings: &'a ProxySettings,
@@ -348,13 +346,13 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
             .split
             .groups
             .iter()
+            // A group with no members can't run (B24).
+            .filter(|g| !g.members.is_empty())
             .map(|g| {
                 let kind = GroupKind::of_type(&g.kind);
                 let mut spec = GroupSpec::new(&g.tag, &g.name, kind, g.members.clone());
                 if kind == GroupKind::Select {
-                    // Dart takes `members.first`, which a raw merge never
-                    // leaves empty.
-                    let first = g.members.first().cloned().unwrap_or_default();
+                    let first = g.members[0].clone();
                     spec.pick = Some(pick_of(s, &g.tag, &g.members, &first));
                 }
                 spec.badge = Some(BADGE_SUBSCRIPTION);
@@ -383,12 +381,8 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
             kind_groups.push(g);
         }
     }
-    let pool = if input.usable.is_empty() {
-        input.lines
-    } else {
-        input.usable
-    };
-    let unplaced: Vec<String> = pool
+    let unplaced: Vec<String> = input
+        .lines
         .iter()
         .filter(|l| !placed.contains(l.as_str()))
         .cloned()
@@ -401,8 +395,7 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
         });
     }
     // A single line chosen in 🚀 节点选择 (before it listed lines): now its
-    // region group, on that line. (`autoSelect` and the `auto` tag are both
-    // "auto".)
+    // region group, on that line.
     let wanted = s.selected.clone();
     let line_home: Option<String> = if input.lines.contains(&wanted) {
         region_groups
@@ -523,7 +516,8 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
         }
         // The subscriptions' own groups, with their own automatic children.
         let line_set: HashSet<&str> = input.lines.iter().map(String::as_str).collect();
-        for g in &input.split.groups {
+        // A group with no members can't run (B24).
+        for g in input.split.groups.iter().filter(|g| !g.members.is_empty()) {
             let own: Vec<String> = g
                 .members
                 .iter()
@@ -537,14 +531,8 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
                 g.members.iter().filter(|m| is_fixed(m)).cloned().collect();
             members.extend(kids);
             members.extend(g.members.iter().filter(|m| !is_fixed(m)).cloned());
-            // The provider's own default comes first in its list. (Dart
-            // takes `members.first` of an empty list: a throw; empty here.)
-            let fallback = g
-                .members
-                .first()
-                .or_else(|| members.first())
-                .cloned()
-                .unwrap_or_default();
+            // The provider's own default comes first in its list.
+            let fallback = g.members[0].clone();
             let mut spec = GroupSpec::new(&g.tag, &g.name, GroupKind::Select, members);
             spec.pick = Some(pick_of(s, &g.tag, &spec.members, &fallback));
             spec.badge = Some(BADGE_SUBSCRIPTION);
@@ -787,9 +775,10 @@ fn policy_pick(p: &Policy, s: &ProxySettings, members: &[String], built_in: &str
     clash(built_in, members)
 }
 
-/// The groups with the user's edits (`group_edits`) applied: extra outlets
-/// that are there after their members, marked edited; the proxies page's
-/// choice (`policies`, then `group_picks`) may now be one of them.
+/// The groups with the user's edits (`group_edits`) applied to the ones
+/// that take edits ([`GroupEdit::editable`]): extra outlets that are there
+/// after their members, marked edited; the proxies page's choice
+/// (`policies`, then `group_picks`) may now be one of them.
 fn edited(
     s: &ProxySettings,
     groups: Vec<GroupSpec>,
@@ -801,7 +790,11 @@ fn edited(
     groups
         .into_iter()
         .map(|mut g| {
-            let Some(e) = s.group_edits.get(&g.tag).filter(|e| !e.is_empty()) else {
+            let Some(e) = s
+                .group_edits
+                .get(&g.tag)
+                .filter(|e| !e.is_empty() && GroupEdit::editable(&g.tag))
+            else {
                 return g;
             };
             let there = GroupEdit {
@@ -837,12 +830,12 @@ fn custom_groups(
         .iter()
         .map(|c| {
             let mut all = members.to_vec();
-            all.extend(
-                c.extras
-                    .iter()
-                    .filter(|m| exists(m) && !members.contains(m))
-                    .cloned(),
-            );
+            // Each outlet once (B25).
+            for m in c.extras.iter().filter(|m| exists(m)) {
+                if !all.contains(m) {
+                    all.push(m.clone());
+                }
+            }
             let fallback = match &c.pick {
                 Some(p) if all.contains(p) => p.clone(),
                 _ if all.iter().any(|m| m == outbound_tags::PROXY) => outbound_tags::PROXY.into(),
@@ -861,7 +854,10 @@ fn custom_groups(
 /// Drops any member that leads back to a group already on the way (a
 /// subscription's groups can point at each other): a loop would send
 /// connections round in circles. A group whose pick was cut picks its
-/// first remaining member (keeps the old pick when none is left).
+/// first remaining member; one left with no member goes DIRECT, as an
+/// imported group with none does (the core refuses an empty group). Dart
+/// kept the cut pick there (`copyWith(pick: null)` keeps it, B23), which
+/// put the loop back.
 fn tree_without_loops(groups: Vec<GroupSpec>) -> GroupTree {
     let by_tag: HashMap<&str, &GroupSpec> = groups.iter().map(|g| (g.tag.as_str(), g)).collect();
     let mut cut: HashMap<String, HashSet<String>> = HashMap::new();
@@ -912,17 +908,17 @@ fn tree_without_loops(groups: Vec<GroupSpec>) -> GroupTree {
             let Some(drop) = cut.get(&g.tag) else {
                 return g;
             };
-            let kept: Vec<String> = g
+            let mut kept: Vec<String> = g
                 .members
                 .iter()
                 .filter(|m| !drop.contains(*m))
                 .cloned()
                 .collect();
+            if kept.is_empty() {
+                kept.push("DIRECT".into());
+            }
             if g.pick.as_ref().is_some_and(|p| drop.contains(p)) {
-                // Dart `copyWith(pick: null)` keeps the old one.
-                if let Some(first) = kept.first() {
-                    g.pick = Some(first.clone());
-                }
+                g.pick = Some(kept[0].clone());
             }
             g.members = kept;
             g

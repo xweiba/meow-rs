@@ -5,6 +5,7 @@
 
 use crate::dart::{internet_address_try_parse, is_regex_space, trim};
 use crate::model::settings::{CustomGroup, GroupEdit, RuleMatch, CUSTOM_GROUP_PREFIX};
+use crate::plan::policies::policy_by_tag;
 
 impl CustomGroup {
     /// Whether `tag` is a user group's (`group:<id>`).
@@ -14,14 +15,24 @@ impl CustomGroup {
 }
 
 impl GroupEdit {
-    /// `members` with the extra outlets after them (each once; ones already
-    /// there are not repeated, repeats among the extras are).
+    /// Whether the group tagged `tag` takes edits (Dart
+    /// `ProxyController.canEdit`): a user's own group, or a built-in
+    /// service group (not the basic split, not 广告拦截). Edits saved for
+    /// any other group (a region …) are ignored (B25).
+    pub fn editable(tag: &str) -> bool {
+        CustomGroup::is_custom(tag) || policy_by_tag(tag).is_some_and(|p| !p.base && !p.blockable)
+    }
+
+    /// `members` with the extra outlets after them, each once (B25: Dart
+    /// repeated an outlet listed twice).
     pub fn apply(&self, members: &[String]) -> Vec<String> {
-        members
-            .iter()
-            .chain(self.extras.iter().filter(|m| !members.contains(m)))
-            .cloned()
-            .collect()
+        let mut out = members.to_vec();
+        for m in &self.extras {
+            if !out.contains(m) {
+                out.push(m.clone());
+            }
+        }
+        out
     }
 }
 

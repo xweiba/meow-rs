@@ -255,15 +255,16 @@ impl Merger<'_, '_> {
             } else {
                 sub_tag
             };
-            self.groups.insert(
-                tag.clone(),
-                ImportedGroup {
+            // Another subscription's own 节点选择 is already there: one
+            // group with both's members (B24: Dart replaced the first's).
+            self.groups
+                .entry(tag.clone())
+                .or_insert_with(|| ImportedGroup {
                     tag: tag.clone(),
                     name: name.to_owned(),
                     members: Vec::new(),
                     kind,
-                },
-            );
+                });
             self.resolved.insert(name.to_owned(), Some(tag.clone()));
             for m in &g.members {
                 if let Some(r) = self.resolve(m, path) {

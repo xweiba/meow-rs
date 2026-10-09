@@ -309,7 +309,6 @@ fn build(settings: &ProxySettings, split: &ImportedSplit) -> GroupTree {
     let base = base();
     build_group_tree(&TreeInput {
         lines: &lines,
-        usable: &lines,
         base: &base,
         settings,
         split,
@@ -418,7 +417,6 @@ fn no_lines_yet_still_has_the_users_policies() {
     };
     let t = build_group_tree(&TreeInput {
         lines: &[],
-        usable: &[],
         base: &[],
         settings: &settings,
         split: &ImportedSplit::default(),
@@ -812,7 +810,7 @@ fn no_loops_a_member_leading_back_is_dropped() {
 #[test]
 fn an_edit_adds_outlets_after_the_generated_members() {
     let e = GroupEdit {
-        extras: s(&["iface:en1", "DIRECT"]),
+        extras: s(&["iface:en1", "DIRECT", "iface:en1"]),
         exclude: vec![],
     };
     assert_eq!(
@@ -965,4 +963,141 @@ fn merge_raw_keeps_groups_as_written() {
     assert_eq!(auto.raw_type.as_deref(), Some("url-test"));
     assert_eq!(auto.pick, None);
     assert!(t.by_tag("policy:ai").is_none());
+}
+
+// ---------------------------------------------- behaviour fixes (B23–B25)
+
+/// B23: 完全按订阅, "B" offers only "A", and A only B: the loop is cut at
+/// B, which picked A. Dart kept that pick (`copyWith(pick: null)` keeps
+/// it), so the config listed A in B again: the loop was back. Now B goes
+/// DIRECT, the core's only way out of a group with nothing left.
+#[test]
+fn b23_a_cut_pick_is_cleared() {
+    let split = ImportedSplit {
+        groups: vec![
+            ImportedGroup::new("proxy", "🚀 节点选择", &["sub:A", "HK 1"]),
+            ImportedGroup::new("sub:A", "A", &["sub:B"]),
+            ImportedGroup::new("sub:B", "B", &["sub:A"]),
+        ],
+        rules: vec![],
+        final_target: None,
+    };
+    let settings = ProxySettings {
+        group_mode: crate::model::settings::GroupMode::Subscription,
+        ..ProxySettings::default()
+    };
+    let t = build(&settings, &split);
+    assert_eq!(t.loops, [("sub:B".to_owned(), "sub:A".to_owned())]);
+    assert_eq!(g(&t, "sub:B").members, s(&["DIRECT"]));
+    assert_eq!(pick(&t, "sub:B"), "DIRECT");
+    // A keeps B; nothing names a cut member any more.
+    assert_eq!(pick(&t, "sub:A"), "sub:B");
+    for x in &t.groups {
+        assert!(
+            x.pick.as_ref().is_none_or(|p| x.members.contains(p)),
+            "{}",
+            x.tag
+        );
+    }
+}
+
+/// B24: two subscriptions followed exactly, each with its own 节点选择:
+/// Dart's second replaced the first's members; now both are in it.
+#[test]
+fn b24_both_subscriptions_select_groups_merge() {
+    let one = SubRules {
+        groups: vec![sub_group("🚀 节点选择", "select", &["HK 01", "JP 01"])],
+        rules: s(&["MATCH,🚀 节点选择"]),
+    };
+    let two = SubRules {
+        groups: vec![sub_group("🚀 Proxy", "select", &["US 01"])],
+        rules: s(&["DOMAIN,x.example,🚀 Proxy", "MATCH,🚀 Proxy"]),
+    };
+    let l1 = map(&[("HK 01", "HK 01"), ("JP 01", "JP 01")]);
+    let l2 = map(&[("US 01", "US 01")]);
+    let split = merge_subscription_splits(
+        &[
+            SubSplit {
+                rules: &one,
+                line_of: &l1,
+            },
+            SubSplit {
+                rules: &two,
+                line_of: &l2,
+            },
+        ],
+        targets(),
+        None,
+        true,
+    );
+    let proxy = split
+        .groups
+        .iter()
+        .find(|x| x.tag == "proxy")
+        .expect("proxy");
+    assert_eq!(proxy.members, s(&["HK 01", "JP 01", "US 01"]));
+    assert_eq!(proxy.name, "🚀 节点选择");
+}
+
+/// B24: a group with no members is left out of the tree (Dart threw on
+/// `members.first`), in smart mode and followed exactly.
+#[test]
+fn b24_empty_groups_are_skipped() {
+    let split = ImportedSplit {
+        groups: vec![
+            ImportedGroup::new("proxy", "🚀 节点选择", &["HK 1"]),
+            ImportedGroup::new("sub:Empty", "Empty", &[]),
+        ],
+        rules: vec![],
+        final_target: None,
+    };
+    let t = build(&ProxySettings::default(), &split);
+    assert!(t.by_tag("sub:Empty").is_none());
+    let settings = ProxySettings {
+        group_mode: crate::model::settings::GroupMode::Subscription,
+        ..ProxySettings::default()
+    };
+    let t = build(&settings, &split);
+    assert!(t.by_tag("sub:Empty").is_none());
+    assert!(t.by_tag("proxy").is_some());
+}
+
+/// B25: edits apply only to groups that take them (Dart `canEdit`): an
+/// edit saved for a region group is ignored; outlets come once.
+#[test]
+fn b25_edits_only_on_editable_groups_outlets_once() {
+    let edit = |extras: &[&str]| GroupEdit {
+        extras: s(extras),
+        exclude: vec![],
+    };
+    let settings = ProxySettings {
+        group_edits: [
+            ("region:HK".to_owned(), edit(&["iface:en0"])),
+            ("policy:ads".to_owned(), edit(&["iface:en0"])),
+            ("policy:ai".to_owned(), edit(&["iface:en0", "iface:en0"])),
+        ]
+        .into_iter()
+        .collect(),
+        custom_groups: vec![CustomGroup {
+            id: "co".into(),
+            name: "Co".into(),
+            extras: s(&["iface:en1", "iface:en1"]),
+            pick: None,
+        }],
+        ..ProxySettings::default()
+    };
+    let t = build_with(&settings);
+    assert!(!g(&t, "region:HK").edited);
+    assert!(!g(&t, "region:HK").members.contains(&"iface:en0".into()));
+    assert!(!g(&t, "policy:ads").edited);
+    let ai = g(&t, "policy:ai");
+    assert!(ai.edited);
+    assert_eq!(ai.members.iter().filter(|m| *m == "iface:en0").count(), 1);
+    let co = g(&t, "group:co");
+    assert_eq!(co.members.iter().filter(|m| *m == "iface:en1").count(), 1);
+    assert!(GroupEdit::editable("group:co"));
+    assert!(GroupEdit::editable("policy:netflix"));
+    assert!(!GroupEdit::editable("policy:foreign"));
+    assert!(!GroupEdit::editable("policy:ads"));
+    assert!(!GroupEdit::editable("region:HK"));
 }

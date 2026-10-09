@@ -27,7 +27,7 @@ use indexmap::IndexMap;
 
 use crate::dart::contains_ignore_ascii_case;
 use crate::model::settings::{GroupMode, ProxyMode, ProxySettings, SshChain};
-use crate::pool::{endpoint, is_usable_node, region_of, NodeGroup, Pool};
+use crate::pool::{endpoint, region_of, NodeGroup, Pool};
 
 pub use group_tree::{build_group_tree, GroupKind, GroupSpec, GroupTree, TreeInput};
 pub use input::{AutoStrategy, BuildInput, RouteAccess, RuntimeOptions};
@@ -164,17 +164,9 @@ pub fn build_tree(input: &BuildInput, pool: &Pool) -> GroupTree {
 /// (so with `group_mode = subscription` it showed our layers while the
 /// core ran the provider's groups).
 pub fn tree_for(s: &ProxySettings, pool: &Pool, split: &ImportedSplit) -> GroupTree {
-    let usable: Vec<String> = pool
-        .nodes
-        .iter()
-        .zip(&pool.tags)
-        .filter(|(n, _)| is_usable_node(&n.node))
-        .map(|(_, t)| t.clone())
-        .collect();
     let extras: Vec<String> = s.ssh_chains.iter().map(SshChain::tag).collect();
     build_group_tree(&TreeInput {
         lines: &pool.tags,
-        usable: &usable,
         base: &pool.groups,
         settings: s,
         split,
