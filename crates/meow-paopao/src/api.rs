@@ -242,8 +242,8 @@ fn group_path(tree: &GroupTree, target: &str) -> Vec<String> {
 }
 
 /// [`explain`] over JSON: `input` as for [`build_json`], `query`
-/// `{host, port?, process?, network?}` (`network`: `tcp` by default or
-/// `udp`) → [`Explanation::to_json`], `null` when no rule takes it, or
+/// `{host, port?, process?, processPath?, network?}` (`network`: `tcp` by
+/// default or `udp`) → [`Explanation::to_json`], `null` when no rule takes it, or
 /// `{"error": ...}`.
 pub fn explain_json(input: &str, query: &str) -> Value {
     let input = match serde_json::from_str::<Value>(input) {
@@ -265,6 +265,10 @@ pub fn explain_json(input: &str, query: &str) -> Value {
             .and_then(Value::as_u64)
             .and_then(|p| u16::try_from(p).ok()),
         process: q.get("process").and_then(Value::as_str).map(str::to_owned),
+        process_path: q
+            .get("processPath")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         udp: q
             .get("network")
             .and_then(Value::as_str)

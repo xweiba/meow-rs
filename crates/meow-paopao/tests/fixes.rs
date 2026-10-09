@@ -409,3 +409,44 @@ fn b5_explain_json() {
     assert!(meow_paopao::explain_json("[]", "{}")["error"].is_string());
     assert!(meow_paopao::explain_json(&v.to_string(), "{}")["error"].is_string());
 }
+
+/// 根据应用走策略 (task `10-09-app-routing`): a picked app's rule sits with
+/// the user's other rules, and explain answers for that app's programs
+/// (a macOS helper inside the bundle included) but not for others.
+#[test]
+fn app_rules_route_their_programs() {
+    let v = input(
+        &json!([vless("US 01", "a")]),
+        &json!({}),
+        &json!({"rules": [
+            {"match": "app", "value": "path:/Applications/Google Chrome.app",
+             "target": "direct", "label": "Google Chrome"},
+            {"match": "app", "value": "name:chrome.exe", "target": "block"},
+            {"match": "app", "value": "bundle:later", "target": "block"},
+        ]}),
+    );
+    let out = run(&v);
+    let rules = config_rules(&out);
+    let at = rules
+        .iter()
+        .position(|r| r == "PROCESS-PATH,/Applications/Google Chrome.app,DIRECT")
+        .expect("app rule");
+    assert_eq!(rules[at + 1], "PROCESS-NAME,chrome.exe,REJECT");
+    assert!(!rules.iter().any(|r| r.contains("later")));
+    let ask = |q: Value| meow_paopao::explain_json(&v.to_string(), &q.to_string());
+    let helper = "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome \
+                  Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper";
+    let e = ask(
+        json!({"host": "example.com", "process": "Google Chrome Helper", "processPath": helper}),
+    );
+    assert_eq!(e["target"], "DIRECT");
+    assert_eq!(e["type"], "PROCESS-PATH");
+    let e = ask(
+        json!({"host": "example.com", "process": "Chrome.EXE", "processPath": "C:\\x\\Chrome.EXE"}),
+    );
+    assert_eq!(e["target"], "REJECT");
+    let e = ask(
+        json!({"host": "example.com", "processPath": "/Applications/Safari.app/Contents/MacOS/Safari"}),
+    );
+    assert_ne!(e["type"], "PROCESS-PATH");
+}

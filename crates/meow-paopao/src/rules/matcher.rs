@@ -45,6 +45,9 @@ pub struct Connection {
     /// The program making it; None = not known: `PROCESS-NAME` rules don't
     /// take it (the question is about the site, from any other program).
     pub process: Option<String>,
+    /// The program's full path (`/Applications/X.app/Contents/MacOS/X`);
+    /// None = not known: `PROCESS-PATH` rules don't take it.
+    pub process_path: Option<String>,
     /// UDP rather than TCP (a site is visited over TCP by default).
     pub udp: bool,
 }
@@ -191,7 +194,19 @@ fn condition(kind: &str, payload: &str, options: &[&str], c: &Conn<'_>, depth: u
             None => Verdict::Unknown,
         },
         "GEOIP" if c.ip.is_none() && no_resolve => Verdict::No,
-        "PROCESS-NAME" => Verdict::of(c.c.process.as_deref() == Some(payload)),
+        // As the core: the name ignoring ASCII case, the path as
+        // [`process_path_matches`].
+        "PROCESS-NAME" => Verdict::of(
+            c.c.process
+                .as_deref()
+                .is_some_and(|p| p.eq_ignore_ascii_case(payload)),
+        ),
+        "PROCESS-PATH" if payload.contains('*') => Verdict::Unknown,
+        "PROCESS-PATH" => Verdict::of(
+            c.c.process_path
+                .as_deref()
+                .is_some_and(|p| process_path_matches(payload, p)),
+        ),
         "NETWORK" => Verdict::of(payload.eq_ignore_ascii_case(if c.c.udp { "udp" } else { "tcp" })),
         "DST-PORT" => match c.c.port {
             Some(p) => port_in(payload, p).map_or(Verdict::Unknown, Verdict::of),
@@ -229,6 +244,22 @@ fn condition(kind: &str, payload: &str, options: &[&str], c: &Conn<'_>, depth: u
         // GEOSITE, GEOIP, rule sets, source rules, regexes, …
         _ => Verdict::Unknown,
     }
+}
+
+/// A `PROCESS-PATH` payload without `*` against a program's path, as
+/// meow-rules does: one starting with `/` or `\` is a directory (the path
+/// itself or anything under it, on whole parts); else the file name alone.
+fn process_path_matches(payload: &str, path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    if payload.starts_with(['/', '\\']) {
+        return path == payload
+            || path
+                .strip_prefix(payload)
+                .is_some_and(|rest| rest.starts_with(['/', '\\']));
+    }
+    path.rsplit(['/', '\\']).next() == Some(payload)
 }
 
 /// Whether `ip` is in `cidr` (`1.2.3.0/24`, `2001:db8::/32`, an address
@@ -335,6 +366,24 @@ mod tests {
         assert_eq!(check("PROCESS-NAME,WeChat,x", &c), No);
         c.process = Some("WeChat".into());
         assert_eq!(check("PROCESS-NAME,WeChat,x", &c), Yes);
+        assert_eq!(check("PROCESS-NAME,wechat,x", &c), Yes);
+        // An app bundle: every program inside it, on whole path parts.
+        let mut c = site("a.com");
+        assert_eq!(check("PROCESS-PATH,/Applications/X.app,x", &c), No);
+        c.process_path = Some(
+            "/Applications/X.app/Contents/Frameworks/X Helper.app/Contents/MacOS/X Helper".into(),
+        );
+        assert_eq!(check("PROCESS-PATH,/Applications/X.app,x", &c), Yes);
+        assert_eq!(check("PROCESS-PATH,/Applications/X,x", &c), No);
+        assert_eq!(check("PROCESS-PATH,X Helper,x", &c), Yes);
+        assert_eq!(check("PROCESS-PATH,/Applications/*.app,x", &c), Unknown);
+        assert_eq!(
+            check(
+                "AND,((DOMAIN,a.com),(NOT,((PROCESS-PATH,/Applications/X.app)))),x",
+                &c
+            ),
+            No
+        );
         assert_eq!(check("DST-PORT,443,x", &c), Unknown);
         c.port = Some(5349);
         assert_eq!(check("DST-PORT,3478/5349/19302-19309,x", &c), Yes);

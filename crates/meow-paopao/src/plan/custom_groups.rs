@@ -38,7 +38,7 @@ impl GroupEdit {
 
 /// One entry of [`GroupEdit::exclude`]: a domain with its subdomains, or a
 /// single address, as is; the other matches prefixed: `exact:host`,
-/// `keyword:word`, `ip:range`, `process:name`.
+/// `keyword:word`, `ip:range`, `process:name`, `app:<app matcher>`.
 pub fn exclude_entry(m: RuleMatch, value: &str) -> String {
     match m {
         RuleMatch::Domain => value.to_owned(),
@@ -55,6 +55,7 @@ pub fn exclude_match(entry: &str) -> (RuleMatch, String) {
         RuleMatch::Keyword,
         RuleMatch::Ip,
         RuleMatch::Process,
+        RuleMatch::App,
     ] {
         if let Some(v) = entry
             .strip_prefix(m.name())

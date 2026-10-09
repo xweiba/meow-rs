@@ -207,7 +207,7 @@ fn rule_lines() {
             &json!({"match": m, "value": v, "target": t}),
         )
         .expect("rule");
-        custom_rule_line(&r, &rule_target_tag(&r.target))
+        custom_rule_line(&r, &rule_target_tag(&r.target)).expect("line")
     };
     assert_eq!(
         rule("domain", "a.com", "direct"),
@@ -231,6 +231,40 @@ fn rule_lines() {
         rule("process", "chrome.exe", "line:policy:ai"),
         "PROCESS-NAME,chrome.exe,policy:ai"
     );
+    // Apps: a macOS bundle by its folder (helpers inside included), a
+    // program by its file name, an Android app by its package.
+    assert_eq!(
+        rule("app", "path:/Applications/Google Chrome.app", "direct"),
+        "PROCESS-PATH,/Applications/Google Chrome.app,DIRECT"
+    );
+    assert_eq!(
+        rule("app", "path:/Applications/X.app/", "proxy"),
+        "PROCESS-PATH,/Applications/X.app,proxy"
+    );
+    assert_eq!(
+        rule("app", "name:chrome.exe", "line:policy:ai"),
+        "PROCESS-NAME,chrome.exe,policy:ai"
+    );
+    assert_eq!(
+        rule("app", "name:firefox", "block"),
+        "PROCESS-NAME,firefox,REJECT"
+    );
+    assert_eq!(
+        rule("app", "pkg:com.tencent.mm", "direct"),
+        "PROCESS-NAME,com.tencent.mm,DIRECT"
+    );
+    assert_eq!(
+        rule("app", "path:/Applications/Teams (work).app", "direct"),
+        "PROCESS-PATH,/Applications/Teams (work).app,DIRECT"
+    );
+    // What this version can't read (or a rule line can't carry) makes none.
+    for v in ["bundle:com.x", "chrome.exe", "name:", "path:/", "name:a,b"] {
+        let r = crate::model::settings::CustomRule::from_json(
+            &json!({"match": "app", "value": v, "target": "direct"}),
+        )
+        .expect("kept");
+        assert_eq!(custom_rule_line(&r, "DIRECT"), None, "{v}");
+    }
 
     assert_eq!(geo_rule("geoip-cn", "DIRECT"), "GEOIP,cn,DIRECT");
     assert_eq!(
@@ -287,6 +321,27 @@ fn sites_left_out_skip_a_rule() {
             &yt
         ),
         format!("AND,((NETWORK,UDP),(DST-PORT,443),(GEOSITE,youtube),{skip}),REJECT")
+    );
+    // Apps left out: by folder or by name; unreadable ones are ignored.
+    assert_eq!(
+        without_sites(
+            "GEOSITE,x,p",
+            &sites(&[
+                "app:path:/Applications/X.app",
+                "app:pkg:com.tencent.mm",
+                "app:what:x"
+            ])
+        ),
+        "AND,((GEOSITE,x),(NOT,((OR,((PROCESS-PATH,/Applications/X.app),\
+         (PROCESS-NAME,com.tencent.mm)))))),p"
+    );
+    assert_eq!(
+        without_sites("GEOSITE,x,p", &sites(&["app:what:x"])),
+        "GEOSITE,x,p"
+    );
+    assert_eq!(
+        without_sites("GEOSITE,x,p", &sites(&["app:path:/A (1).app"])),
+        "GEOSITE,x,p"
     );
     // From the build goldens (regions--custom).
     assert_eq!(

@@ -210,6 +210,11 @@ fn sites_and_excludes_like_dart() {
         ("keyword:chat", RuleMatch::Keyword, "chat"),
         ("ip:10.0.0.0/8", RuleMatch::Ip, "10.0.0.0/8"),
         ("process:Telegram", RuleMatch::Process, "Telegram"),
+        (
+            "app:path:/Applications/X.app",
+            RuleMatch::App,
+            "path:/Applications/X.app",
+        ),
         ("domain:x", RuleMatch::Domain, "domain:x"),
         ("exactly.com", RuleMatch::Domain, "exactly.com"),
         ("ip:", RuleMatch::Ip, ""),
@@ -222,6 +227,10 @@ fn sites_and_excludes_like_dart() {
     assert_eq!(exclude_entry(RuleMatch::Ip, "1.2.3.4"), "1.2.3.4");
     assert_eq!(exclude_entry(RuleMatch::Ip, "10.0.0.0/8"), "ip:10.0.0.0/8");
     assert_eq!(exclude_entry(RuleMatch::Process, "QQ"), "process:QQ");
+    assert_eq!(
+        exclude_entry(RuleMatch::App, "name:QQ.exe"),
+        "app:name:QQ.exe"
+    );
 }
 
 #[test]

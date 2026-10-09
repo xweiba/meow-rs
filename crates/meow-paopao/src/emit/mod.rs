@@ -260,7 +260,7 @@ impl<'a> Plan<'a> {
         let user: Vec<String> = s
             .rules
             .iter()
-            .map(|r| custom_rule_line(r, &self.target(&r.target)))
+            .filter_map(|r| custom_rule_line(r, &self.target(&r.target)))
             .collect();
         out.extend(user.iter().cloned());
         out.extend(module_rules.iter().cloned());

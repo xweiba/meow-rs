@@ -113,6 +113,11 @@ pub enum RuleMatch {
     Ip,
     /// Program name (`chrome.exe`, `firefox`); desktop only.
     Process,
+    /// An app the user picked from a list; the value is an [`AppMatcher`]
+    /// string (`path:/Applications/X.app`, `name:chrome.exe`,
+    /// `pkg:com.tencent.mm`). One with a prefix this version does not know
+    /// is kept but makes no rule.
+    App,
 }
 named_enum!(RuleMatch {
     Domain => "domain",
@@ -120,7 +125,55 @@ named_enum!(RuleMatch {
     Keyword => "keyword",
     Ip => "ip",
     Process => "process",
+    App => "app",
 });
+
+/// Which processes an app is, as stored in a [`RuleMatch::App`] value.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AppMatcher {
+    /// `path:<dir>`: every program under this directory (a macOS `.app`
+    /// bundle, its helper processes included).
+    Path(String),
+    /// `name:<file>`: the program's file name (`chrome.exe` on Windows,
+    /// `firefox` on Linux).
+    Name(String),
+    /// `pkg:<package>`: an Android app (the core reports the package as
+    /// the process name).
+    Package(String),
+}
+
+impl AppMatcher {
+    /// None for an unknown prefix, an empty value, or a value a rule line
+    /// cannot carry (`,` splits rule lines).
+    pub fn parse(v: &str) -> Option<Self> {
+        let (kind, value) = v.split_once(':')?;
+        let value = trim(value);
+        if value.is_empty() || value.contains([',', '\n', '\r']) {
+            return None;
+        }
+        let value = value.to_owned();
+        match kind {
+            // `/Applications/X.app/` would not take `/Applications/X.app/…`:
+            // the core matches the prefix on whole path parts.
+            "path" => {
+                let dir = value.trim_end_matches(['/', '\\']);
+                (!dir.is_empty()).then(|| Self::Path(dir.to_owned()))
+            }
+            "name" => Some(Self::Name(value)),
+            "pkg" => Some(Self::Package(value)),
+            _ => None,
+        }
+    }
+
+    /// The core's condition without a target: `PROCESS-PATH,<dir>` (a
+    /// prefix match on whole path parts) or `PROCESS-NAME,<name>`.
+    pub fn condition(&self) -> String {
+        match self {
+            Self::Path(dir) => format!("PROCESS-PATH,{dir}"),
+            Self::Name(n) | Self::Package(n) => format!("PROCESS-NAME,{n}"),
+        }
+    }
+}
 
 /// How a hosts entry matches names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -198,6 +251,9 @@ pub struct CustomRule {
     pub target: RuleTarget,
     /// Only on this network ([`NamedNetwork::id`]); None = everywhere.
     pub network: Option<String>,
+    /// What the user saw when picking it (an app's name); None = show
+    /// the value. Display only.
+    pub label: Option<String>,
 }
 
 impl CustomRule {
@@ -207,6 +263,7 @@ impl CustomRule {
         m.insert("value".into(), self.value.clone().into());
         m.insert("target".into(), self.target.encode().into());
         insert_opt(&mut m, "network", self.network.as_ref());
+        insert_opt(&mut m, "label", self.label.as_ref());
         Value::Object(m)
     }
 
@@ -224,6 +281,7 @@ impl CustomRule {
             value,
             target: RuleTarget::decode(&target),
             network: string_field(o.get("network")),
+            label: string_field(o.get("label")),
         })
     }
 }
@@ -419,8 +477,8 @@ pub struct GroupEdit {
     /// Extra outlets ([`is_extra_outlet`]).
     pub extras: Vec<String>,
     /// Sites its rules no longer take: a domain or address as is, else
-    /// `exact:` / `keyword:` / `ip:` / `process:` prefixed. Lower-cased
-    /// except program names.
+    /// `exact:` / `keyword:` / `ip:` / `process:` / `app:` prefixed.
+    /// Lower-cased except programs and apps.
     pub exclude: Vec<String>,
 }
 
@@ -452,7 +510,7 @@ impl GroupEdit {
                 let t = trim(&s);
                 if t.is_empty() {
                     None
-                } else if s.starts_with("process:") {
+                } else if s.starts_with("process:") || s.starts_with("app:") {
                     Some(t.to_owned())
                 } else {
                     Some(t.to_lowercase())
@@ -885,6 +943,64 @@ fn string_map(m: &IndexMap<String, String>) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn app_rules_keep_their_label_and_old_rules_stay_as_they_were() {
+        let rules = json!([
+            {"match": "domain", "value": "a.com", "target": "direct"},
+            {"match": "app", "value": "path:/Applications/X.app", "target": "proxy",
+             "label": "X"},
+            {"match": "app", "value": "bundle:new", "target": "block", "network": "n1",
+             "label": "Later"},
+        ]);
+        let s = ProxySettings::from_json(&json!({ "rules": rules }));
+        assert_eq!(s.rules.len(), 3);
+        assert_eq!(s.rules[0].label, None);
+        assert_eq!(s.rules[1].matches, RuleMatch::App);
+        assert_eq!(s.rules[1].label.as_deref(), Some("X"));
+        // Round trip: no `label` key where there was none, unknown apps kept.
+        assert_eq!(s.to_json()["rules"], rules);
+        // An unknown match is still dropped.
+        let s = ProxySettings::from_json(&json!({
+            "rules": [{"match": "uid", "value": "1000"}]
+        }));
+        assert!(s.rules.is_empty());
+        // Program and app names keep their case when left out.
+        let e = GroupEdit::from_json(&json!({
+            "exclude": ["A.com", "process:QQ", "app:path:/Applications/QQ.app"]
+        }));
+        assert_eq!(
+            e.exclude,
+            ["a.com", "process:QQ", "app:path:/Applications/QQ.app"]
+        );
+    }
+
+    #[test]
+    fn app_matchers() {
+        use AppMatcher::*;
+        for (v, want) in [
+            (
+                "path:/Applications/X.app",
+                Some(Path("/Applications/X.app".into())),
+            ),
+            (
+                "path:/Applications/X.app//",
+                Some(Path("/Applications/X.app".into())),
+            ),
+            ("name: chrome.exe ", Some(Name("chrome.exe".into()))),
+            ("pkg:com.tencent.mm", Some(Package("com.tencent.mm".into()))),
+            ("path:/", None),
+            ("pkg:", None),
+            ("uid:1000", None),
+            ("firefox", None),
+            ("name:a,b", None),
+            ("path:/A (1).app", Some(Path("/A (1).app".into()))),
+        ] {
+            assert_eq!(AppMatcher::parse(v), want, "{v}");
+        }
+        assert_eq!(Path("/A.app".into()).condition(), "PROCESS-PATH,/A.app");
+        assert_eq!(Package("com.x".into()).condition(), "PROCESS-NAME,com.x");
+    }
 
     #[test]
     fn group_defaults_drop_what_a_group_cannot_take() {

@@ -308,11 +308,16 @@ fn pieces_match_build_goldens() {
             }
             at += 1;
         }
-        for r in &effective.rules {
+        // An app this version can't read makes no rule.
+        for r in effective
+            .rules
+            .iter()
+            .filter(|r| custom_rule_line(r, "x").is_some())
+        {
             // The target as written, or REJECT when it no longer exists.
             let options = [
-                custom_rule_line(r, &rule_target_tag(&r.target)),
-                custom_rule_line(r, "REJECT"),
+                custom_rule_line(r, &rule_target_tag(&r.target)).unwrap_or_default(),
+                custom_rule_line(r, "REJECT").unwrap_or_default(),
             ];
             if !rules
                 .get(at)

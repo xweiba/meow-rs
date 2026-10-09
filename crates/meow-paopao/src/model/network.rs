@@ -331,6 +331,7 @@ mod tests {
             value: v.into(),
             target: RuleTarget::Direct,
             network: network.map(Into::into),
+            label: None,
         };
         let s = ProxySettings {
             networks: vec![

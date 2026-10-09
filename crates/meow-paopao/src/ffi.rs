@@ -63,7 +63,7 @@ pub unsafe extern "C" fn paopao_build(input: *const c_char) -> *mut c_char {
 }
 
 /// Which rule decides a connection, and where it goes: `input` as for
-/// [`paopao_build`], `query` `{host, port?, process?, network?}` → `{rule,
+/// [`paopao_build`], `query` `{host, port?, process?, processPath?, network?}` → `{rule,
 /// type, payload, target, index, path, decided}` or `null` (see
 /// [`crate::api::explain_json`]).
 ///

@@ -20,7 +20,7 @@ pub use modules::{
 };
 pub use ssh::{ssh_proxies, SshProxy, SshSecrets};
 
-use crate::model::settings::{CustomRule, RuleMatch, RuleTarget};
+use crate::model::settings::{AppMatcher, CustomRule, RuleMatch, RuleTarget};
 use crate::plan::custom_groups::exclude_match;
 
 /// Private and loopback ranges: they always go direct (the first rules).
@@ -77,10 +77,12 @@ pub fn rule_target_tag(t: &RuleTarget) -> String {
 
 /// A user rule as a rule line sending its sites to `target` (Dart:
 /// `customRule` in `buildClashConfig`, after the target is resolved). A
-/// single address gets `/32` or `/128`.
-pub fn custom_rule_line(r: &CustomRule, target: &str) -> String {
+/// single address gets `/32` or `/128`; an app becomes its
+/// [`AppMatcher::condition`]. None for an app this version can't read: it
+/// makes no rule.
+pub fn custom_rule_line(r: &CustomRule, target: &str) -> Option<String> {
     let v = &r.value;
-    match r.matches {
+    Some(match r.matches {
         RuleMatch::Domain => format!("DOMAIN-SUFFIX,{v},{target}"),
         RuleMatch::Exact => format!("DOMAIN,{v},{target}"),
         RuleMatch::Keyword => format!("DOMAIN-KEYWORD,{v},{target}"),
@@ -93,7 +95,8 @@ pub fn custom_rule_line(r: &CustomRule, target: &str) -> String {
             format!("{},{cidr},{target},no-resolve", ip_cidr_type(v))
         }
         RuleMatch::Process => format!("PROCESS-NAME,{v},{target}"),
-    }
+        RuleMatch::App => format!("{},{target}", AppMatcher::parse(v)?.condition()),
+    })
 }
 
 /// A rule set (`geoip-cn`, `geosite-google`) as a rule to `target`:
@@ -127,15 +130,15 @@ pub fn rule_matcher(rule: &str) -> String {
 /// `rule` (`TYPE,payload,target[,no-resolve]`, or `AND,(…),target`)
 /// matching everything it did except `sites` (a business policy's
 /// exclusions: domains with their subdomains, `exact:` hosts, `keyword:`
-/// words, addresses or `ip:` ranges, `process:` programs): those skip it
-/// and the rules after decide (Dart: `withoutSites`). `sites` must not be
-/// empty.
+/// words, addresses or `ip:` ranges, `process:` programs, `app:` apps):
+/// those skip it and the rules after decide (Dart: `withoutSites`). An app
+/// this version can't read is ignored; with nothing left, `rule` as is.
 pub fn without_sites(rule: &str, sites: &[String]) -> String {
     let not: Vec<String> = sites
         .iter()
-        .map(|s| {
+        .filter_map(|s| {
             let (m, v) = exclude_match(s);
-            match m {
+            Some(match m {
                 RuleMatch::Domain => format!("(DOMAIN-SUFFIX,{v})"),
                 RuleMatch::Exact => format!("(DOMAIN,{v})"),
                 RuleMatch::Keyword => format!("(DOMAIN-KEYWORD,{v})"),
@@ -149,10 +152,14 @@ pub fn without_sites(rule: &str, sites: &[String]) -> String {
                     };
                     format!("({},{cidr},no-resolve)", ip_cidr_type(&v))
                 }
-            }
+                // Brackets in a name would end the `NOT` early.
+                RuleMatch::App if v.contains(['(', ')']) => return None,
+                RuleMatch::App => format!("({})", AppMatcher::parse(&v)?.condition()),
+            })
         })
         .collect();
     let skip = match not.as_slice() {
+        [] => return rule.to_owned(),
         [one] => format!("(NOT,({one}))"),
         _ => format!("(NOT,((OR,({}))))", not.join(",")),
     };
