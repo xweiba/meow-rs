@@ -323,6 +323,8 @@ async fn relay_flow(tunnel: &Tunnel, spec: FlowSpec) -> Result<(), String> {
         in_name,
         last_activity,
     } = spec;
+    // Android: noted for the owning-app lookup (see `handle_tcp_flow`).
+    meow_common::note_tun_flow(Network::Udp, src, dst);
     let mut metadata = Metadata {
         network: Network::Udp,
         conn_type: ConnType::Tun,

@@ -3,20 +3,25 @@
 //! The rule engine calls [`find_process`] for PROCESS-NAME / PROCESS-PATH /
 //! UID rules. It receives the connection's local (client-side) address and
 //! returns the owning process, if any. Returns `None` on platforms that are
-//! not yet supported (everything except Linux, macOS and Windows).
+//! not yet supported (everything except Linux, macOS, Windows and Android).
+//!
+//! Android asks the host app ([`crate::app_owner`]): the process is the
+//! owning app's package name, for flows the TUN listener noted
+//! ([`note_tun_flow`]).
 
 use crate::network::Network;
 use std::net::SocketAddr;
 
 /// `true` on platforms with a real [`find_process`] implementation
-/// (Linux / macOS / Windows); `false` where it is a stub that always
+/// (Linux / macOS / Windows / Android); `false` where it is a stub that always
 /// returns `None`. Rule types use this to gate `should_find_process`
 /// demands and `never_matches` deadness — keep the cfg set in sync with
 /// the `platform` modules below when porting to a new OS.
 pub const PROCESS_LOOKUP_SUPPORTED: bool = cfg!(any(
     target_os = "linux",
     target_os = "macos",
-    target_os = "windows"
+    target_os = "windows",
+    target_os = "android"
 ));
 
 #[derive(Debug, Clone, Default)]
@@ -53,6 +58,18 @@ pub async fn find_process_async(network: Network, local_addr: SocketAddr) -> Opt
             None
         }
     }
+}
+
+/// A new connection from the VPN's TUN: `local` (the app's socket
+/// address) → `remote` (where it connected, before any fake-IP rewrite).
+/// Android needs both ends to tell the owner later; a no-op elsewhere
+/// (and on Android before the host installed its lookup).
+#[inline]
+pub fn note_tun_flow(network: Network, local: SocketAddr, remote: SocketAddr) {
+    #[cfg(target_os = "android")]
+    crate::app_owner::note_flow(network, local, remote);
+    #[cfg(not(target_os = "android"))]
+    let _ = (network, local, remote);
 }
 
 /// Test hook for **dependent** crates' test binaries: they build this
@@ -494,7 +511,21 @@ mod platform {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "android")]
+mod platform {
+    use super::{Network, ProcessInfo, SocketAddr};
+
+    pub fn find_process(network: Network, local: SocketAddr) -> Option<ProcessInfo> {
+        crate::app_owner::find(network, local)
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+)))]
 mod platform {
     use super::{Network, ProcessInfo, SocketAddr};
 

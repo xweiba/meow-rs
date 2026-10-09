@@ -29,6 +29,9 @@ pub mod metadata;
 pub mod network;
 pub mod outbound_iface;
 pub mod process_lookup;
+// Android: the host app tells which app owns a VPN connection.
+#[cfg(any(target_os = "android", test))]
+pub mod app_owner;
 pub mod replay_window;
 pub mod rule;
 pub mod sniffer;
@@ -57,7 +60,7 @@ pub use outbound_iface::{
     install_outbound_interface, outbound_interface, set_rebind_hook, OutboundIfaceGuard,
 };
 pub use process_lookup::{
-    disable_socket_table_cache, find_process, find_process_async, ProcessInfo,
+    disable_socket_table_cache, find_process, find_process_async, note_tun_flow, ProcessInfo,
 };
 pub use replay_window::ReplayWindow;
 pub use rule::{Rule, RuleMatchHelper, RuleType, TargetCheck, TargetProbe};

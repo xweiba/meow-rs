@@ -1075,6 +1075,9 @@ async fn handle_tcp_flow(
     dst: SocketAddr, // original destination
     in_name: &str,
 ) {
+    // Android: the owning app is asked with both ends, before the fake-IP
+    // rewrite changes `dst` (a no-op elsewhere).
+    meow_common::note_tun_flow(Network::Tcp, src, dst);
     let metadata = Metadata {
         network: Network::Tcp,
         conn_type: ConnType::Tun,

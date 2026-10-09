@@ -4,7 +4,9 @@
 //! - `start(config, home, fd, vpnService)`: runs the core on a thread of its
 //!   own over the VPN's TUN fd; every socket the core opens goes through
 //!   `vpnService.protect(fd)` first so it bypasses the VPN. Returns null
-//!   when the core came up, else the reason.
+//!   when the core came up, else the reason. The same service answers
+//!   which app owns a connection (`ownerUid` / `packageOf`, Android 10+),
+//!   so `PROCESS-NAME,<package>` rules work.
 //! - `stop()`, `running()`.
 
 // The config builder's C ABI, linked in so this library exports it too.
@@ -103,10 +105,12 @@ pub fn running() -> bool {
 
 #[cfg(target_os = "android")]
 mod android {
+    use std::net::SocketAddr;
     use std::os::fd::RawFd;
     use std::sync::Arc;
 
-    use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
+    use jni::objects::{GlobalRef, JClass, JMethodID, JObject, JString, JValue};
+    use jni::signature::{Primitive, ReturnType};
     use jni::sys::{jboolean, jint, jstring, JNI_FALSE, JNI_TRUE};
     use jni::{JNIEnv, JavaVM};
 
@@ -136,6 +140,117 @@ mod android {
         }
     }
 
+    /// Which app owns a connection, asked from the VPN service (Kotlin
+    /// `PaoPaoVpnService.ownerUid` / `packageOf`) on the core's
+    /// blocking-pool threads. Method IDs are looked up once at start; any
+    /// Java exception or JNI failure counts as "unknown".
+    struct VpnAppOwners {
+        vm: JavaVM,
+        service: GlobalRef,
+        owner_uid: JMethodID,
+        package_of: JMethodID,
+    }
+
+    impl VpnAppOwners {
+        fn new(env: &mut JNIEnv<'_>, vm: JavaVM, service: GlobalRef) -> Option<Self> {
+            let class = env.get_object_class(service.as_obj()).ok()?;
+            let class = env.auto_local(class);
+            let owner_uid = env.get_method_id(
+                &*class,
+                "ownerUid",
+                "(ILjava/lang/String;ILjava/lang/String;I)I",
+            );
+            let package_of = env.get_method_id(&*class, "packageOf", "(I)Ljava/lang/String;");
+            match (owner_uid, package_of) {
+                (Ok(owner_uid), Ok(package_of)) => Some(Self {
+                    vm,
+                    service,
+                    owner_uid,
+                    package_of,
+                }),
+                _ => {
+                    // An older service without the methods: no lookup.
+                    let _ = env.exception_clear();
+                    None
+                }
+            }
+        }
+
+        /// Runs `f` on this thread's JVM env inside a local frame (core
+        /// threads stay attached, so their local refs must not pile up);
+        /// a pending exception is cleared and gives `None`.
+        fn call<T>(&self, f: impl FnOnce(&mut JNIEnv<'_>) -> jni::errors::Result<T>) -> Option<T> {
+            let mut env = self.vm.attach_current_thread_permanently().ok()?;
+            let r = env.with_local_frame(8, |env| f(env));
+            if env.exception_check().unwrap_or(true) {
+                let _ = env.exception_clear();
+                return None;
+            }
+            r.ok()
+        }
+    }
+
+    impl meow_common::app_owner::AppOwnerLookup for VpnAppOwners {
+        fn owner_uid(
+            &self,
+            network: meow_common::Network,
+            local: SocketAddr,
+            remote: SocketAddr,
+        ) -> Option<u32> {
+            // IPPROTO_TCP / IPPROTO_UDP, as `getConnectionOwnerUid` takes.
+            let protocol = match network {
+                meow_common::Network::Tcp => 6,
+                meow_common::Network::Udp => 17,
+            };
+            let uid = self.call(|env| {
+                let src = env.new_string(local.ip().to_string())?;
+                let dst = env.new_string(remote.ip().to_string())?;
+                let args = [
+                    JValue::Int(protocol).as_jni(),
+                    JValue::Object(&src).as_jni(),
+                    JValue::Int(i32::from(local.port())).as_jni(),
+                    JValue::Object(&dst).as_jni(),
+                    JValue::Int(i32::from(remote.port())).as_jni(),
+                ];
+                // SAFETY: the method ID came from this object's class with
+                // this exact signature; the args match it.
+                unsafe {
+                    env.call_method_unchecked(
+                        self.service.as_obj(),
+                        self.owner_uid,
+                        ReturnType::Primitive(Primitive::Int),
+                        &args,
+                    )
+                }?
+                .i()
+            })?;
+            // -1 (Process.INVALID_UID): unknown.
+            u32::try_from(uid).ok()
+        }
+
+        fn package_of(&self, uid: u32) -> Option<String> {
+            let uid = i32::try_from(uid).ok()?;
+            self.call(|env| {
+                // SAFETY: as in `owner_uid`.
+                let obj = unsafe {
+                    env.call_method_unchecked(
+                        self.service.as_obj(),
+                        self.package_of,
+                        ReturnType::Object,
+                        &[JValue::Int(uid).as_jni()],
+                    )
+                }?
+                .l()?;
+                if obj.is_null() {
+                    return Ok(None);
+                }
+                let s: String = env.get_string(&JString::from(obj))?.into();
+                Ok(Some(s))
+            })
+            .flatten()
+        }
+    }
+
     fn text(env: &mut JNIEnv<'_>, s: &JString<'_>) -> String {
         env.get_string(s).map(Into::into).unwrap_or_default()
     }
@@ -154,6 +269,18 @@ mod android {
         if !service.is_null() {
             match (env.get_java_vm(), env.new_global_ref(&service)) {
                 (Ok(vm), Ok(service)) => {
+                    // A second VM handle and ref for the owner lookup.
+                    match (env.get_java_vm(), env.new_global_ref(&service)) {
+                        (Ok(owner_vm), Ok(owner_ref)) => {
+                            match VpnAppOwners::new(&mut env, owner_vm, owner_ref) {
+                                Some(o) => {
+                                    meow_common::app_owner::set_app_owner_lookup(Arc::new(o))
+                                }
+                                None => meow_common::app_owner::clear_app_owner_lookup(),
+                            }
+                        }
+                        _ => meow_common::app_owner::clear_app_owner_lookup(),
+                    }
                     meow_common::set_socket_protector(std::sync::Arc::new(VpnProtector {
                         vm,
                         service,
@@ -182,6 +309,7 @@ mod android {
     ) {
         super::stop();
         meow_common::clear_socket_protector();
+        meow_common::app_owner::clear_app_owner_lookup();
     }
 
     #[no_mangle]

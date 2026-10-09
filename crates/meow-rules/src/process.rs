@@ -59,7 +59,12 @@ impl Rule for ProcessRule {
 mod tests {
     use super::*;
 
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android"
+    ))]
     #[test]
     fn process_rule_live_and_demands_lookup_supported() {
         let r = ProcessRule::new("curl", "DIRECT");
@@ -67,7 +72,12 @@ mod tests {
         assert!(r.should_find_process());
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android"
+    )))]
     #[test]
     fn process_rule_dead_and_demands_nothing_unsupported() {
         let r = ProcessRule::new("curl", "DIRECT");

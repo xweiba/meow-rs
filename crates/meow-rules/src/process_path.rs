@@ -174,7 +174,12 @@ mod tests {
         assert!(!r.match_metadata(&meta_path(""), &helper()));
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android"
+    ))]
     #[test]
     fn process_path_live_and_demands_lookup_supported() {
         let r = ProcessPathRule::new("curl", "DIRECT").unwrap();
@@ -182,7 +187,12 @@ mod tests {
         assert!(r.should_find_process());
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android"
+    )))]
     #[test]
     fn process_path_dead_and_demands_nothing_unsupported() {
         let r = ProcessPathRule::new("curl", "DIRECT").unwrap();
