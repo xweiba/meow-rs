@@ -1,6 +1,8 @@
 //! The build input: everything config generation reads, as one JSON
 //! document (Dart: `ProxyController.configInput()`).
 
+use std::fmt;
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -40,8 +42,8 @@ impl AutoStrategy {
     }
 }
 
-/// The route API's access (`runtime.route`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The route API's access (`runtime.route`). `Debug` hides the key.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct RouteAccess {
     /// The key clients send.
     pub key: String,
@@ -50,8 +52,8 @@ pub struct RouteAccess {
 }
 
 /// Inputs from the running host rather than the user (Dart
-/// `RuntimeOptions.toJson`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `RuntimeOptions.toJson`). `Debug` hides the API secret and the route key.
+#[derive(Clone, PartialEq, Eq)]
 pub struct RuntimeOptions {
     /// The core's API port.
     pub controller_port: i64,
@@ -142,8 +144,9 @@ impl RuntimeOptions {
 /// Everything a build reads (Dart `ProxyController.configInput()`).
 ///
 /// Settings come as saved; [`BuildInput::effective`] applies the network
-/// and `vpn_only`.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// and `vpn_only`. `Debug` shows the SSH secrets' keys only (and the
+/// runtime without its secrets).
+#[derive(Clone, Default, PartialEq)]
 pub struct BuildInput {
     /// In the user's priority order.
     pub subscriptions: Vec<Subscription>,
@@ -157,6 +160,9 @@ pub struct BuildInput {
     pub vpn_only: bool,
     /// Current time, Unix milliseconds.
     pub now: i64,
+    /// The local time zone's offset from UTC in minutes (rewrite modules'
+    /// cron scripts run on local time); 0 when missing.
+    pub utc_offset: i64,
     /// Measured exit country by `ip:port` / `[v6]:port`.
     pub exits: IndexMap<String, String>,
     /// Server domains (lowercase) resolved to an IP.
@@ -190,6 +196,7 @@ impl BuildInput {
             ipv6: bool_of(v.get("ipv6"), false),
             vpn_only: bool_of(v.get("vpnOnly"), false),
             now: int_of(v.get("now")).unwrap_or(0),
+            utc_offset: int_of(v.get("utcOffset")).unwrap_or(0),
             exits: strings_of(v.get("exits")),
             resolved: strings_of(v.get("resolved")),
             strategy: v
@@ -237,6 +244,57 @@ impl BuildInput {
         }
     }
 }
+
+impl fmt::Debug for RouteAccess {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RouteAccess")
+            .field("key", &REDACTED)
+            .field("lan", &self.lan)
+            .finish()
+    }
+}
+
+impl fmt::Debug for RuntimeOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RuntimeOptions")
+            .field("controller_port", &self.controller_port)
+            .field("secret", &REDACTED)
+            .field("cache_file", &self.cache_file)
+            .field("speed_test_port", &self.speed_test_port)
+            .field("log_level", &self.log_level)
+            .field("ipv6", &self.ipv6)
+            .field("route", &self.route)
+            .field("route_port", &self.route_port)
+            .field("mitm_port", &self.mitm_port)
+            .field("find_process", &self.find_process)
+            .finish()
+    }
+}
+
+impl fmt::Debug for BuildInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let secrets: Vec<(&String, &str)> =
+            self.ssh_secrets.keys().map(|k| (k, REDACTED)).collect();
+        f.debug_struct("BuildInput")
+            .field("subscriptions", &self.subscriptions)
+            .field("settings", &self.settings)
+            .field("network", &self.network)
+            .field("ipv6", &self.ipv6)
+            .field("vpn_only", &self.vpn_only)
+            .field("now", &self.now)
+            .field("utc_offset", &self.utc_offset)
+            .field("exits", &self.exits)
+            .field("resolved", &self.resolved)
+            .field("strategy", &self.strategy)
+            .field("modules", &self.modules)
+            .field("ssh_secrets", &secrets)
+            .field("runtime", &self.runtime)
+            .finish()
+    }
+}
+
+/// What `Debug` shows instead of a secret.
+const REDACTED: &str = "<redacted>";
 
 impl<'de> Deserialize<'de> for BuildInput {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {

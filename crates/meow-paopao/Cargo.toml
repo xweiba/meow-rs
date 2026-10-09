@@ -3,7 +3,7 @@ name = "meow-paopao"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "PaoPao config generation: subscription parsing and the settings model (pure functions, no IO)."
+description = "PaoPao config generation: subscriptions to the meow config (pure functions, no IO)."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -11,6 +11,14 @@ publish = false
 
 [lib]
 name = "meow_paopao"
+# rlib for meow-mobile (Android's core library) and the box; cdylib for the
+# desktop app's `meow_paopao` library beside the core binary.
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = ["ffi"]
+# The C ABI (`paopao_parse` / `paopao_build` / `paopao_free`) for dart:ffi.
+ffi = []
 
 [dependencies]
 serde = { workspace = true }

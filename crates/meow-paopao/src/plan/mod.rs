@@ -18,6 +18,7 @@ pub mod group_defaults;
 pub mod group_tree;
 mod input;
 pub mod policies;
+mod route;
 pub mod sub_rules;
 
 #[cfg(test)]
@@ -31,7 +32,8 @@ use crate::pool::{endpoint, is_usable_node, region_of, NodeGroup, Pool};
 
 pub use group_tree::{build_group_tree, GroupKind, GroupSpec, GroupTree, TreeInput};
 pub use input::{AutoStrategy, BuildInput, RouteAccess, RuntimeOptions};
-pub use policies::{policy_by_tag, Policy, POLICIES};
+pub use policies::{final_policy, policy_by_tag, Policy, POLICIES};
+pub use route::{route_catalog, RoutePolicy};
 pub use sub_rules::{
     merge_subscription_splits, ImportedGroup, ImportedSplit, MergeTargets, SubSplit,
 };
