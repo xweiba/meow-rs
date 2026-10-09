@@ -33,15 +33,61 @@
 //! [`TunListener::with_outbound_binding`]: super::TunListener::with_outbound_binding
 
 use std::io;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
-use tracing::info;
+use tracing::{debug, info};
+
+/// How often an auto-detected binding looks at the routing table again.
+const RECHECK: Duration = Duration::from_secs(2);
 
 /// One owner of the process-global outbound-interface binding; dropping it
 /// gives the binding up (the newest owner still alive takes over, or it is
 /// cleared when none is left).
+///
+/// PaoPao: an auto-detected binding follows the network — a monitor thread
+/// re-detects every [`RECHECK`] and moves the binding when another uplink
+/// took over (cable unplugged, Wi-Fi changed), after seeing the same new
+/// one twice (no flapping). An explicit `tun.outbound-interface` stays put.
 #[must_use = "dropping the binding gives it up immediately"]
 #[derive(Debug)]
-pub struct OutboundBinding(meow_common::OutboundIfaceGuard);
+pub struct OutboundBinding {
+    /// The only strong reference: dropping the binding gives it up at once
+    /// (the monitor holds a weak one and ends with it).
+    guard: Arc<Mutex<meow_common::OutboundIfaceGuard>>,
+}
+
+/// Re-detects until the binding is gone, rebinding it to a new default
+/// interface once that was seen on two checks in a row.
+fn monitor(guard: &Weak<Mutex<meow_common::OutboundIfaceGuard>>) {
+    let mut pending: Option<String> = None;
+    loop {
+        std::thread::sleep(RECHECK);
+        if guard.strong_count() == 0 {
+            break;
+        }
+        // No default route at all (offline a moment): keep the binding.
+        let Ok(found) = super::route::default_interface() else {
+            pending = None;
+            continue;
+        };
+        let Some(guard) = guard.upgrade() else { break };
+        let Ok(mut g) = guard.lock() else { break };
+        if g.interface() == found {
+            pending = None;
+            continue;
+        }
+        if pending.as_deref() != Some(found.as_str()) {
+            debug!("outbound interface: '{found}' now holds the default route; confirming");
+            pending = Some(found);
+            continue;
+        }
+        pending = None;
+        if let Err(e) = g.rebind(&found) {
+            debug!("outbound interface: could not move the binding to '{found}': {e}");
+        }
+    }
+}
 
 impl OutboundBinding {
     /// Install the binding for global route scope. `outbound_interface` is
@@ -84,12 +130,25 @@ impl OutboundBinding {
             "tun: global route scope — outbound sockets bound to '{iface}' \
              (experimental, #375)"
         );
-        Ok(Self(guard))
+        let guard = Arc::new(Mutex::new(guard));
+        if outbound_interface.is_none() {
+            let weak = Arc::downgrade(&guard);
+            let spawned = std::thread::Builder::new()
+                .name("outbound-iface".into())
+                .spawn(move || monitor(&weak));
+            if let Err(e) = spawned {
+                debug!("outbound interface: no monitor ({e}); the binding stays put");
+            }
+        }
+        Ok(Self { guard })
     }
 
-    /// The interface this binding installed.
-    pub fn interface(&self) -> &str {
-        self.0.interface()
+    /// The interface this binding is on now.
+    pub fn interface(&self) -> String {
+        self.guard
+            .lock()
+            .map(|g| g.interface().to_owned())
+            .unwrap_or_default()
     }
 }
 

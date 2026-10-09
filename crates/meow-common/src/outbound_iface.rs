@@ -108,6 +108,57 @@ impl OutboundIfaceGuard {
     pub fn interface(&self) -> &str {
         &self.iface
     }
+
+    /// PaoPao: this owner now binds to `name` instead (the network changed:
+    /// another uplink took over). Its place among the owners is kept, so an
+    /// owner superseded meanwhile (a reload in flight) stays superseded and
+    /// the newer owner's binding is untouched. When this owner is the one
+    /// in effect and the interface changed, the hook set with
+    /// [`set_rebind_hook`] runs (to close what is bound to the old one).
+    /// Errors (nothing changed) when `name` does not exist.
+    pub fn rebind(&mut self, name: &str) -> io::Result<()> {
+        if name == &*self.iface {
+            return Ok(());
+        }
+        let index = interface_index(name)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("outbound interface '{name}' does not exist"),
+            )
+        })?;
+        let iface: Arc<str> = Arc::from(name);
+        let mut owners = OWNERS.write();
+        let Some(pos) = owners.iter().position(|o| o.id == self.id) else {
+            return Ok(());
+        };
+        owners[pos].iface = Arc::clone(&iface);
+        owners[pos].index = index;
+        let in_effect = pos + 1 == owners.len();
+        drop(owners);
+        let prev = std::mem::replace(&mut self.iface, iface);
+        if in_effect {
+            tracing::info!(
+                "outbound sockets now bound to interface '{name}' ({MECHANISM}; was '{prev}')"
+            );
+            let hook = REBIND_HOOK.read().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What runs after the interface in effect changed under a running
+/// configuration ([`OutboundIfaceGuard::rebind`]): the API layer closes the
+/// connections and pooled sessions bound to the old one.
+type RebindHook = Arc<dyn Fn() + Send + Sync>;
+static REBIND_HOOK: RwLock<Option<RebindHook>> = RwLock::new(None);
+
+/// PaoPao: sets the hook run when the interface in effect changes (one;
+/// a later call replaces it).
+pub fn set_rebind_hook(hook: impl Fn() + Send + Sync + 'static) {
+    *REBIND_HOOK.write() = Some(Arc::new(hook));
 }
 
 impl Drop for OutboundIfaceGuard {
@@ -615,6 +666,27 @@ mod tests {
         assert_eq!(live_owners(), 1);
         drop(a);
         assert!(outbound_interface().is_none());
+
+        // PaoPao: rebinding in place. A missing interface changes nothing;
+        // the same one is a no-op (no hook: nothing to close); the owner
+        // keeps its place among the others.
+        let hooked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = Arc::clone(&hooked);
+        set_rebind_hook(move || {
+            h.fetch_add(1, Ordering::Relaxed);
+        });
+        let mut a = lo();
+        let b = lo();
+        assert!(a.rebind("no-such-iface-zz9").is_err());
+        assert_eq!(a.interface(), LO);
+        a.rebind(LO).expect("same interface");
+        assert_eq!(current_owner(), Some(b.id), "a stays superseded");
+        assert_eq!(hooked.load(Ordering::Relaxed), 0);
+        drop(b);
+        assert_eq!(current_owner(), Some(a.id));
+        drop(a);
+        assert!(outbound_interface().is_none());
+        *REBIND_HOOK.write() = None;
     }
 
     /// The dial chokepoints behind `connect_tcp` / `bind_udp`, driven with

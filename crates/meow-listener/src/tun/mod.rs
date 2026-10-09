@@ -107,6 +107,10 @@ const TUN_FIRST_READ: usize = 256;
 use route::RouteGuard;
 
 pub use outbound_binding::OutboundBinding;
+/// PaoPao: the uplinks holding a default route, best first (what an
+/// auto-detected outbound binding chooses among), for the API.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub use route::{default_interfaces, IfaceKind};
 
 /// Process-global serialization point for lwIP generations (issue #514).
 /// `NetStack::new` must not run while a previous core is still tearing

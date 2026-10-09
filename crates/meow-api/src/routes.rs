@@ -192,6 +192,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let api = Router::new()
         .route("/", get(hello))
         .route("/version", get(version))
+        .route("/network/outbound", get(network_outbound))
         .route("/proxies", get(get_proxies))
         .route(
             "/proxies/{name}",
@@ -319,6 +320,42 @@ async fn hello() -> Json<HelloResponse> {
 struct VersionResponse {
     version: String,
     meta: bool,
+}
+
+/// PaoPao: where direct traffic leaves. `interface`: the binding in
+/// effect (virtual adapter on, global route scope), else null (the system's
+/// routing decides); `uplinks`: the interfaces holding an IPv4 default
+/// route, best first, each with its kind (`physical` / `unknown` /
+/// `virtual`) — the first is what the system and an automatic binding use.
+async fn network_outbound() -> Json<serde_json::Value> {
+    #[cfg(all(
+        feature = "listener-tun",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    let uplinks: Vec<serde_json::Value> = tokio::task::spawn_blocking(|| {
+        meow_listener::tun::default_interfaces().unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(name, kind, metric)| {
+        let kind = match kind {
+            meow_listener::tun::IfaceKind::Physical => "physical",
+            meow_listener::tun::IfaceKind::Unknown => "unknown",
+            meow_listener::tun::IfaceKind::Virtual => "virtual",
+        };
+        serde_json::json!({"name": name, "kind": kind, "metric": metric})
+    })
+    .collect();
+    #[cfg(not(all(
+        feature = "listener-tun",
+        not(any(target_os = "android", target_os = "ios"))
+    )))]
+    let uplinks: Vec<serde_json::Value> = Vec::new();
+    Json(serde_json::json!({
+        "interface": meow_common::outbound_interface().map(|i| i.to_string()),
+        "uplinks": uplinks,
+    }))
 }
 
 async fn version() -> Json<VersionResponse> {
@@ -2816,7 +2853,7 @@ async fn swap_config_and_reconcile_tun(
 /// to loop on. Not reached when the pre-install itself failed (the
 /// listener's own install then binds only what it dials) or on
 /// `Some(X) → None` (global → off removes the routes that could loop).
-fn outbound_binding_adopted(
+pub(crate) fn outbound_binding_adopted(
     state: &AppState,
     interface_changed: bool,
     tracked_tcp: TrackedTcp,

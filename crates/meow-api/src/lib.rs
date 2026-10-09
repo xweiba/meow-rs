@@ -159,7 +159,7 @@ pub fn preinstall_global_route_binding(raw: &RawConfig) -> PreinstalledBinding {
     let previous = meow_common::outbound_interface();
     match meow_listener::OutboundBinding::install(iface.as_deref()) {
         Ok(binding) => PreinstalledBinding {
-            interface_changed: previous.as_deref() != Some(binding.interface()),
+            interface_changed: previous.as_deref() != Some(binding.interface().as_str()),
             binding: Some(binding),
         },
         Err(e) => {
@@ -355,6 +355,16 @@ impl ApiServer {
             traffic_feed: Default::default(),
             dns_server: Arc::clone(&self.dns_server),
             provider_dialer_registry: self.provider_dialer_registry.clone(),
+        });
+
+        // PaoPao: the uplink changed under a running configuration (an
+        // auto-detected binding moved): what is bound to the old one is
+        // closed and redials on the new one.
+        let weak = Arc::downgrade(&state);
+        meow_common::set_rebind_hook(move || {
+            if let Some(state) = weak.upgrade() {
+                routes::outbound_binding_adopted(&state, true, meow_tunnel::TrackedTcp::Cancel);
+            }
         });
 
         let app = routes::create_router(state);

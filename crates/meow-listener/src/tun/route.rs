@@ -50,41 +50,120 @@ impl Drop for RouteGuard {
     }
 }
 
-/// Detect the physical interface carrying the IPv4 default route, for
-/// global route scope's outbound-socket binding (#375).
+/// What an interface is, as far as picking the outbound one goes: a
+/// physical uplink (Wi-Fi, Ethernet) is preferred, an unknown one next, a
+/// known virtual one (another VPN's tunnel, a VM / container bridge,
+/// Tailscale, WireGuard …) last — any of them may hold the default route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IfaceKind {
+    Physical,
+    Unknown,
+    Virtual,
+}
+
+/// Name prefixes of virtual interfaces on every platform (lower case).
+const VIRTUAL_PREFIXES: &[&str] = &[
+    "utun", "ipsec", "ppp", "tun", "tap", "wg", "tailscale", "zt", "docker", "br-", "veth",
+    "virbr", "vnet", "vmnet", "vboxnet", "lxc", "lxd", "cni", "flannel", "kube", "cali",
+    "bridge", "feth", "gif", "stf", "awdl", "llw", "anpi", "ap", "meow", "clash", "mihomo",
+];
+
+/// Words in Windows interface aliases that mark virtual adapters.
+const VIRTUAL_WORDS: &[&str] = &[
+    "vethernet", "hyper-v", "vmware", "virtualbox", "tailscale", "wireguard", "zerotier",
+    "openvpn", "tap-", "wintun", "clash", "mihomo", "meta", "loopback", "vpn",
+];
+
+/// [`IfaceKind`] from the name alone (pure; see [`interface_kind`] for the
+/// runtime check that also asks the OS).
+pub fn kind_by_name(name: &str) -> IfaceKind {
+    let lower = name.to_ascii_lowercase();
+    if VIRTUAL_WORDS.iter().any(|w| lower.contains(w))
+        || VIRTUAL_PREFIXES.iter().any(|p| {
+            lower.starts_with(p)
+                // `ap1` (Apple's AP), not `apple…`: a prefix ending in a
+                // letter must be followed by a digit or a separator.
+                && lower[p.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_ascii_alphabetic() || p.ends_with('-'))
+        })
+    {
+        return IfaceKind::Virtual;
+    }
+    // macOS / BSD Ethernet and Wi-Fi are `en*`; Linux's predictable names.
+    if lower.starts_with("en") || lower.starts_with("eth") || lower.starts_with("wl") {
+        return IfaceKind::Physical;
+    }
+    if lower.starts_with("wi-fi") || lower.starts_with("wlan") || lower.starts_with("ethernet") {
+        return IfaceKind::Physical;
+    }
+    IfaceKind::Unknown
+}
+
+/// [`IfaceKind`] of a live interface: the name first, then (Linux) whether
+/// it has a device behind it (`/sys/class/net/<if>/device`).
+pub fn interface_kind(name: &str) -> IfaceKind {
+    let by_name = kind_by_name(name);
+    #[cfg(target_os = "linux")]
+    {
+        if by_name != IfaceKind::Virtual
+            && std::path::Path::new("/sys/class/net").join(name).join("device").exists()
+        {
+            return IfaceKind::Physical;
+        }
+    }
+    by_name
+}
+
+/// Detect the interface to bind outbound sockets to for global route scope
+/// (#375): among the interfaces carrying an IPv4 default route, a physical
+/// one before an unknown one before a virtual one, then the best metric
+/// (see [`pick_default_interface`]).
 ///
-/// - Linux reads `/proc/net/route` and returns the interface of the first
-///   UP `0.0.0.0/0` entry.
-/// - macOS and Windows list the routing table (`route_manager`) and return
-///   the interface of the best `0.0.0.0/0` route — see
-///   [`pick_default_interface`]. On Windows the name is the interface
-///   alias (`Ethernet`, `Wi-Fi`, …).
+/// - Linux reads every UP `0.0.0.0/0` entry of `/proc/net/route` (with its
+///   metric).
+/// - macOS and Windows list the routing table (`route_manager`). On
+///   Windows the name is the interface alias (`Ethernet`, `Wi-Fi`, …).
 ///
 /// The TUN's own split defaults are never the answer, even when they are
 /// installed: a config reload detects the new configuration's interface
 /// while the old global-scope listener's routes still exist (issue #695),
 /// and the kernel lists `0.0.0.0/1` *before* the real default — so the
 /// mask must be `/0`, not just the destination.
-pub(super) fn default_interface() -> std::io::Result<String> {
+pub fn default_interface() -> std::io::Result<String> {
+    pick_default_interface(default_candidates()?, interface_kind).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no IPv4 default route found in the routing table",
+        )
+    })
+}
+
+/// The interfaces holding an IPv4 default route, with their kind and
+/// metric, best first (what [`default_interface`] chooses among).
+pub fn default_interfaces() -> std::io::Result<Vec<(String, IfaceKind, u32)>> {
+    let mut all: Vec<(String, IfaceKind, u32)> = default_candidates()?
+        .into_iter()
+        .filter(is_default)
+        .filter_map(|r| r.if_name.map(|n| (interface_kind(&n), r.metric, n)))
+        .map(|(k, m, n)| (n, k, m))
+        .collect();
+    all.sort_by_key(|(_, k, m)| (*k, *m));
+    all.dedup_by(|a, b| a.0 == b.0);
+    Ok(all)
+}
+
+fn default_candidates() -> std::io::Result<Vec<DefaultCandidate>> {
     #[cfg(target_os = "linux")]
     {
         let table = std::fs::read_to_string("/proc/net/route")?;
-        parse_default_interface(&table).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no IPv4 default route found in /proc/net/route",
-            )
-        })
+        Ok(parse_default_candidates(&table))
     }
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let routes = RouteManager::new()?.list()?;
-        pick_default_interface(routes.iter().map(default_candidate)).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no IPv4 default route found in the routing table",
-            )
-        })
+        Ok(routes.iter().map(default_candidate).collect())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
@@ -97,10 +176,9 @@ pub(super) fn default_interface() -> std::io::Result<String> {
 }
 
 /// The fields of a routing-table entry that decide default-interface
-/// detection on macOS and Windows, lifted out of `route_manager::Route`
-/// (whose platform-specific accessors only exist on their own target) so
-/// the selection is unit-testable on every host.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+/// detection, lifted out of `route_manager::Route` (whose
+/// platform-specific accessors only exist on their own target) and
+/// `/proc/net/route` so the selection is unit-testable on every host.
 #[derive(Debug, Clone)]
 struct DefaultCandidate {
     destination: std::net::IpAddr,
@@ -110,7 +188,8 @@ struct DefaultCandidate {
     /// scoped to its interface — every non-primary interface has one.
     scoped: bool,
     /// Effective metric, lower wins. Windows: route metric + interface
-    /// metric. macOS has no metric; the table order decides.
+    /// metric; Linux: the route's metric. macOS has no metric; the table
+    /// order decides.
     metric: u32,
 }
 
@@ -140,49 +219,73 @@ fn default_candidate(route: &Route) -> DefaultCandidate {
     }
 }
 
-/// Pure selection behind [`default_interface`] on macOS and Windows: the
-/// interface of the unscoped IPv4 `0.0.0.0/0` route with the lowest
-/// metric, the first listed winning a tie. Requiring prefix `/0` skips the
+/// An unscoped IPv4 `0.0.0.0/0` route. Requiring prefix `/0` skips the
 /// TUN's own `0.0.0.0/1` split route, which shares the destination.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
-fn pick_default_interface(routes: impl IntoIterator<Item = DefaultCandidate>) -> Option<String> {
+fn is_default(r: &DefaultCandidate) -> bool {
+    r.prefix == 0 && r.destination == std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED) && !r.scoped
+}
+
+/// Pure selection behind [`default_interface`]: among the unscoped IPv4
+/// `0.0.0.0/0` routes, the interface ranked best by `kind` (physical,
+/// unknown, virtual), then lowest metric, the first listed winning a tie.
+fn pick_default_interface(
+    routes: impl IntoIterator<Item = DefaultCandidate>,
+    kind: impl Fn(&str) -> IfaceKind,
+) -> Option<String> {
     routes
         .into_iter()
-        .filter(|r| {
-            r.prefix == 0
-                && r.destination == std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
-                && !r.scoped
-        })
-        .filter_map(|r| r.if_name.map(|name| (r.metric, name)))
-        .min_by_key(|(metric, _)| *metric)
+        .filter(is_default)
+        .filter_map(|r| r.if_name.map(|name| ((kind(&name), r.metric), name)))
+        .min_by_key(|(rank, _)| *rank)
         .map(|(_, name)| name)
 }
 
-/// Pure parser behind [`default_interface`], split out for unit testing on
-/// every host (hence `test` in the cfg — only Linux uses it at runtime).
-/// `/proc/net/route` columns: Iface, Destination (hex LE),
-/// Gateway, Flags (hex; bit 0 = RTF_UP), RefCnt, Use, Metric, Mask, … A
-/// default route has destination `00000000`, mask `00000000` (a split
-/// `0.0.0.0/1` shares the destination but has mask `00000080`) and the UP
-/// flag set.
+/// `/proc/net/route` columns: Iface, Destination (hex LE), Gateway, Flags
+/// (hex; bit 0 = RTF_UP), RefCnt, Use, Metric, Mask, … A default route has
+/// destination `00000000`, mask `00000000` (a split `0.0.0.0/1` shares the
+/// destination but has mask `00000080`) and the UP flag set. Only those
+/// are returned.
 #[cfg(any(target_os = "linux", test))]
-fn parse_default_interface(table: &str) -> Option<String> {
+fn parse_default_candidates(table: &str) -> Vec<DefaultCandidate> {
+    let mut out = Vec::new();
     for line in table.lines().skip(1) {
         let cols: Vec<&str> = line.split_whitespace().collect();
-        let [iface, dest, _gateway, flags, _refcnt, _use, _metric, mask, ..] = cols[..] else {
+        let [iface, dest, _gateway, flags, _refcnt, _use, metric, mask, ..] = cols[..] else {
             continue;
         };
         let up = u32::from_str_radix(flags, 16).is_ok_and(|f| f & 0x1 != 0);
         if dest == "00000000" && mask == "00000000" && up {
-            return Some(iface.to_string());
+            out.push(DefaultCandidate {
+                destination: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                prefix: 0,
+                if_name: Some(iface.to_string()),
+                scoped: false,
+                metric: metric.parse().unwrap_or(0),
+            });
         }
     }
-    None
+    out
+}
+
+/// [`default_interface`] over a `/proc/net/route` table with names alone
+/// deciding the kind (unit tests).
+#[cfg(test)]
+fn parse_default_interface(table: &str) -> Option<String> {
+    pick_default_interface(parse_default_candidates(table), kind_by_name)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_default_interface, pick_default_interface, DefaultCandidate};
+    use super::{
+        kind_by_name, parse_default_interface, pick_default_interface, DefaultCandidate,
+        IfaceKind,
+    };
+
+    fn pick(
+        routes: impl IntoIterator<Item = DefaultCandidate>,
+    ) -> Option<String> {
+        pick_default_interface(routes, kind_by_name)
+    }
 
     fn candidate(net: &str, if_name: &str, scoped: bool, metric: u32) -> DefaultCandidate {
         let net: ipnet::IpNet = net.parse().unwrap();
@@ -207,7 +310,7 @@ mod tests {
             candidate("192.168.0.0/24", "en1", false, 0),
             candidate("::/0", "utun0", false, 0),
         ];
-        assert_eq!(pick_default_interface(table).as_deref(), Some("en1"));
+        assert_eq!(pick(table).as_deref(), Some("en1"));
     }
 
     /// Windows ranks defaults by route metric + interface metric; with
@@ -220,13 +323,13 @@ mod tests {
             candidate("0.0.0.0/0", "Ethernet", false, 25),
             candidate("::/0", "Ethernet 2", false, 5),
         ];
-        assert_eq!(pick_default_interface(table).as_deref(), Some("Ethernet"));
+        assert_eq!(pick(table).as_deref(), Some("Ethernet"));
         // A tie keeps table order.
         let tie = [
             candidate("0.0.0.0/0", "Ethernet", false, 25),
             candidate("0.0.0.0/0", "Wi-Fi", false, 25),
         ];
-        assert_eq!(pick_default_interface(tie).as_deref(), Some("Ethernet"));
+        assert_eq!(pick(tie).as_deref(), Some("Ethernet"));
     }
 
     /// Issue #695, on the route-table platforms: a reload detects the
@@ -243,18 +346,68 @@ mod tests {
             candidate("0.0.0.0/0", "en0", false, 10),
         ];
         assert_eq!(
-            pick_default_interface(table.clone()).as_deref(),
+            pick(table.clone()).as_deref(),
             Some("en0")
         );
         // Only the split routes left (no real default): nothing to bind to.
         let only_split = table.into_iter().filter(|r| r.prefix == 1);
-        assert_eq!(pick_default_interface(only_split), None);
+        assert_eq!(pick(only_split), None);
         // A default whose interface has no resolvable name is unusable.
         let nameless = DefaultCandidate {
             if_name: None,
             ..candidate("0.0.0.0/0", "x", false, 0)
         };
-        assert_eq!(pick_default_interface([nameless]), None);
+        assert_eq!(pick([nameless]), None);
+    }
+
+    /// Another VPN / a VM bridge holding a better default than the
+    /// physical uplink: the physical one is still chosen (users' "直连走错
+    /// 网卡"), on every platform.
+    #[test]
+    fn a_physical_uplink_wins_over_virtual_defaults() {
+        // macOS: another VPN's utun took the unscoped default.
+        let mac = [
+            candidate("0.0.0.0/0", "utun3", false, 0),
+            candidate("0.0.0.0/0", "en0", false, 0),
+        ];
+        assert_eq!(pick(mac).as_deref(), Some("en0"));
+        // Windows: the WSL / Hyper-V switch has a lower metric.
+        let win = [
+            candidate("0.0.0.0/0", "vEthernet (WSL)", false, 5),
+            candidate("0.0.0.0/0", "Wi-Fi", false, 35),
+        ];
+        assert_eq!(pick(win).as_deref(), Some("Wi-Fi"));
+        // Linux: WireGuard's default ahead of (and cheaper than) the NIC.
+        let linux = "\
+Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+wg0\t00000000\t00000000\t0001\t0\t0\t0\t00000000\t0\t0\t0
+enp3s0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
+wlan0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
+";
+        assert_eq!(parse_default_interface(linux).as_deref(), Some("enp3s0"));
+        // Only virtual ones: the best of them (better than nothing).
+        let only_vpn = [
+            candidate("0.0.0.0/0", "utun3", false, 0),
+            candidate("0.0.0.0/0", "tailscale0", false, 0),
+        ];
+        assert_eq!(pick(only_vpn).as_deref(), Some("utun3"));
+    }
+
+    #[test]
+    fn interface_kinds_by_name() {
+        for n in ["en0", "en7", "eth0", "enp3s0", "wlan0", "wlp2s0", "Wi-Fi", "Ethernet"] {
+            assert_eq!(kind_by_name(n), IfaceKind::Physical, "{n}");
+        }
+        for n in [
+            "utun3", "ipsec0", "ppp0", "tun0", "tap1", "wg0", "tailscale0", "zt5u4y", "docker0",
+            "br-1a2b", "veth9", "virbr0", "vmnet8", "vboxnet0", "bridge100", "awdl0", "llw0",
+            "anpi0", "ap1", "meow-tun", "vEthernet (WSL)", "VMware Network Adapter VMnet8",
+            "Tailscale", "OpenVPN TAP-Windows6",
+        ] {
+            assert_eq!(kind_by_name(n), IfaceKind::Virtual, "{n}");
+        }
+        assert_eq!(kind_by_name("lo0"), IfaceKind::Unknown);
+        assert_eq!(kind_by_name("apple0"), IfaceKind::Unknown);
     }
 
     /// The real routing table, unprivileged: listing routes needs no root.
