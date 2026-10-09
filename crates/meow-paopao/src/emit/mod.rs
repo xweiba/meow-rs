@@ -475,15 +475,19 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
     }
 }
 
-/// Every rule the core is (or would be) given, in the order it tries them
-/// (Dart: `ProxyController.effectiveRules`): the rules of a config built
-/// with no speed test, no route API and no MITM port, so neither `IN-NAME`
-/// / `IN-USER` lines nor the modules' MITM rules (only their own rules).
-pub fn effective_rules(input: &EmitInput<'_>) -> Vec<String> {
-    let plan = Plan::new(input);
-    let mods = plan.modules(None);
-    plan.rules(false, None, &mods.rules)
+/// The rules the core tries for the user's own traffic, in order (Dart:
+/// `ProxyController.effectiveRules`): `config`'s own `rules:` without the
+/// speed test's (`IN-NAME`) and the route API's (`IN-USER`). One source
+/// with the config (B28): Dart built them apart with no MITM port, so the
+/// rules page and the conflict check missed the modules' MITM rules.
+pub fn effective_rules(config: &Map<String, Value>) -> Vec<String> {
+    config
+        .get("rules")
+        .and_then(Value::as_array)
         .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
         .filter(|r| !r.starts_with("IN-USER,") && !r.starts_with("IN-NAME,"))
+        .map(str::to_owned)
         .collect()
 }

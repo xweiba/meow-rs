@@ -62,8 +62,7 @@ fn config_pool_and_tree_match_dart() {
 }
 
 /// The rule list beside the config: the config's rules without the route
-/// API's and the speed test's, and without the modules' MITM rules (Dart
-/// builds it with no MITM port).
+/// API's and the speed test's; the modules' MITM rules stay (B28).
 #[test]
 fn rules_follow_the_config() {
     for path in common::golden_files("build") {
@@ -76,11 +75,6 @@ fn rules_follow_the_config() {
             .iter()
             .filter_map(|r| r.as_str())
             .filter(|r| !r.starts_with("IN-USER,") && !r.starts_with("IN-NAME,"))
-            .filter(|r| !r.contains("paopao-mitm"))
-            .filter(|r| {
-                // The UDP refusals to opened hosts come with the MITM rules.
-                !(r.starts_with("AND,((NETWORK,UDP),(DOMAIN") && r.ends_with(",REJECT"))
-            })
             .collect();
         assert_eq!(out.rules, config_rules, "{}", path.display());
         assert!(out.rules.last().is_some_and(|r| r.starts_with("MATCH,")));

@@ -45,8 +45,8 @@ pub struct BuildOutput {
     /// The group tree the screen shows and the config runs
     /// ([`crate::plan::tree_for`]).
     pub tree: GroupTree,
-    /// The rules the core tries, in order, without the route API's and the
-    /// speed test's (Dart `ProxyController.effectiveRules`).
+    /// The config's rules, in order, without the route API's and the speed
+    /// test's ([`effective_rules`]).
     pub rules: Vec<String>,
     /// What the route API offers (Dart `ProxyController.routePolicies`).
     pub route_policies: Vec<RoutePolicy>,
@@ -124,7 +124,7 @@ pub fn build(input: &BuildInput) -> BuildOutput {
         utc_offset: input.utc_offset,
     };
     let config = build_clash_config(&emit).config;
-    let rules = effective_rules(&emit);
+    let rules = effective_rules(&config);
     BuildOutput {
         config,
         pool,

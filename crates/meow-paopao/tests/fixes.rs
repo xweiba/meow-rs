@@ -174,3 +174,32 @@ fn b30_route_policies_follow_the_config() {
     assert_eq!(ssh, ["ssh:c1"]);
     assert!(proxy_names(&out).iter().any(|n| n.starts_with("ssh:c1")));
 }
+
+/// B28: the rule list (rules page, conflict check) is the config's, MITM
+/// rules included. Dart built it with no MITM port: a module opening
+/// `api.example.com` sent it to `paopao-mitm` in the core, but the rules
+/// page did not show it.
+#[test]
+fn b28_rules_are_the_configs() {
+    let mut v = input(&json!([vless("US 01", "a")]), &json!({}), &json!({}));
+    v["modules"] = json!([{
+        "id": "m", "url": "https://m.example/a.sgmodule", "enabled": true,
+        "spec": {"name": "m", "scripts": [], "rewrites": [
+            {"pattern": "^https://api\\.example\\.com/x", "action": {"op": "reject", "kind": "plain"}}
+        ], "hostnames": ["api.example.com"], "rules": ["DOMAIN,ad.example.com,REJECT"]},
+    }]);
+    v["runtime"]["mitmPort"] = json!(3);
+    v["runtime"]["route"] = json!({"key": "k"});
+    let out = run(&v);
+    let mitm = "AND,((DOMAIN,api.example.com),(NOT,((IN-NAME,mitm-return)))),paopao-mitm";
+    assert!(out.rules.iter().any(|r| r == mitm), "{:?}", out.rules);
+    assert!(out
+        .rules
+        .iter()
+        .any(|r| r == "DOMAIN,ad.example.com,REJECT"));
+    let want: Vec<String> = config_rules(&out)
+        .into_iter()
+        .filter(|r| !r.starts_with("IN-USER,") && !r.starts_with("IN-NAME,"))
+        .collect();
+    assert_eq!(out.rules, want);
+}
