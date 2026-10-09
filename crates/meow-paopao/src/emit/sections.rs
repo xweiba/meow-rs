@@ -107,13 +107,15 @@ pub fn dns(ipv6: bool, tun: bool, direct_pick: impl Fn(&str) -> bool) -> Value {
 }
 
 /// The site from the first bytes (TLS SNI, HTTP Host) for programs that
-/// connect by address; the destination itself is kept. Apple push is
-/// skipped (its own long-lived TLS, nothing to learn).
+/// connect by address; a line is then asked for that name (D16). Apple
+/// push is skipped (its own long-lived TLS, nothing to learn).
 pub fn sniffer() -> Value {
     json!({
         "enable": true,
         "parse-pure-ip": true,
-        "override-destination": false,
+        // Lines get the site name, not an address the device resolved
+        // itself (possibly poisoned): the line resolves it where it is.
+        "override-destination": true,
         "sniff": {
             "TLS": { "ports": ["443", "8443"] },
             "HTTP": { "ports": ["80", "8080-8880"] },
