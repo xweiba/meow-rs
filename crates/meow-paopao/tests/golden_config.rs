@@ -13,12 +13,24 @@ fn config_pool_and_tree_match_dart() {
     assert!(!files.is_empty(), "no build goldens");
     let mut failures = Vec::new();
     let mut not_started = 0;
+    let update = common::updating();
     for path in &files {
-        let case = common::read_json(path);
+        let mut case = common::read_json(path);
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        let expected = &case["expected"];
         let input = BuildInput::from_json(&case["input"]);
         let out = build(&input).to_json();
+        if update {
+            // A case the controller did not start the core in keeps no config.
+            let e = &mut case["expected"];
+            if !e["config"].is_null() {
+                e["config"] = out["config"].clone();
+            }
+            e["pool"] = out["pool"].clone();
+            e["tree"] = out["tree"].clone();
+            common::write_json(path, &case);
+            continue;
+        }
+        let expected = &case["expected"];
         if expected["config"].is_null() {
             // The controller did not start the core: nothing to compare,
             // and its status must say so.

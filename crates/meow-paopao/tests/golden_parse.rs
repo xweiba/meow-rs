@@ -11,9 +11,10 @@ fn parse_goldens() {
     let files = common::golden_files("parse");
     assert!(!files.is_empty(), "no parse goldens");
     let mut failures = Vec::new();
+    let update = common::updating();
     for path in &files {
-        let case = common::read_json(path);
-        let name = case["name"].as_str().unwrap_or_default();
+        let mut case = common::read_json(path);
+        let name = case["name"].as_str().unwrap_or_default().to_owned();
         let body = case["body"].as_str().expect("body");
         let got = match parse_subscription(body) {
             Ok(r) => {
@@ -27,6 +28,11 @@ fn parse_goldens() {
             }
             Err(e) => json!({ "error": e.message }),
         };
+        if update {
+            case["expected"] = got;
+            common::write_json(path, &case);
+            continue;
+        }
         if let Some(d) = common::first_diff(&got, &case["expected"]) {
             failures.push(format!("{name}: {d}"));
         }

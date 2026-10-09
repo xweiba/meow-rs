@@ -19,6 +19,25 @@ pub fn golden_files(dir: &str) -> Vec<PathBuf> {
     files
 }
 
+/// `UPDATE_GOLDEN=1`: the golden tests rewrite the expected parts of their
+/// files from the current output instead of comparing (for a deliberate
+/// behaviour change; review `git diff tests/golden` before keeping it). Run
+/// only the tests that own the files, one binary at a time:
+/// `UPDATE_GOLDEN=1 cargo test -p meow-paopao --test golden_config --test golden_parse`.
+#[allow(dead_code)] // not every golden test binary rewrites files
+pub fn updating() -> bool {
+    std::env::var_os("UPDATE_GOLDEN").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Writes `v` as the corpus is formatted: two-space indent, UTF-8 as is,
+/// a final newline.
+#[allow(dead_code)]
+pub fn write_json(path: &Path, v: &Value) {
+    let mut text = serde_json::to_string_pretty(v).expect("encode");
+    text.push('\n');
+    std::fs::write(path, text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+}
+
 pub fn read_json(path: &Path) -> Value {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
