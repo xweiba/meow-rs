@@ -5,47 +5,60 @@
 use crate::dart::find_ignore_ascii_case;
 use crate::plan::outbound_tags;
 
-/// One alternative of a policy's alias pattern. Dart writes the aliases as
-/// one case-insensitive regular expression; every alternative there is a
-/// literal, a literal between ASCII word boundaries, or `ads?\b`, so they
-/// are matched by hand (case folding is ASCII-only, `\b` is ASCII:
-/// `[A-Za-z0-9_]` are the word characters).
+/// One alternative of a policy's aliases: how a provider's group name
+/// (`🎥 Netflix`) is recognised as meaning one of ours (B20, B21).
+///
+/// English aliases match as whole words, ASCII case ignored: the
+/// characters around must not be part of a word ([`is_word_char`]). Dart
+/// matched most of them anywhere, so a group called "Download", "iPad Pro"
+/// or "Trinidad" became 广告拦截 (its sites blocked by default), "Harbing"
+/// 微软服务 and "Ashbourne" 国外媒体. Chinese aliases match anywhere: Chinese
+/// has no spaces between words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AliasTerm {
-    /// The text anywhere (`netflix`).
+    /// The text anywhere (Chinese: `奈飞`).
     Text(&'static str),
-    /// `\bword\b`.
+    /// The word on its own (`netflix`, `global media`).
     Word(&'static str),
-    /// `stem s?\b`: the stem anywhere, an optional `s`, then a word
-    /// boundary (`ads?\b`).
-    StemPlural(&'static str),
+    /// The word or its plural with `s` on its own (`ad`: "AD", "Ads").
+    Plural(&'static str),
 }
 
-/// `[A-Za-z0-9_]`: a word character for a non-unicode `\b`.
-fn is_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+/// Whether `c` continues a word next to an English alias: ASCII letters,
+/// digits and `_`, and letters of other alphabetic scripts ("ſtg" and
+/// "Ŧg" are not "tg"). Ideographic scripts and everything after them
+/// (U+2E80 on: CJK, kana, hangul, fullwidth forms), emoji, spaces and
+/// punctuation end a word, so "AI服务" and "TG频道" still name AI and
+/// Telegram.
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || c == '_'
+        || (!c.is_ascii() && c < '\u{2E80}' && c.is_alphanumeric())
 }
 
 impl AliasTerm {
     /// Whether the term matches somewhere in `name` (ASCII case ignored).
     pub fn matches(self, name: &str) -> bool {
-        let b = name.as_bytes();
-        let (word, lead) = match self {
+        let (word, plural) = match self {
             Self::Text(t) => return find_ignore_ascii_case(name, t, 0).is_some(),
-            Self::Word(w) => (w, true),
-            Self::StemPlural(w) => (w, false),
+            Self::Word(w) => (w, false),
+            Self::Plural(w) => (w, true),
         };
-        // Every word here starts and ends with a word character, so a
-        // boundary at an edge only needs the other side to be a non-word.
-        let edge = |p: usize| b.get(p).is_none_or(|c| !is_word_byte(*c));
+        let ends_word = |at: usize| name[at..].chars().next().is_none_or(|c| !is_word_char(c));
         let mut from = 0;
         while let Some(i) = find_ignore_ascii_case(name, word, from) {
             let end = i + word.len();
-            let before = !lead || i == 0 || !is_word_byte(b[i - 1]);
-            let after = edge(end)
-                || (matches!(self, Self::StemPlural(_))
-                    && b.get(end).is_some_and(|c| c.eq_ignore_ascii_case(&b's'))
-                    && edge(end + 1));
+            let before = name[..i]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !is_word_char(c));
+            let after = ends_word(end)
+                || (plural
+                    && name
+                        .as_bytes()
+                        .get(end)
+                        .is_some_and(|c| c.eq_ignore_ascii_case(&b's'))
+                    && ends_word(end + 1));
             if before && after {
                 return true;
             }
@@ -77,10 +90,11 @@ pub struct Policy {
     pub blockable: bool,
     /// Region codes the service refuses (its group leaves them out).
     pub avoid_regions: &'static [&'static str],
-    /// The alias pattern as Dart writes it (case-insensitive regular
-    /// expression), for reference; [`Policy::alias_terms`] is what matches.
+    /// The alias pattern as Dart wrote it (case-insensitive regular
+    /// expression), for reference; [`Policy::alias_terms`] is what matches
+    /// (whole English words, B20 / B21).
     pub aliases: Option<&'static str>,
-    /// [`Policy::aliases`] as hand-written alternatives.
+    /// Names of provider groups meaning this policy.
     pub alias_terms: &'static [AliasTerm],
     /// The basic split (国外 / 国内 / 漏网之鱼): kept when the built-in
     /// service groups are switched off; its rules come after the
@@ -111,8 +125,8 @@ impl Policy {
         format!("{} {}", self.icon, self.name)
     }
 
-    /// `aliasPattern?.hasMatch(name) ?? false`: a provider group named
-    /// `name` means the same as this policy. False without aliases.
+    /// A provider group named `name` means the same as this policy: one of
+    /// its [`Policy::alias_terms`] matches. False without aliases.
     pub fn alias_matches(&self, name: &str) -> bool {
         self.alias_terms.iter().any(|t| t.matches(name))
     }
@@ -246,7 +260,7 @@ const AI_DOMAINS: [&str; 41] = [
 /// Regions most AI / Google services refuse.
 const AVOID_CN_HK_MO_RU: [&str; 4] = ["HK", "MO", "CN", "RU"];
 
-use AliasTerm::{StemPlural, Text, Word};
+use AliasTerm::{Plural, Text, Word};
 
 /// The policies in rule order: the first that matches decides; the last
 /// (漏网之鱼) takes the rest. Built-in groups come before the
@@ -259,10 +273,10 @@ pub static POLICIES: [Policy; 16] = [
         alias_terms: &[
             Text("广告"),
             Text("拦截广告"),
-            Text("AdBlock"),
-            StemPlural("ad"),
+            Word("AdBlock"),
+            Plural("ad"),
             Text("劫持"),
-            Text("hijack"),
+            Word("hijack"),
         ],
         ..Policy::new("ads", "广告拦截", "⛔️", outbound_tags::BLOCK)
     },
@@ -272,14 +286,14 @@ pub static POLICIES: [Policy; 16] = [
         prefer_pick: Some(outbound_tags::FASTEST),
         block_quic: true,
         aliases: Some("youtube|油管"),
-        alias_terms: &[Text("youtube"), Text("油管")],
+        alias_terms: &[Word("youtube"), Text("油管")],
         ..Policy::new("youtube", "YouTube", "📹", outbound_tags::PROXY)
     },
     Policy {
         rule_sets: &["geosite-google-gemini", "geosite-google"],
         avoid_regions: &AVOID_CN_HK_MO_RU,
         aliases: Some("google|谷歌|gemini"),
-        alias_terms: &[Text("google"), Text("谷歌"), Text("gemini")],
+        alias_terms: &[Word("google"), Text("谷歌"), Word("gemini")],
         ..Policy::new("google", "Google + Gemini", "💡", outbound_tags::PROXY)
     },
     Policy {
@@ -296,15 +310,15 @@ pub static POLICIES: [Policy; 16] = [
         sticky_exit: true,
         aliases: Some(r"openai|chatgpt|claude|anthropic|\bai\b|人工智能|copilot|grok|perplexity"),
         alias_terms: &[
-            Text("openai"),
-            Text("chatgpt"),
-            Text("claude"),
-            Text("anthropic"),
+            Word("openai"),
+            Word("chatgpt"),
+            Word("claude"),
+            Word("anthropic"),
             Word("ai"),
             Text("人工智能"),
-            Text("copilot"),
-            Text("grok"),
-            Text("perplexity"),
+            Word("copilot"),
+            Word("grok"),
+            Word("perplexity"),
         ],
         ..Policy::new("ai", "AI 服务", "🤖", outbound_tags::PROXY)
     },
@@ -312,7 +326,7 @@ pub static POLICIES: [Policy; 16] = [
         rule_sets: &["geosite-telegram"],
         ip_cidrs: &TELEGRAM_IPS,
         aliases: Some(r"telegram|电报|\btg\b"),
-        alias_terms: &[Text("telegram"), Text("电报"), Word("tg")],
+        alias_terms: &[Word("telegram"), Text("电报"), Word("tg")],
         ..Policy::new("telegram", "电报信息", "📲", outbound_tags::PROXY)
     },
     Policy {
@@ -327,12 +341,12 @@ pub static POLICIES: [Policy; 16] = [
         ],
         aliases: Some("twitter|推特|facebook|脸书|instagram|discord|社交"),
         alias_terms: &[
-            Text("twitter"),
+            Word("twitter"),
             Text("推特"),
-            Text("facebook"),
+            Word("facebook"),
             Text("脸书"),
-            Text("instagram"),
-            Text("discord"),
+            Word("instagram"),
+            Word("discord"),
             Text("社交"),
         ],
         ..Policy::new("social", "社交媒体", "💬", outbound_tags::PROXY)
@@ -340,7 +354,7 @@ pub static POLICIES: [Policy; 16] = [
     Policy {
         rule_sets: &["geosite-netflix"],
         aliases: Some("netflix|奈飞|网飞"),
-        alias_terms: &[Text("netflix"), Text("奈飞"), Text("网飞")],
+        alias_terms: &[Word("netflix"), Text("奈飞"), Text("网飞")],
         ..Policy::new("netflix", "NETFLIX", "🎥", outbound_tags::PROXY)
     },
     Policy {
@@ -353,14 +367,14 @@ pub static POLICIES: [Policy; 16] = [
         ],
         aliases: Some("steam|游戏|game|epic|playstation|xbox|nintendo|switch"),
         alias_terms: &[
-            Text("steam"),
+            Word("steam"),
             Text("游戏"),
-            Text("game"),
-            Text("epic"),
-            Text("playstation"),
-            Text("xbox"),
-            Text("nintendo"),
-            Text("switch"),
+            Plural("game"),
+            Word("epic"),
+            Word("playstation"),
+            Word("xbox"),
+            Word("nintendo"),
+            Word("switch"),
         ],
         ..Policy::new("games", "游戏平台", "🎮", outbound_tags::PROXY)
     },
@@ -375,9 +389,9 @@ pub static POLICIES: [Policy; 16] = [
         alias_terms: &[
             Text("国内媒体"),
             Text("哔哩"),
-            Text("bilibili"),
+            Word("bilibili"),
             Text("爱奇艺"),
-            Text("iqiyi"),
+            Word("iqiyi"),
             Text("港澳台"),
         ],
         ..Policy::new("cnmedia", "国内媒体", "🌏", outbound_tags::DIRECT)
@@ -396,38 +410,38 @@ pub static POLICIES: [Policy; 16] = [
             Text("国外媒体"),
             Text("海外媒体"),
             Text("流媒体"),
-            Text("spotify"),
-            Text("disney"),
-            Text("hbo"),
-            Text("tiktok"),
-            Text("global media"),
-            Text("globalmedia"),
-            Text("streaming"),
+            Word("spotify"),
+            Word("disney"),
+            Word("hbo"),
+            Word("tiktok"),
+            Word("global media"),
+            Word("globalmedia"),
+            Word("streaming"),
         ],
         ..Policy::new("media", "国外媒体", "📺", outbound_tags::PROXY)
     },
     Policy {
         rule_sets: &["geosite-github", "geosite-huggingface"],
         aliases: Some("github|开发"),
-        alias_terms: &[Text("github"), Text("开发")],
+        alias_terms: &[Word("github"), Text("开发")],
         ..Policy::new("dev", "开发者服务", "💻", outbound_tags::PROXY)
     },
     Policy {
         rule_sets: &["geosite-microsoft", "geosite-onedrive", "geosite-bing"],
         aliases: Some("microsoft|微软|onedrive|bing|azure"),
         alias_terms: &[
-            Text("microsoft"),
+            Word("microsoft"),
             Text("微软"),
-            Text("onedrive"),
-            Text("bing"),
-            Text("azure"),
+            Word("onedrive"),
+            Word("bing"),
+            Word("azure"),
         ],
         ..Policy::new("microsoft", "微软服务", "Ⓜ️", outbound_tags::DIRECT)
     },
     Policy {
         rule_sets: &["geosite-apple"],
         aliases: Some("apple|苹果|icloud"),
-        alias_terms: &[Text("apple"), Text("苹果"), Text("icloud")],
+        alias_terms: &[Word("apple"), Text("苹果"), Word("icloud")],
         ..Policy::new("apple", "苹果服务", "🍎", outbound_tags::DIRECT)
     },
     Policy {

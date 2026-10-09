@@ -252,3 +252,34 @@ fn b29_only_policies_the_config_has() {
         assert!(out.route_policies.iter().any(|p| p.id == id), "{id}");
     }
 }
+
+/// B20: a provider group "Downloads" was taken for 广告拦截 (`ads?\b`
+/// without a leading boundary), so its sites were blocked by default. Now
+/// it is a group of its own; a real "🛑 AdBlock" still merges into ours.
+#[test]
+fn b20_download_is_not_ads() {
+    let v = input(
+        &json!([vless("US 01", "a"), vless("JP 01", "b")]),
+        &json!({
+            "groups": [
+                {"n": "🚀 节点选择", "t": "select", "m": ["US 01", "JP 01"]},
+                {"n": "Downloads", "t": "select", "m": ["US 01", "JP 01"]},
+                {"n": "🛑 AdBlock", "t": "select", "m": ["REJECT", "DIRECT"]},
+            ],
+            "rules": [
+                "DOMAIN-SUFFIX,dl.example,Downloads",
+                "DOMAIN-SUFFIX,ad.example,🛑 AdBlock",
+                "MATCH,🚀 节点选择",
+            ],
+        }),
+        &json!({}),
+    );
+    let out = run(&v);
+    assert!(out
+        .rules
+        .contains(&"DOMAIN-SUFFIX,dl.example,sub:Downloads".to_owned()));
+    assert!(out
+        .rules
+        .contains(&"DOMAIN-SUFFIX,ad.example,policy:ads".to_owned()));
+    assert!(out.tree.by_tag("sub:Downloads").is_some());
+}

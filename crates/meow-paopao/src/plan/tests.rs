@@ -36,9 +36,10 @@ fn alias_of(name: &str) -> Option<String> {
         .map(Policy::tag)
 }
 
+/// `policies.where(!base && aliases match).first?.tag`. Rows marked B20 /
+/// B21 differ from Dart on purpose: English aliases are whole words now.
 #[test]
-fn aliases_match_like_dart() {
-    // Dart: `policies.where(!base && aliasPattern.hasMatch).first?.tag`.
+fn aliases_match_whole_words() {
     let ads = Some("policy:ads");
     let ai = Some("policy:ai");
     let tg = Some("policy:telegram");
@@ -49,12 +50,14 @@ fn aliases_match_like_dart() {
         ("Ads", ads),
         ("ads", ads),
         ("ad", ads),
-        // `ads?\b` has no leading boundary: any word ending in "ad(s)".
-        ("Download", ads),
-        ("Downloads", ads),
-        ("iPad Pro", ads),
-        ("Trinidad", ads),
-        ("roads", ads),
+        ("AD 屏蔽", ads),
+        ("📢 Ads-Block", ads),
+        // B20: Dart's `ads?\b` had no leading boundary.
+        ("Download", None),
+        ("Downloads", None),
+        ("iPad Pro", None),
+        ("Trinidad", None),
+        ("roads", None),
         ("adsl", None),
         ("Ad_s", None),
         ("ADS!", ads),
@@ -74,26 +77,39 @@ fn aliases_match_like_dart() {
         ("stg", None),
         ("tg_bot", None),
         ("TG-1", tg),
+        ("TG电报", tg),
         ("📲 Telegram", tg),
-        ("ſtg", tg),
+        // B21: a letter of another alphabet is part of the word.
+        ("ſtg", None),
+        ("tgé", None),
+        ("Телеграм TG", tg),
         ("Global Media", media),
         ("globalmedia", media),
         ("Global  Media", None),
         ("GLOBAL MEDIA", media),
         ("Streaming", media),
         ("Bing", Some("policy:microsoft")),
-        ("Harbing", Some("policy:microsoft")),
+        ("必应 Bing", Some("policy:microsoft")),
+        // B21: aliases were substrings.
+        ("Harbing", None),
         ("Switch", Some("policy:games")),
         ("Nintendo Switch", Some("policy:games")),
+        ("Switcher", None),
         ("🎮 Game", Some("policy:games")),
+        ("🎮 Games", Some("policy:games")),
+        ("Endgame", None),
         ("Epic", Some("policy:games")),
+        ("Epicure", None),
         ("Apple", Some("policy:apple")),
         ("iCloud", Some("policy:apple")),
         ("HBO", media),
-        ("Ashbourne", media),
+        ("HBO Max", media),
+        ("Ashbourne", None),
         ("YouTube", Some("policy:youtube")),
         ("油管", Some("policy:youtube")),
         ("Netflix", Some("policy:netflix")),
+        ("🎥 NETFLIX", Some("policy:netflix")),
+        ("🎥 奈飞视频", Some("policy:netflix")),
         ("网飞", Some("policy:netflix")),
         ("国内媒体", Some("policy:cnmedia")),
         ("GitHub", Some("policy:dev")),
