@@ -14,10 +14,10 @@ pub use usage::usage_from_names;
 
 use crate::dart::Crash;
 
-/// The body made Dart's parser throw past its own error handling (a field of
-/// an unexpected type, e.g. a quoted `alterId`); Dart's refresh fails and
-/// keeps the old nodes. Unusable entries are not errors: they are counted
-/// in [`crate::ParseResult::skipped`].
+/// A single share link with a field of an unexpected type
+/// ([`parse_share_link`]). In a subscription such an entry is only counted
+/// in [`crate::ParseResult::skipped`] (B9), so [`parse_subscription`] does
+/// not fail on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub message: String,

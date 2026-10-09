@@ -3,22 +3,41 @@
 
 use serde_json::{Map, Value};
 
-use crate::dart::{int_try_parse, Crash, Dv, NULL};
+use crate::dart::{trim, Dv, NULL};
 use crate::ingest::outbound::{
     list, need, port, tls_block, transport_block, truthy, Fail, Outbound, Res, Tls,
 };
 use crate::ingest::yaml;
+use crate::model::node::name_or_server;
 use crate::model::node::{ParseResult, ProxyNode};
 use crate::model::subscription::{SubGroup, SubRules};
 
+/// Keys whose plain YAML scalars are read as written: providers write
+/// Clash configs for mihomo, which reads these as strings, so
+/// `password: 0123` is `0123` (YAML 1.2 makes it the int 123, `1e3` the
+/// float 1000.0, `0x10` 16; B10), and a port as written is checked as
+/// decimal (B12).
+const AS_WRITTEN: [&str; 10] = [
+    "password",
+    "uuid",
+    "short-id",
+    "public-key",
+    "psk",
+    "auth",
+    "auth-str",
+    "obfs-password",
+    "username",
+    "port",
+];
+
 /// A Clash config. Not YAML (or no `proxies:` list): nothing, without the
 /// split either.
-pub(crate) fn parse_clash(text: &str) -> Result<ParseResult, Crash> {
-    let Ok(doc) = yaml::load(text) else {
-        return Ok(ParseResult::default());
+pub(crate) fn parse_clash(text: &str) -> ParseResult {
+    let Ok(doc) = yaml::load_keeping_text(text, &AS_WRITTEN) else {
+        return ParseResult::default();
     };
     let Dv::List(proxies) = doc.get("proxies") else {
-        return Ok(ParseResult::default());
+        return ParseResult::default();
     };
     let mut groups = Vec::new();
     if let Dv::List(raw) = doc.get("proxy-groups") {
@@ -29,7 +48,9 @@ pub(crate) fn parse_clash(text: &str) -> Result<ParseResult, Crash> {
             let members = match g.get("proxies") {
                 Dv::Null => Vec::new(),
                 Dv::List(m) => m.iter().map(Dv::dart_string).collect(),
-                other => return Err(Crash(format!("{other:?} is not a List?"))),
+                // Not a list: a broken group, left out (B9: Dart failed
+                // the whole subscription).
+                _ => continue,
             };
             groups.push(SubGroup {
                 name: g.get("name").dart_string(),
@@ -50,27 +71,63 @@ pub(crate) fn parse_clash(text: &str) -> Result<ParseResult, Crash> {
         if !matches!(p, Dv::Map(_)) {
             continue;
         }
+        // A mistyped field skips its entry only (B9).
         match clash_proxy(p) {
             Ok(Some(n)) => out.nodes.push(n),
-            Ok(None) | Err(Fail::Format) => out.skipped += 1,
-            Err(Fail::Crash(c)) => return Err(c),
+            Ok(None) | Err(_) => out.skipped += 1,
         }
     }
-    Ok(out)
+    out
 }
 
-/// `_mbps`: the first run of digits ("1 Gbps" → 1).
+/// A hysteria2 bandwidth (`up` / `down`) in Mbps, as mihomo reads it: a
+/// number with an optional unit — none or `Mbps` is Mbps, `bps` / `Kbps`
+/// / `Gbps` / `Tbps` (prefix in any case), a capital `B` for bytes
+/// (`10 MBps` = 80 Mbps). Rounded; at least 1 when above zero. None when
+/// missing, zero or not a bandwidth. Dart took the first run of digits,
+/// so "1 Gbps" was 1 Mbps (B8 / D12).
 fn mbps(v: &Dv) -> Option<i64> {
-    if v.is_null() {
+    let s = match v {
+        Dv::Int(_) | Dv::Double(_) | Dv::Str(_) => v.dart_string(),
+        _ => return None,
+    };
+    let s = trim(&s);
+    let num_end = s
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(s.len());
+    let n: f64 = s[..num_end].parse().ok()?;
+    let unit = trim(&s[num_end..]);
+    let mut chars = unit.chars();
+    let scale = match chars.clone().next() {
+        None => return to_mbps(n),
+        Some('b' | 'B') => 1e-6,
+        Some('k' | 'K') => 1e-3,
+        Some('m' | 'M') => 1.0,
+        Some('g' | 'G') => 1e3,
+        Some('t' | 'T') => 1e6,
+        Some(_) => return None,
+    };
+    if !matches!(unit.as_bytes()[0], b'b' | b'B') {
+        chars.next();
+    }
+    let rest = chars.as_str();
+    let bytes = match rest {
+        "bps" | "b" | "bit" | "bits" | "" => false,
+        "Bps" | "B" => true,
+        _ => return None,
+    };
+    to_mbps(n * scale * if bytes { 8.0 } else { 1.0 })
+}
+
+/// Mbps as an int: rounded, at least 1 when above zero, None for zero,
+/// not finite or beyond 1 Pbps.
+fn to_mbps(v: f64) -> Option<i64> {
+    if !(v > 0.0 && v <= 1e9) {
         return None;
     }
-    let s = v.dart_string();
-    let start = s.find(|c: char| c.is_ascii_digit())?;
-    let digits = &s[start..];
-    let end = digits
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(digits.len());
-    int_try_parse(&digits[..end])
+    // In 0..=1e9: fits.
+    #[allow(clippy::cast_possible_truncation)]
+    Some((v.round() as i64).max(1))
 }
 
 /// `v is Map ? v : const {}`.
@@ -86,7 +143,7 @@ fn map_or_empty(v: &Dv) -> &Dv {
 fn clash_proxy(p: &Dv) -> Res<Option<ProxyNode>> {
     let get = |k: &str| p.get(k);
     let kind = get("type").dart_string_or_empty();
-    let name = get("name").or(get("server")).dart_string();
+    let name = name_or_server(get("name"), get("server"));
     let server = need(get("server"))?;
     let server_port = port(get("port"))?;
     let sni = get("servername")

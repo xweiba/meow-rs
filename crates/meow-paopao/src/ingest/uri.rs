@@ -12,7 +12,8 @@
 use std::collections::HashMap;
 use std::net::Ipv6Addr;
 
-use crate::dart::{int_try_parse, utf8_decode};
+use crate::dart::utf8_decode;
+use crate::ingest::outbound::decimal_port;
 
 /// A string Dart's `Uri.parse` rejects (it throws `FormatException`).
 #[derive(Debug)]
@@ -32,7 +33,10 @@ pub(crate) struct Uri {
     user_info: String,
     /// Normalized; IPv6 addresses keep their brackets here.
     host: Option<String>,
+    /// The port as written, unless it is the scheme's default.
     port: Option<i64>,
+    /// A port was written (even the default, even 0).
+    port_written: bool,
     default_port: i64,
     query: Option<String>,
     fragment: Option<String>,
@@ -87,6 +91,7 @@ impl Uri {
         let mut user_info = String::new();
         let mut host = None;
         let mut port = None;
+        let mut port_written = false;
         if host_start > 0 {
             let user_info_start = scheme_end + 3;
             if user_info_start < host_start {
@@ -95,8 +100,10 @@ impl Uri {
             }
             host = Some(make_host(s, host_start, port_start)?);
             if port_start + 1 < path_start {
-                let p = int_try_parse(part(port_start + 1, path_start)?).ok_or(BadUri)?;
+                // Decimal digits only (B12: Dart also took `0x1BB`, `+443`).
+                let p = decimal_port(part(port_start + 1, path_start)?).ok_or(BadUri)?;
                 port = (p != default_port).then_some(p);
+                port_written = true;
             }
         }
         let query = if query_start < fragment_start {
@@ -119,6 +126,7 @@ impl Uri {
             user_info,
             host,
             port,
+            port_written,
             default_port,
             query,
             fragment,
@@ -145,9 +153,10 @@ impl Uri {
         self.port.unwrap_or(self.default_port)
     }
 
-    /// `uri.hasPort`: an explicit port other than the scheme's default.
+    /// A port was written. (Dart's `uri.hasPort` is false for the scheme's
+    /// default, so a share link's `:0` read as "no port", B12.)
     pub(crate) fn has_port(&self) -> bool {
-        self.port.is_some()
+        self.port_written
     }
 
     /// `uri.fragment` (normalized, still percent-encoded).
@@ -684,11 +693,12 @@ mod tests {
 
     #[test]
     fn parts_like_dart() {
-        // Expected values printed by the Dart VM.
+        // Expected values printed by the Dart VM, except `has_port`: a
+        // written `:0` counts as written (B12; Dart's `hasPort` is false).
         let u = Uri::parse("ss://a:b@EXAMPLE.Com:0").unwrap();
         assert_eq!(
             (u.host(), u.port(), u.has_port(), u.user_info()),
-            ("example.com", 0, false, "a:b")
+            ("example.com", 0, true, "a:b")
         );
         let u = Uri::parse("hy2://p%zz@[2001:DB8::1]:443/x?y#f%zz%41 g").unwrap();
         assert_eq!(

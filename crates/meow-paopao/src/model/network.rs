@@ -50,9 +50,12 @@ pub struct NetworkCondition {
 }
 
 impl NetworkCondition {
+    /// Neither part says anything: blank (only spaces) counts as unset.
+    /// Dart let a blank name through, and it then matched every network,
+    /// wired ones included (B13).
     pub fn is_empty(&self) -> bool {
-        self.name.as_deref().unwrap_or_default().is_empty()
-            && self.subnet.as_deref().unwrap_or_default().is_empty()
+        trim(self.name.as_deref().unwrap_or_default()).is_empty()
+            && trim(self.subnet.as_deref().unwrap_or_default()).is_empty()
     }
 
     pub fn matches(&self, n: &NetworkInfo) -> bool {
@@ -94,7 +97,7 @@ impl NetworkCondition {
     /// None when empty.
     pub fn from_json(v: &Value) -> Option<Self> {
         if let Some(s) = v.as_str() {
-            if s.is_empty() {
+            if trim(s).is_empty() {
                 return None;
             }
             return Some(if is_subnet(s) {
@@ -308,8 +311,17 @@ mod tests {
         assert!(!office.matches(&wifi));
         assert!(v6.matches(&wired));
         assert!(!NetworkCondition::default().matches(&wifi));
-        // A whitespace-only name is not empty, but requires nothing.
-        assert!(net("e", Some("  "), None).condition.matches(&wired));
+        // B13: a whitespace-only name is unset (Dart: it matched every
+        // network, wired too).
+        let blank = net("e", Some("  "), None).condition;
+        assert!(blank.is_empty());
+        assert!(!blank.matches(&wired));
+        assert!(!blank.matches(&wifi));
+        assert_eq!(NetworkCondition::from_json(&serde_json::json!(" ")), None);
+        assert_eq!(
+            NetworkCondition::from_json(&serde_json::json!({"name": "  "})),
+            None
+        );
     }
 
     #[test]

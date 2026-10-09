@@ -4,7 +4,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
-use crate::dart::Dv;
+use crate::dart::{trim, Dv};
 use crate::model::subscription::SubRules;
 
 /// Outbound types PaoPao accepts from subscriptions (sing-box names).
@@ -57,8 +57,8 @@ impl ProxyNode {
     }
 
     /// Reads [`ProxyNode::to_json`]; None when `outbound` is missing or of an
-    /// unsupported type. A missing name falls back to the server (as Dart's
-    /// `'${name ?? outbound['server']}'`, so possibly `"null"`).
+    /// unsupported type. A missing or blank name falls back to the server
+    /// (empty without one; Dart wrote `"null"`, B16).
     pub fn from_json(v: &Value) -> Option<Self> {
         let outbound = v.get("outbound")?.as_object()?;
         if !outbound
@@ -68,10 +68,10 @@ impl ProxyNode {
         {
             return None;
         }
-        let name = match v.get("name") {
-            Some(n) if !n.is_null() => Dv::from_json(n).dart_string(),
-            _ => Dv::from_json(outbound.get("server").unwrap_or(&Value::Null)).dart_string(),
-        };
+        let name = name_or_server(
+            &Dv::from_json(v.get("name").unwrap_or(&Value::Null)),
+            &Dv::from_json(outbound.get("server").unwrap_or(&Value::Null)),
+        );
         Some(Self {
             name,
             outbound: outbound.clone(),
@@ -89,6 +89,17 @@ impl<'de> Deserialize<'de> for ProxyNode {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = Value::deserialize(d)?;
         Self::from_json(&v).ok_or_else(|| serde::de::Error::custom("not a supported node"))
+    }
+}
+
+/// A node's name: `name` unless blank, else the server's address (Dart
+/// gave a missing name the text "null", B16).
+pub(crate) fn name_or_server(name: &Dv, server: &Dv) -> String {
+    let n = name.dart_string_or_empty();
+    if trim(&n).is_empty() {
+        server.dart_string_or_empty()
+    } else {
+        n
     }
 }
 

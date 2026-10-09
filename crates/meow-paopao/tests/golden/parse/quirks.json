@@ -10,7 +10,7 @@
           "server": "7.7.7.7",
           "server_port": 8388,
           "method": "aes-128-gcm",
-          "password": "123"
+          "password": "0123"
         }
       },
       {
@@ -33,7 +33,7 @@
           "server_port": 443,
           "password": "secret",
           "up_mbps": 100,
-          "down_mbps": 1,
+          "down_mbps": 1000,
           "obfs": {
             "type": "salamander",
             "password": "o"

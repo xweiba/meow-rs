@@ -389,7 +389,14 @@ fn addresses_like_dart() {
 
 #[test]
 fn tags_like_dart() {
-    let nodes: Vec<ProxyNode> = TAG_NAMES.iter().map(|n| node(n, "s")).collect();
+    // Names as given (`from_json` would put the server in a blank one).
+    let nodes: Vec<ProxyNode> = TAG_NAMES
+        .iter()
+        .map(|n| ProxyNode {
+            name: (*n).to_owned(),
+            ..node("x", "s")
+        })
+        .collect();
     let refs: Vec<&ProxyNode> = nodes.iter().collect();
     assert_eq!(node_tags_for(&refs), TAGS);
 }

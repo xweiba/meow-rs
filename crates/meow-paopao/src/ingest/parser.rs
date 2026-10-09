@@ -9,17 +9,21 @@ use serde_json::{Map, Value};
 use crate::dart::{is_regex_space, trim, utf8_decode, Dv};
 use crate::ingest::clash::parse_clash;
 use crate::ingest::outbound::{
-    decode, dv, list, need, port, tls_block, transport_block, truthy, Fail, Outbound, Res, Tls,
+    decode, decode_name, dv, list, need, port, tls_block, transport_block, truthy, Fail, Outbound,
+    Res, Tls,
 };
 use crate::ingest::uri::Uri;
 use crate::ingest::ParseError;
+use crate::model::node::name_or_server;
 use crate::model::node::{is_supported_type, ParseResult, ProxyNode};
 
 /// Turns whatever a subscription link returns into nodes.
 ///
-/// Errors only where Dart's parser throws past its own `try` blocks (a
-/// field of an unexpected type, such as `alterId: "0"`); unusable entries
-/// are counted in [`ParseResult::skipped`] instead.
+/// An entry that can't be used (unsupported, missing fields, a field of an
+/// unexpected type such as `alterId: "0"`) is counted in
+/// [`ParseResult::skipped`] and the rest are kept; Dart failed the whole
+/// subscription on a mistyped field (B9). A body that is not a
+/// subscription at all gives no nodes.
 pub fn parse_subscription(body: &str) -> Result<ParseResult, ParseError> {
     let text = trim(body).replacen('\u{feff}', "", 1);
     if text.is_empty() {
@@ -27,11 +31,11 @@ pub fn parse_subscription(body: &str) -> Result<ParseResult, ParseError> {
     }
     if text.starts_with('{') || text.starts_with('[') {
         if let Some(json) = try_json(&text) {
-            return parse_json(&json).map_err(ParseError::from);
+            return Ok(parse_json(&json));
         }
     }
     if has_proxies_line(&text) {
-        return parse_clash(&text).map_err(ParseError::from);
+        return Ok(parse_clash(&text));
     }
     if let Some(decoded) = try_base64(&text) {
         if decoded.contains("://") {
@@ -42,7 +46,7 @@ pub fn parse_subscription(body: &str) -> Result<ParseResult, ParseError> {
 }
 
 /// One share link per line (`ss://`, `vmess://`, `vless://`, ...); lines
-/// without `://` are ignored.
+/// without `://` are ignored, broken ones skipped.
 pub fn parse_share_links(text: &str) -> Result<ParseResult, ParseError> {
     let mut out = ParseResult::default();
     for raw in lines(text) {
@@ -50,15 +54,16 @@ pub fn parse_share_links(text: &str) -> Result<ParseResult, ParseError> {
         if line.is_empty() || !line.contains("://") {
             continue;
         }
-        match parse_share_link(line)? {
-            Some(node) => out.nodes.push(node),
-            None => out.skipped += 1,
+        match parse_share_link(line) {
+            Ok(Some(node)) => out.nodes.push(node),
+            Ok(None) | Err(_) => out.skipped += 1,
         }
     }
     Ok(out)
 }
 
-/// A single share link; None when unsupported or broken.
+/// A single share link; None when unsupported or broken, an error where
+/// Dart threw (a field of an unexpected type).
 pub fn parse_share_link(link: &str) -> Result<Option<ProxyNode>, ParseError> {
     let scheme = link.split("://").next().unwrap_or_default().to_lowercase();
     let node = match scheme.as_str() {
@@ -128,13 +133,13 @@ pub(crate) fn try_base64(text: &str) -> Option<String> {
     utf8_decode(bytes)
 }
 
-/// `_nameOf`: the decoded fragment, else `fallback`.
-fn name_of(uri: &Uri, fallback: &str) -> Res<String> {
-    let f = uri.fragment();
-    if f.is_empty() {
-        Ok(fallback.to_owned())
+/// The decoded fragment ([`decode_name`]), else `fallback` (the host).
+fn name_of(uri: &Uri, fallback: &str) -> String {
+    let name = decode_name(uri.fragment());
+    if trim(&name).is_empty() {
+        fallback.to_owned()
     } else {
-        decode(f)
+        name
     }
 }
 
@@ -166,7 +171,7 @@ fn ss(link: &str) -> Res<ProxyNode> {
         .to_owned();
     let mut name = String::new();
     if let Some(hash) = body.find('#') {
-        name = decode(&body[hash + 1..])?;
+        name = decode_name(&body[hash + 1..]);
         body.truncate(hash);
     }
     // Legacy: ss://base64(method:password@host:port)
@@ -197,7 +202,7 @@ fn ss(link: &str) -> Res<ProxyNode> {
         );
         plugin_opts = Some(parts.collect::<Vec<_>>().join(";"));
     }
-    let name = if name.is_empty() {
+    let name = if trim(&name).is_empty() {
         uri.host().to_owned()
     } else {
         name
@@ -226,7 +231,7 @@ fn vmess(link: &str) -> Res<ProxyNode> {
     let get = |k: &str| v.get(k);
     let net = get("net").or(&Dv::Str("tcp".into())).dart_string();
     let header_type = get("type").dart_string_or_empty();
-    let name = get("ps").or(get("add")).dart_string();
+    let name = name_or_server(get("ps"), get("add"));
     let mut o = Outbound::new("vmess");
     o.put("server", need(get("add"))?);
     o.put("server_port", port(get("port"))?);
@@ -276,7 +281,7 @@ fn vless_or_trojan(link: &str, kind: &str) -> Res<ProxyNode> {
         .get("security")
         .map_or(if vless { "none" } else { "tls" }, String::as_str);
     let secret = need(&Dv::Str(decode(uri.user_info())?))?;
-    let name = name_of(&uri, uri.host())?;
+    let name = name_of(&uri, uri.host());
     let mut o = Outbound::new(kind);
     o.put("server", need(&Dv::Str(uri.host().into()))?);
     o.put("server_port", port(&Dv::Int(uri.port()))?);
@@ -315,9 +320,10 @@ fn vless_or_trojan(link: &str, kind: &str) -> Res<ProxyNode> {
 fn hysteria2(link: &str) -> Res<ProxyNode> {
     let uri = parse_uri(link)?;
     let q = query(&uri)?;
-    let name = name_of(&uri, uri.host())?;
+    let name = name_of(&uri, uri.host());
     let mut o = Outbound::new("hysteria2");
     o.put("server", need(&Dv::Str(uri.host().into()))?);
+    // A port written as 0 is a broken link, not "unset" (B12).
     let p = if uri.has_port() {
         port(&Dv::Int(uri.port()))?
     } else {
@@ -353,7 +359,7 @@ fn tuic(link: &str) -> Res<ProxyNode> {
         Some(c) if c > 0 => c,
         _ => return Err(Fail::Format),
     };
-    let name = name_of(&uri, uri.host())?;
+    let name = name_of(&uri, uri.host());
     let mut o = Outbound::new("tuic");
     o.put("server", need(&Dv::Str(uri.host().into()))?);
     o.put("server_port", port(&Dv::Int(uri.port()))?);
@@ -384,7 +390,7 @@ fn socks(link: &str) -> Res<ProxyNode> {
         user = try_base64(uri.user_info()).unwrap_or(user);
     }
     let colon = user.find(':').filter(|c| *c > 0);
-    let name = name_of(&uri, uri.host())?;
+    let name = name_of(&uri, uri.host());
     let mut o = Outbound::new("socks");
     o.put("server", need(&Dv::Str(uri.host().into()))?);
     o.put("server_port", port(&Dv::Int(uri.port()))?);
@@ -399,7 +405,7 @@ fn socks(link: &str) -> Res<ProxyNode> {
 fn anytls(link: &str) -> Res<ProxyNode> {
     let uri = parse_uri(link)?;
     let q = query(&uri)?;
-    let name = name_of(&uri, uri.host())?;
+    let name = name_of(&uri, uri.host());
     let mut o = Outbound::new("anytls");
     o.put("server", need(&Dv::Str(uri.host().into()))?);
     o.put("server_port", port(&Dv::Int(uri.port()))?);
@@ -420,7 +426,7 @@ fn anytls(link: &str) -> Res<ProxyNode> {
 /// Groups and built-ins in sing-box JSON: the provider's routing, not servers.
 const SING_BOX_ROUTING: [&str; 5] = ["selector", "urltest", "direct", "block", "dns"];
 
-fn parse_json(json: &Dv) -> Result<ParseResult, crate::dart::Crash> {
+fn parse_json(json: &Dv) -> ParseResult {
     let mut out = ParseResult::default();
     if let Dv::List(outbounds) = json.get("outbounds") {
         for o in outbounds {
@@ -439,7 +445,7 @@ fn parse_json(json: &Dv) -> Result<ParseResult, crate::dart::Crash> {
                 .filter(|(k, _)| !matches!(k.as_str(), Some("tag" | "detour")))
                 .map(|(k, v)| (k.dart_string(), v.to_json()))
                 .collect();
-            let name = o.get("tag").or(o.get("server")).dart_string();
+            let name = name_or_server(o.get("tag"), o.get("server"));
             out.nodes.push(ProxyNode { name, outbound });
         }
     } else if let Dv::List(servers) = json.get("servers") {
@@ -450,16 +456,15 @@ fn parse_json(json: &Dv) -> Result<ParseResult, crate::dart::Crash> {
             }
             match sip008_server(s) {
                 Ok(n) => out.nodes.push(n),
-                Err(Fail::Format) => out.skipped += 1,
-                Err(Fail::Crash(c)) => return Err(c),
+                Err(_) => out.skipped += 1,
             }
         }
     }
-    Ok(out)
+    out
 }
 
 fn sip008_server(s: &Dv) -> Res<ProxyNode> {
-    let name = s.get("remarks").or(s.get("server")).dart_string();
+    let name = name_or_server(s.get("remarks"), s.get("server"));
     let mut o = Outbound::new("shadowsocks");
     o.put("server", need(s.get("server"))?);
     o.put("server_port", port(s.get("server_port"))?);
@@ -491,11 +496,180 @@ mod tests {
         assert!(!has_proxies_line("x-proxies:"));
     }
 
+    fn one(body: &str) -> Option<ProxyNode> {
+        let r = parse_subscription(body).expect("parsed");
+        r.nodes.into_iter().next()
+    }
+
+    fn outbound(n: &ProxyNode, k: &str) -> Value {
+        n.outbound.get(k).cloned().unwrap_or(Value::Null)
+    }
+
+    /// B10: credentials as written (mihomo reads them as strings); Dart's
+    /// YAML 1.2 made `0123` 123, `1e3` 1000.0, `0x10` 16.
     #[test]
-    fn type_errors_fail_the_whole_parse() {
-        // Dart: `(p['alterId'] as num?)` throws past the per-proxy catch.
-        let body =
-            "proxies:\n  - {name: a, type: vmess, server: s, port: 1, uuid: u, alterId: \"0\"}\n";
-        assert!(parse_subscription(body).is_err());
+    fn credentials_keep_their_text() {
+        let ss = |pw: &str| {
+            one(&format!(
+                "proxies:\n  - {{name: a, type: ss, server: s, port: 1, cipher: aes-128-gcm, password: {pw}}}\n"
+            ))
+        };
+        for (pw, want) in [
+            ("0123", "0123"),
+            ("1e3", "1e3"),
+            ("0x10", "0x10"),
+            ("true", "true"),
+            ("+5", "+5"),
+            ("\"0123\"", "0123"),
+            ("abc", "abc"),
+        ] {
+            assert_eq!(outbound(&ss(pw).expect(pw), "password"), want, "{pw}");
+        }
+        // Null is still missing.
+        assert!(ss("~").is_none());
+        let vless = one(
+            "proxies:\n  - {name: v, type: vless, server: s, port: 1, uuid: 0123, tls: true, reality-opts: {public-key: 1e3, short-id: 0011}}\n",
+        )
+        .expect("vless");
+        assert_eq!(outbound(&vless, "uuid"), "0123");
+        let reality = &vless.outbound["tls"]["reality"];
+        assert_eq!(reality["public_key"], "1e3");
+        assert_eq!(reality["short_id"], "0011");
+    }
+
+    /// B11: names are UTF-8 with escapes; Dart left `%20` in a name with
+    /// Chinese in it and dropped the node for `#%FF`.
+    #[test]
+    fn link_names_decode_leniently() {
+        let ss = "ss://YWVzLTEyOC1nY206cA@1.2.3.4:443";
+        let name = |frag: &str| {
+            parse_share_link(&format!("{ss}#{frag}"))
+                .expect("no crash")
+                .expect("node")
+                .name
+        };
+        assert_eq!(name("香港%20HK"), "香港 HK");
+        assert_eq!(name("%E9%A6%99%E6%B8%AF%2001"), "香港 01");
+        assert_eq!(name("%FF"), "%FF");
+        assert_eq!(name("100%"), "100%");
+        let vless = |frag: &str| {
+            parse_share_link(&format!("vless://u@h.example:443?security=tls#{frag}"))
+                .expect("no crash")
+                .expect("node")
+                .name
+        };
+        assert_eq!(vless("%FF"), "%FF");
+        assert_eq!(vless("%E6%97%A5%E6%9C%AC"), "日本");
+        // Blank: the host.
+        assert_eq!(vless("%20"), "h.example");
+    }
+
+    /// B12: ports are decimal 1–65535; hy2's `:0` is broken, not "unset".
+    #[test]
+    fn ports_are_decimal() {
+        let clash = |port: &str| {
+            one(&format!(
+                "proxies:\n  - {{name: a, type: trojan, server: s, port: {port}, password: p}}\n"
+            ))
+            .map(|n| outbound(&n, "server_port"))
+        };
+        assert_eq!(clash("443"), Some(443.into()));
+        assert_eq!(clash("\"8388\""), Some(8388.into()));
+        assert_eq!(clash("0x1BB"), None);
+        assert_eq!(clash("+443"), None);
+        assert_eq!(clash("\"+443\""), None);
+        assert_eq!(clash("443.0"), None);
+        assert_eq!(clash("0"), None);
+        assert_eq!(clash("65536"), None);
+        let link = |l: &str| parse_share_link(l).expect("no crash");
+        assert!(link("trojan://p@h:+443").is_none());
+        assert!(link("trojan://p@h:0x1BB").is_none());
+        assert!(link("trojan://p@h:443").is_some());
+        assert!(link("hy2://p@h:0").is_none());
+        let hy2 = link("hy2://p@h").expect("default port");
+        assert_eq!(outbound(&hy2, "server_port"), 443);
+        // sing-box JSON keeps whole numbers.
+        let r = parse_subscription(
+            r#"{"servers":[{"server":"s","server_port":"+443","method":"m","password":"p"},{"server":"s","server_port":8388,"method":"m","password":"p"}]}"#,
+        )
+        .expect("sip008");
+        assert_eq!(r.nodes.len(), 1);
+        assert_eq!(r.skipped, 1);
+    }
+
+    /// B16: a node without a name is called by its server (Dart: "null").
+    #[test]
+    fn missing_names_take_the_server() {
+        let n = one("proxies:\n  - {type: trojan, server: s.example, port: 1, password: p}\n")
+            .expect("node");
+        assert_eq!(n.name, "s.example");
+        let n = one(
+            "proxies:\n  - {name: \" \", type: trojan, server: s.example, port: 1, password: p}\n",
+        )
+        .expect("node");
+        assert_eq!(n.name, "s.example");
+        let r = parse_subscription(r#"{"outbounds":[{"type":"trojan","tag":"","server":"t.example","server_port":1,"password":"p"}]}"#)
+            .expect("sing-box");
+        assert_eq!(r.nodes[0].name, "t.example");
+        let persisted = |v: Value| ProxyNode::from_json(&v).expect("node").name;
+        assert_eq!(
+            persisted(serde_json::json!({"outbound": {"type": "trojan", "server": "u.example"}})),
+            "u.example"
+        );
+        assert_eq!(
+            persisted(serde_json::json!({"name": null, "outbound": {"type": "trojan"}})),
+            ""
+        );
+        use crate::model::subscription::SubGroup;
+        assert_eq!(SubGroup::from_json(&serde_json::json!({"m": ["a"]})), None);
+        assert_eq!(
+            SubGroup::from_json(&serde_json::json!({"n": "G"})).map(|g| g.kind),
+            Some("select".to_owned())
+        );
+    }
+
+    /// B8 / D12: bandwidth with units, as mihomo reads it (Dart took the
+    /// first digits: "1 Gbps" was 1 Mbps).
+    #[test]
+    fn bandwidth_units() {
+        let hy2 = |down: &str| {
+            one(&format!(
+                "proxies:\n  - {{name: h, type: hysteria2, server: s, port: 1, password: p, down: {down}}}\n"
+            ))
+            .map(|n| outbound(&n, "down_mbps"))
+            .expect("node")
+        };
+        for (down, want) in [
+            ("100", Value::from(100)),
+            ("\"100\"", 100.into()),
+            ("100 Mbps", 100.into()),
+            ("100mbps", 100.into()),
+            ("1 Gbps", 1000.into()),
+            ("1.5 Gbps", 1500.into()),
+            ("500 Kbps", 1.into()),
+            ("200 Kbps", 1.into()),
+            ("10 MBps", 80.into()),
+            ("1 Tbps", 1_000_000.into()),
+            ("8000000 bps", 8.into()),
+            ("0", Value::Null),
+            ("fast", Value::Null),
+            ("100 furlongs", Value::Null),
+        ] {
+            assert_eq!(hy2(down), want, "{down}");
+        }
+    }
+
+    /// B9: Dart's `(p['alterId'] as num?)` threw past the per-proxy
+    /// catch and the whole subscription failed; now that entry is skipped.
+    #[test]
+    fn a_mistyped_entry_is_skipped() {
+        let body = "proxies:\n  - {name: a, type: vmess, server: s, port: 1, uuid: u, alterId: \"0\"}\n  - {name: b, type: trojan, server: t, port: 2, password: p, sni: 5}\n  - {name: c, type: trojan, server: t, port: 3, password: p}\nproxy-groups:\n  - {name: G, type: select, proxies: x}\n  - {name: H, type: select, proxies: [c]}\n";
+        let r = parse_subscription(body).expect("parsed");
+        let names: Vec<&str> = r.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, ["c"]);
+        assert_eq!(r.skipped, 2);
+        // A group whose `proxies` is not a list is left out.
+        let groups: Vec<&str> = r.split.groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(groups, ["H"]);
     }
 }

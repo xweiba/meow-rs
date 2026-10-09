@@ -3,7 +3,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::dart::{double_to_int, int_try_parse, trim, Crash, Dv};
+use crate::dart::{double_to_int, trim, Crash, Dv};
 use crate::ingest::uri::{decode_component, DecodeError};
 
 /// Why a node could not be read.
@@ -22,14 +22,52 @@ impl From<Crash> for Fail {
 
 pub(crate) type Res<T> = Result<T, Fail>;
 
-/// `_port`: a number (truncated) or a string holding an int, in 1..=65535.
+/// A port: an integer (a whole JSON number, or a string of decimal
+/// digits) in 1..=65535. Dart also took `0x1BB`, `+443` and truncated
+/// `443.9` (B12).
 pub(crate) fn port(v: &Dv) -> Res<i64> {
     let p = match v {
         Dv::Int(i) => Some(*i),
-        Dv::Double(d) => Some(double_to_int(*d)?),
-        other => int_try_parse(trim(&other.dart_string_or_empty())),
+        Dv::Double(d) if d.fract() == 0.0 => double_to_int(*d).ok(),
+        Dv::Str(s) => decimal_port(trim(s)),
+        _ => None,
     };
     p.filter(|p| (1..=65535).contains(p)).ok_or(Fail::Format)
+}
+
+/// `s` as a port number: decimal digits only (at most five).
+pub(crate) fn decimal_port(s: &str) -> Option<i64> {
+    if s.is_empty() || s.len() > 5 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
+/// A name from a link (`#…`): percent escapes decoded as UTF-8, other
+/// characters kept as they are; when the escapes are not UTF-8, the text
+/// as written. Dart left the escapes alone in a name with any non-ASCII
+/// character, and dropped the node for one that was not UTF-8 (B11).
+pub(crate) fn decode_name(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut bytes = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| char::from(c).to_digit(16);
+        if b[i] == b'%' {
+            if let (Some(hi), Some(lo)) = (
+                b.get(i + 1).copied().and_then(hex),
+                b.get(i + 2).copied().and_then(hex),
+            ) {
+                // Two hex digits: below 256.
+                bytes.push(u8::try_from(hi * 16 + lo).unwrap_or_default());
+                i += 3;
+                continue;
+            }
+        }
+        bytes.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| s.to_owned())
 }
 
 /// `_need`: the value as a trimmed string; missing, empty or `"null"` fails.

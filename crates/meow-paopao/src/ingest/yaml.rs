@@ -24,7 +24,15 @@ enum Frame {
 }
 
 /// Parses one YAML document; null for an empty stream.
+#[cfg(test)]
 pub(crate) fn load(text: &str) -> Result<Dv, BadYaml> {
+    load_keeping_text(text, &[])
+}
+
+/// [`load`], except that a plain scalar under one of `keys` (in any
+/// mapping) that would be a bool, int or float stays the string as
+/// written (`password: 0123` → `"0123"`); null stays null.
+pub(crate) fn load_keeping_text(text: &str, keys: &[&str]) -> Result<Dv, BadYaml> {
     let mut parser = Parser::new_from_str(text);
     let mut stack: Vec<Frame> = Vec::new();
     let mut anchors: HashMap<usize, Dv> = HashMap::new();
@@ -43,7 +51,17 @@ pub(crate) fn load(text: &str) -> Result<Dv, BadYaml> {
             }
             Event::Alias(id) => anchors.get(&id).cloned().ok_or(BadYaml)?,
             Event::Scalar(value, style, anchor, tag) => {
-                let v = scalar(value, style, tag.as_ref())?;
+                let as_written = style == TScalarStyle::Plain
+                    && tag.is_none()
+                    && matches!(
+                        stack.last(),
+                        Some(Frame::Map(_, Some(Dv::Str(k)), _)) if keys.contains(&k.as_str())
+                    );
+                let raw = as_written.then(|| value.clone());
+                let v = match (scalar(value, style, tag.as_ref())?, raw) {
+                    (Dv::Bool(_) | Dv::Int(_) | Dv::Double(_), Some(raw)) => Dv::Str(raw),
+                    (v, _) => v,
+                };
                 if anchor > 0 {
                     anchors.insert(anchor, v.clone());
                 }

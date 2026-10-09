@@ -21,14 +21,25 @@ pub struct SubGroup {
 }
 
 impl SubGroup {
-    /// Dart `SubGroup.fromJson`: every field read with `'$v'` (a missing
-    /// name or type becomes `"null"`); None when not an object.
+    /// Dart `SubGroup.fromJson`: every field read with `'$v'`; None when
+    /// not an object or without a name (nothing can name it; Dart called it
+    /// `"null"`, B16). A missing type is `select`.
     pub fn from_json(v: &Value) -> Option<Self> {
         let o = v.as_object()?;
-        let field = |k: &str| Dv::from_json(o.get(k).unwrap_or(&Value::Null)).dart_string();
+        let field =
+            |k: &str| Dv::from_json(o.get(k).unwrap_or(&Value::Null)).dart_string_or_empty();
+        let name = field("n");
+        if crate::dart::trim(&name).is_empty() {
+            return None;
+        }
+        let kind = field("t");
         Some(Self {
-            name: field("n"),
-            kind: field("t"),
+            name,
+            kind: if kind.is_empty() {
+                "select".into()
+            } else {
+                kind
+            },
             members: dart_strings(o.get("m")),
         })
     }
