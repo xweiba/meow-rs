@@ -1446,12 +1446,12 @@ header:
         write_provider_file(tmp.path(), &[("US ss", "ss"), ("US direct", "direct")]);
         let provider = file_provider(tmp.path()).await;
 
-        // Note: parse_direct keeps DirectAdapter's hardcoded "DIRECT" name.
+        // A configured direct outbound keeps its own name (25dc04a).
         let by_alias = provider.derived_slot(&group_filter(None, None, Some(&["ss"])));
-        assert_eq!(slot_names(&by_alias), ["DIRECT"]);
+        assert_eq!(slot_names(&by_alias), ["US direct"]);
 
         let by_display = provider.derived_slot(&group_filter(None, None, Some(&["Shadowsocks"])));
-        assert_eq!(slot_names(&by_display), ["DIRECT"]);
+        assert_eq!(slot_names(&by_display), ["US direct"]);
 
         // mihomo-style `|`-separated string form.
         let piped = provider.derived_slot(&group_filter(None, None, Some(&["ss|direct"])));
