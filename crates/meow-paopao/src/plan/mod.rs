@@ -1,0 +1,184 @@
+//! L3: the plan — the built-in policies, the subscriptions' merged split
+//! and the group tree (Dart: `policies.dart`, `group_defaults.dart`,
+//! `custom_groups.dart`, `sub_rules.dart`, `group_tree.dart`, and how
+//! `ProxyController` assembles them).
+//!
+//! Known Dart behaviours kept for parity (see the task's decisions):
+//!
+//! - B2: [`build_tree`] is the tree the screen shows. The config builds its
+//!   own tree, always with the split and with device exits; when
+//!   `group_mode = subscription` outside smart mode the two differ.
+//! - B3: [`imported_split`] reads the raw settings (`group_mode`,
+//!   `built_in_groups`), not the effective ones the tree is built from.
+//! - B5 / B6 live in the controller (rough rule matching, label cache) and
+//!   are not ported here.
+
+pub mod custom_groups;
+pub mod group_defaults;
+pub mod group_tree;
+mod input;
+pub mod policies;
+pub mod sub_rules;
+
+#[cfg(test)]
+mod tests;
+
+use indexmap::IndexMap;
+
+use crate::dart::contains_ignore_ascii_case;
+use crate::model::settings::{GroupMode, ProxyMode, ProxySettings, SshChain};
+use crate::pool::{endpoint, is_usable_node, region_of, NodeGroup, Pool};
+
+pub use group_tree::{build_group_tree, GroupKind, GroupSpec, GroupTree, TreeInput};
+pub use input::{AutoStrategy, BuildInput, RouteAccess, RuntimeOptions};
+pub use policies::{policy_by_tag, Policy, POLICIES};
+pub use sub_rules::{
+    merge_subscription_splits, ImportedGroup, ImportedSplit, MergeTargets, SubSplit,
+};
+
+/// Our own outbound tags (Dart `OutboundTags`).
+pub mod outbound_tags {
+    /// 🚀 节点选择.
+    pub const PROXY: &str = "proxy";
+    /// ♻️ 自动选择.
+    pub const AUTO: &str = "auto";
+    /// ♻️ 自动选择's 智能选择.
+    pub const SMART: &str = "auto~smart";
+    /// ♻️ 自动选择's 负载均衡.
+    pub const BALANCE: &str = "auto~balance";
+    /// ♻️ 自动选择's 速度最快.
+    pub const FASTEST: &str = "auto~fastest";
+    /// The selector the download speed test switches line by line.
+    pub const SPEED_TEST: &str = "speedtest";
+    /// Direct (Clash's DIRECT), as stored in settings.
+    pub const DIRECT: &str = "direct";
+    /// Refuse (Clash's REJECT), as stored in settings.
+    pub const BLOCK: &str = "block";
+}
+
+/// `节点选择|选择节点|手动切换|^\W*(proxy|proxies)\W*$`, case-insensitive
+/// (`\W` is ASCII: anything but `[A-Za-z0-9_]`).
+fn is_select_name(name: &str) -> bool {
+    if ["节点选择", "选择节点", "手动切换"]
+        .iter()
+        .any(|w| name.contains(w))
+    {
+        return true;
+    }
+    let core = name.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
+    core.eq_ignore_ascii_case("proxy") || core.eq_ignore_ascii_case("proxies")
+}
+
+/// Our group a provider's group `name` means, if any (Dart
+/// `ProxyController._ourGroupFor`): the provider's own 节点选择 → `proxy`;
+/// a built-in service by alias (when built-in groups are on); a region we
+/// have lines in (`groups` of the pool); else 其他地区 for "其他 / other".
+pub fn our_group_for(name: &str, settings: &ProxySettings, groups: &[NodeGroup]) -> Option<String> {
+    if is_select_name(name) {
+        return Some(outbound_tags::PROXY.into());
+    }
+    if settings.built_in_groups {
+        if let Some(p) = POLICIES.iter().find(|p| !p.base && p.alias_matches(name)) {
+            return Some(p.tag());
+        }
+    }
+    if let Some(r) = region_of(name) {
+        let tag = r.tag();
+        if groups.iter().any(|g| g.tag == tag) {
+            return Some(tag);
+        }
+    }
+    ["其他", "其它", "other"]
+        .iter()
+        .any(|w| contains_ignore_ascii_case(name, w))
+        .then(|| group_tree::OTHER_REGION_TAG.into())
+}
+
+/// The subscriptions' own groups and rules, merged by priority and mapped
+/// onto the pooled lines (Dart `ProxyController.importedSplit`). Only
+/// subscriptions with `use_split` and a non-empty split take part.
+///
+/// B3 (kept for parity): reads the raw `input.settings` (`group_mode` for
+/// following the subscription exactly, `built_in_groups` for aliases),
+/// not the effective settings the tree is built from.
+pub fn imported_split(input: &BuildInput, pool: &Pool) -> ImportedSplit {
+    let tag_of: IndexMap<String, &String> = pool
+        .nodes
+        .iter()
+        .zip(&pool.tags)
+        .map(|(n, t)| (endpoint(&n.node), t))
+        .collect();
+    let used: Vec<_> = input
+        .subscriptions
+        .iter()
+        .filter(|s| s.use_split && !s.split.is_empty())
+        .collect();
+    // `{for n in nodes: n.name: ?tagOf[endpoint]}`: a name with no line is
+    // left out; a repeated name takes the later line.
+    let line_maps: Vec<IndexMap<String, String>> = used
+        .iter()
+        .map(|s| {
+            let mut m = IndexMap::new();
+            for n in &s.nodes {
+                if let Some(t) = tag_of.get(&endpoint(n)) {
+                    m.insert(n.name.clone(), (*t).clone());
+                }
+            }
+            m
+        })
+        .collect();
+    let splits: Vec<SubSplit<'_>> = used
+        .iter()
+        .zip(&line_maps)
+        .map(|(s, l)| SubSplit {
+            rules: &s.split,
+            line_of: l,
+        })
+        .collect();
+    let settings = &input.settings;
+    let built_in_of = |name: &str| our_group_for(name, settings, &pool.groups);
+    merge_subscription_splits(
+        &splits,
+        MergeTargets {
+            select: outbound_tags::PROXY,
+            auto: outbound_tags::AUTO,
+            fallback: &policies::final_policy().tag(),
+        },
+        Some(&built_in_of),
+        settings.group_mode == GroupMode::Subscription,
+    )
+}
+
+/// The group tree the screen shows (Dart `ProxyController.groupTree`):
+/// built from the effective settings ([`BuildInput::effective`]) over the
+/// pool, with the subscriptions' split in smart mode and the SSH chains as
+/// extra outlets.
+///
+/// B2 (kept for parity): outside smart mode the split is left out, and
+/// device exits are never extras — the config's own tree has both.
+pub fn build_tree(input: &BuildInput, pool: &Pool) -> GroupTree {
+    let s = input.effective();
+    let smart = s.mode == ProxyMode::Smart;
+    let usable: Vec<String> = pool
+        .nodes
+        .iter()
+        .zip(&pool.tags)
+        .filter(|(n, _)| is_usable_node(&n.node))
+        .map(|(_, t)| t.clone())
+        .collect();
+    let split = if smart {
+        imported_split(input, pool)
+    } else {
+        ImportedSplit::default()
+    };
+    let extras: Vec<String> = s.ssh_chains.iter().map(SshChain::tag).collect();
+    build_group_tree(&TreeInput {
+        lines: &pool.tags,
+        usable: &usable,
+        base: &pool.groups,
+        settings: &s,
+        split: &split,
+        extras: &extras,
+        smart_mode: smart,
+    })
+}

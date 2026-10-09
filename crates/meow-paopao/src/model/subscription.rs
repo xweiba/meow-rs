@@ -77,3 +77,65 @@ impl<'de> Deserialize<'de> for SubRules {
         Ok(Self::from_json(&Value::deserialize(d)?))
     }
 }
+
+/// A subscription as the app persists it (Dart `Subscription.toJson`,
+/// without `updated`): its parsed lines, traffic and split.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Subscription {
+    /// Stable id.
+    pub id: String,
+    /// As pasted.
+    pub url: String,
+    /// What the user calls it.
+    pub name: String,
+    /// The lines, in the subscription's order (unsupported types left out
+    /// on load, as Dart does).
+    pub nodes: Vec<crate::model::node::ProxyNode>,
+    /// Entries the parser could not use.
+    pub skipped: i64,
+    /// Traffic left on the account; None = unknown.
+    pub usage: Option<crate::model::usage::Usage>,
+    /// Last refresh problem; None when fine.
+    pub error: Option<String>,
+    /// The provider's own groups and rules.
+    pub split: SubRules,
+    /// Use them (default true; persisted only when false).
+    pub use_split: bool,
+}
+
+impl Subscription {
+    /// Dart `Subscription.fromJson`: None unless an object with a string
+    /// `id` and `url`; other fields lenient.
+    pub fn from_json(v: &Value) -> Option<Self> {
+        let o = v.as_object()?;
+        let id = o.get("id")?.as_str()?.to_owned();
+        let url = o.get("url")?.as_str()?.to_owned();
+        Some(Self {
+            id,
+            url,
+            name: o
+                .get("name")
+                .map(|n| Dv::from_json(n).dart_string_or_empty())
+                .unwrap_or_default(),
+            nodes: o
+                .get("nodes")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(crate::model::node::ProxyNode::from_json)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            skipped: o
+                .get("skipped")
+                .and_then(|n| Dv::from_json(n).as_int_opt().ok().flatten())
+                .unwrap_or(0),
+            usage: o
+                .get("usage")
+                .and_then(crate::model::usage::Usage::from_json),
+            error: o.get("error").and_then(Value::as_str).map(str::to_owned),
+            split: SubRules::from_json(o.get("split").unwrap_or(&Value::Null)),
+            use_split: o.get("use_split") != Some(&Value::Bool(false)),
+        })
+    }
+}

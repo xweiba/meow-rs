@@ -17,6 +17,9 @@ use serde_json::{Map, Value};
 
 use crate::dart::{trim, Dv};
 use crate::model::network::{NamedNetwork, WifiProfile};
+// The policy catalog is static data; reading it here keeps the decode
+// in one place (L0 reads L3's table, nothing else).
+use crate::plan::policies::policy_by_tag;
 
 /// Implements `name()` / `from_name()` for an enum persisted by its Dart
 /// enum name.
@@ -353,44 +356,7 @@ impl GroupDefault {
         };
         Some(Self { kind, region: None })
     }
-
-    /// Whether policy group `tag` may have it at all: 广告拦截 only 拦截 /
-    /// 直连; never a region the service refuses. False for unknown groups.
-    pub fn allowed_for(&self, tag: &str) -> bool {
-        let Some(&(_, blockable, avoid)) = POLICY_LIMITS.iter().find(|(t, ..)| *t == tag) else {
-            return false;
-        };
-        if blockable {
-            return matches!(
-                self.kind,
-                GroupDefaultKind::Direct | GroupDefaultKind::Block
-            );
-        }
-        self.region.as_deref().is_none_or(|r| !avoid.contains(&r))
-    }
 }
-
-/// The built-in policy groups' tags with what limits their defaults
-/// (`blockable`, `avoidRegions` in Dart's `policies.dart`).
-// TODO(L3): read these from the policy catalog once it is ported.
-const POLICY_LIMITS: [(&str, bool, &[&str]); 16] = [
-    ("policy:ads", true, &[]),
-    ("policy:youtube", false, &[]),
-    ("policy:google", false, &["HK", "MO", "CN", "RU"]),
-    ("policy:ai", false, &["HK", "MO", "CN", "RU"]),
-    ("policy:telegram", false, &[]),
-    ("policy:social", false, &[]),
-    ("policy:netflix", false, &[]),
-    ("policy:games", false, &[]),
-    ("policy:cnmedia", false, &[]),
-    ("policy:media", false, &[]),
-    ("policy:dev", false, &[]),
-    ("policy:microsoft", false, &[]),
-    ("policy:apple", false, &[]),
-    ("policy:foreign", false, &[]),
-    ("policy:china", false, &[]),
-    ("policy:final", false, &[]),
-];
 
 /// Tags of user groups start with this (`group:<id>`).
 pub const CUSTOM_GROUP_PREFIX: &str = "group:";
@@ -828,8 +794,11 @@ impl ProxySettings {
             group_mode: GroupMode::from_value(o.get("group_mode")).unwrap_or_default(),
             group_defaults: object(o.get("group_defaults"))
                 .filter_map(|(k, v)| {
+                    // Unknown groups and defaults a group cannot take are
+                    // left out (Dart: `decodeGroupDefaults`).
+                    let p = policy_by_tag(k)?;
                     let d = GroupDefault::decode(v.as_str()?)?;
-                    d.allowed_for(k).then(|| (k.clone(), d))
+                    d.allowed_for(p).then(|| (k.clone(), d))
                 })
                 .collect(),
             custom_groups: entries("custom_groups")

@@ -7,10 +7,13 @@
 //! - [`model`] (L0): nodes, subscriptions' split and usage, settings, network.
 //! - [`ingest`] (L1): subscription bodies and share links → nodes.
 //! - [`pool`] (L2): subscriptions → one line pool, tags, region / kind groups.
+//! - [`plan`] (L3): business policies, the subscriptions' merged split, the
+//!   group tree.
 
 mod dart;
 pub mod ingest;
 pub mod model;
+pub mod plan;
 pub mod pool;
 
 pub use ingest::{
@@ -19,6 +22,10 @@ pub use ingest::{
 pub use model::network::{effective_settings, NetworkInfo, NetworkKind};
 pub use model::node::{ParseResult, ProxyNode, SUPPORTED_NODE_TYPES};
 pub use model::settings::ProxySettings;
-pub use model::subscription::{SubGroup, SubRules};
+pub use model::subscription::{SubGroup, SubRules, Subscription};
 pub use model::usage::Usage;
+pub use plan::{
+    build_tree, imported_split, BuildInput, GroupKind, GroupSpec, GroupTree, ImportedGroup,
+    ImportedSplit,
+};
 pub use pool::{build_pool, NodeGroup, Pool, PoolInput, PoolNode, PoolSource, Region};
