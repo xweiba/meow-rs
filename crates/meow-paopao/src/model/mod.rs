@@ -3,6 +3,8 @@
 
 pub mod network;
 pub mod node;
+pub mod outbound_tags;
+pub mod policies;
 pub mod settings;
 pub mod subscription;
 pub mod usage;

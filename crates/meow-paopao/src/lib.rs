@@ -4,12 +4,14 @@
 //! output must equal the Dart code's for the same input (golden tests under
 //! `tests/golden`).
 //!
-//! - [`model`] (L0): nodes, subscriptions' split and usage, settings, network.
+//! - [`model`] (L0): nodes, subscriptions' split and usage, settings, network,
+//!   and the static tables they refer to (our outbound tags, the built-in
+//!   policies).
 //! - [`ingest`] (L1): subscription bodies and share links → nodes.
 //! - [`pool`] (L2): subscriptions → one line pool of what the core can run
 //!   (nodes as `proxies:` entries), tags, region / kind groups.
-//! - [`plan`] (L3): business policies, the subscriptions' merged split, the
-//!   group tree.
+//! - [`plan`] (L3): the business policies' groups, the subscriptions'
+//!   merged split, the group tree.
 //! - [`rules`] (L4): config pieces without the tree: SSH chains as
 //!   proxies, hosts, rewrite modules, rule lines.
 //! - [`emit`] (L5): the meow config assembled from all of the above.

@@ -1,15 +1,16 @@
 //! The built-in business policies (Dart: `policies.dart`): one Clash-style
 //! selector per kind of traffic the built-in split recognises ("⛔️ 广告拦截",
-//! "🌐 国外网站", "🐟 漏网之鱼" …), in rule order.
+//! "🌐 国外网站", "🐟 漏网之鱼" …), in rule order. Static data: the settings
+//! decode reads it (L0), the plan builds groups and rules from it (S11).
 
 use crate::dart::find_ignore_ascii_case;
-use crate::plan::outbound_tags;
+use crate::model::outbound_tags;
 
 /// One alternative of a policy's aliases: how a provider's group name
 /// (`🎥 Netflix`) is recognised as meaning one of ours (B20, B21).
 ///
 /// English aliases match as whole words, ASCII case ignored: the
-/// characters around must not be part of a word ([`is_word_char`]). Dart
+/// characters around must not be part of a word (`is_word_char`). Dart
 /// matched most of them anywhere, so a group called "Download", "iPad Pro"
 /// or "Trinidad" became 广告拦截 (its sites blocked by default), "Harbing"
 /// 微软服务 and "Ashbourne" 国外媒体. Chinese aliases match anywhere: Chinese

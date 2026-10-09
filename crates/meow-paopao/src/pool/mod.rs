@@ -340,7 +340,7 @@ pub fn clashes_with_our_tags(name: &str) -> bool {
 /// (Dart had two schemes, `nodeTagsFor` and `unique()`; B1): its trimmed
 /// name (`node` when blank), a leading space when it starts like one of
 /// our own tags, then ` 2`, ` 3`, … until unique among the earlier tags
-/// and [`RESERVED_TAGS`]. `nodes` are the pool's lines (all runnable).
+/// and `RESERVED_TAGS`. `nodes` are the pool's lines (all runnable).
 pub fn node_tags_for(nodes: &[&ProxyNode]) -> Vec<String> {
     let mut used: std::collections::HashSet<String> =
         RESERVED_TAGS.iter().map(|s| (*s).to_owned()).collect();

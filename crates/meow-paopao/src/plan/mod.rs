@@ -16,7 +16,6 @@ pub mod custom_groups;
 pub mod group_defaults;
 pub mod group_tree;
 mod input;
-pub mod policies;
 mod route;
 pub mod sub_rules;
 
@@ -29,6 +28,8 @@ use crate::dart::contains_ignore_ascii_case;
 use crate::model::settings::{GroupMode, ProxyMode, ProxySettings, SshChain};
 use crate::pool::{endpoint, region_of, NodeGroup, Pool};
 
+/// The built-in policies are static data, kept in the model (S11).
+pub use crate::model::{outbound_tags, policies};
 pub use group_tree::{build_group_tree, GroupKind, GroupSpec, GroupTree, TreeInput};
 pub use input::{AutoStrategy, BuildInput, RouteAccess, RuntimeOptions};
 pub use policies::{final_policy, policy_by_tag, Policy, POLICIES};
@@ -36,26 +37,6 @@ pub use route::{offered_route_policies, route_catalog, RoutePolicy};
 pub use sub_rules::{
     merge_subscription_splits, ImportedGroup, ImportedSplit, MergeTargets, SubSplit,
 };
-
-/// Our own outbound tags (Dart `OutboundTags`).
-pub mod outbound_tags {
-    /// 🚀 节点选择.
-    pub const PROXY: &str = "proxy";
-    /// ♻️ 自动选择.
-    pub const AUTO: &str = "auto";
-    /// ♻️ 自动选择's 智能选择.
-    pub const SMART: &str = "auto~smart";
-    /// ♻️ 自动选择's 负载均衡.
-    pub const BALANCE: &str = "auto~balance";
-    /// ♻️ 自动选择's 速度最快.
-    pub const FASTEST: &str = "auto~fastest";
-    /// The selector the download speed test switches line by line.
-    pub const SPEED_TEST: &str = "speedtest";
-    /// Direct (Clash's DIRECT), as stored in settings.
-    pub const DIRECT: &str = "direct";
-    /// Refuse (Clash's REJECT), as stored in settings.
-    pub const BLOCK: &str = "block";
-}
 
 /// `节点选择|选择节点|手动切换|^\W*(proxy|proxies)\W*$`, case-insensitive
 /// (`\W` is ASCII: anything but `[A-Za-z0-9_]`).

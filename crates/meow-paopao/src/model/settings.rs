@@ -17,9 +17,7 @@ use serde_json::{Map, Value};
 
 use crate::dart::{trim, Dv};
 use crate::model::network::{NamedNetwork, WifiProfile};
-// The policy catalog is static data; reading it here keeps the decode
-// in one place (L0 reads L3's table, nothing else).
-use crate::plan::policies::policy_by_tag;
+use crate::model::policies::policy_by_tag;
 
 /// Implements `name()` / `from_name()` for an enum persisted by its Dart
 /// enum name.
