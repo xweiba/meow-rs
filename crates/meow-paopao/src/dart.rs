@@ -419,6 +419,288 @@ pub(crate) fn internet_address_try_parse(s: &str) -> Option<IpKind> {
     }
 }
 
+/// `jsonEncode(v)`: compact, `/` and non-ASCII as they are, control
+/// characters escaped, doubles printed as Dart prints them (`1.0`,
+/// `1e+21`, which serde_json would write as `1` / `1e21`).
+pub(crate) fn json_encode(v: &Dv) -> String {
+    let mut out = String::new();
+    write_json(v, &mut out);
+    out
+}
+
+fn write_json(v: &Dv, out: &mut String) {
+    match v {
+        Dv::Null => out.push_str("null"),
+        Dv::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Dv::Int(i) => out.push_str(&i.to_string()),
+        // jsonEncode throws on NaN / infinity; JSON input never has them.
+        Dv::Double(d) if !d.is_finite() => out.push_str("null"),
+        Dv::Double(d) => out.push_str(&double_to_string(*d)),
+        Dv::Str(s) => write_json_string(s, out),
+        Dv::List(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_json(item, out);
+            }
+            out.push(']');
+        }
+        Dv::Map(entries) => {
+            out.push('{');
+            for (i, (k, item)) in entries.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_json_string(&k.dart_string(), out);
+                out.push(':');
+                write_json(item, out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// Dart's JSON string escaping: `"` and `\`, `\b \t \n \f \r`, other
+/// control characters as lowercase `\u00xx`.
+fn write_json_string(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{8}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let b = c as u32;
+                out.push_str("\\u00");
+                out.push(char::from(HEX[(b >> 4) as usize]));
+                out.push(char::from(HEX[(b & 0xf) as usize]));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// `Uri.tryParse(s)?.pathSegments.lastOrNull`: None when `s` is no URI by
+/// Dart's parser or its path has no segments.
+///
+/// What Dart's `Uri.parse` does to the path is reproduced: `\` reads as
+/// `/` (in the authority too), escapes of unreserved characters are decoded before dot segments
+/// (`.`, `..`, also `%2E`) are removed — fully for a URI with a scheme, an
+/// authority or an absolute path, else as a relative path keeps leading
+/// `..` — and an authority (`file:` too) makes the path absolute.
+/// Segments are percent-decoded.
+///
+/// Divergence: a segment whose escapes are not UTF-8 (`%FF`) makes Dart's
+/// `pathSegments` throw; here it is decoded lossily.
+pub(crate) fn uri_last_path_segment(s: &str) -> Option<String> {
+    let mut segments = uri_path_segments(s)?;
+    segments.pop()
+}
+
+/// `Uri.tryParse(s)?.pathSegments` (see [`uri_last_path_segment`]).
+pub(crate) fn uri_path_segments(s: &str) -> Option<Vec<String>> {
+    // Dart's scanner reads `\` as `/` everywhere (`\\h\a` has authority h).
+    let s = s.replace('\\', "/");
+    let s = s.as_str();
+    // A scheme: everything before the first `:` when it comes before any
+    // `/`, `?`, `#`; it must then be a valid one (an empty one too).
+    let (scheme, rest) = match s.find([':', '/', '?', '#']) {
+        Some(i) if s.as_bytes()[i] == b':' => {
+            let scheme = &s[..i];
+            if !is_uri_scheme(scheme) {
+                return None;
+            }
+            (Some(scheme), &s[i + 1..])
+        }
+        _ => (None, s),
+    };
+    let hier = &rest[..rest.find(['?', '#']).unwrap_or(rest.len())];
+    let (has_authority, raw_path) = match hier.strip_prefix("//") {
+        Some(a) => {
+            let end = a.find('/').unwrap_or(a.len());
+            if !is_uri_authority(&a[..end]) {
+                return None;
+            }
+            (true, &a[end..])
+        }
+        None => (false, hier),
+    };
+    let mut path = decode_unreserved(raw_path);
+    let is_file = scheme.is_some_and(|x| x.eq_ignore_ascii_case("file"));
+    if path.is_empty() {
+        if is_file {
+            path.push('/');
+        }
+    } else if (is_file || has_authority) && !path.starts_with('/') {
+        path.insert(0, '/');
+    }
+    let path = if scheme.is_none() && !has_authority && !path.starts_with('/') {
+        normalize_relative_path(&path)
+    } else {
+        remove_dot_segments(&path)
+    };
+    let path = path.strip_prefix('/').unwrap_or(&path);
+    if path.is_empty() {
+        return Some(Vec::new());
+    }
+    Some(path.split('/').map(percent_decode_lossy).collect())
+}
+
+/// A letter, then letters, digits, `+`, `-`, `.`.
+fn is_uri_scheme(s: &str) -> bool {
+    let mut bytes = s.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_alphabetic())
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+}
+
+/// `[userinfo@]host[:port]` as Dart accepts it: one `@` at most, a port of
+/// digits only (empty allowed), brackets only around an IPv6 address (or
+/// an `IPvFuture` `v…`, zone ids allowed).
+fn is_uri_authority(a: &str) -> bool {
+    let host_port = match a.split_once('@') {
+        Some((_, hp)) if hp.contains('@') => return false,
+        Some((_, hp)) => hp,
+        None => a,
+    };
+    let port_ok = |p: &str| p.bytes().all(|b| b.is_ascii_digit());
+    if let Some(inner) = host_port.strip_prefix('[') {
+        let Some((ip, after)) = inner.split_once(']') else {
+            return false;
+        };
+        let ip_ok = ip.starts_with(['v', 'V'])
+            || ip
+                .split('%')
+                .next()
+                .is_some_and(|x| x.parse::<std::net::Ipv6Addr>().is_ok());
+        return ip_ok && (after.is_empty() || after.strip_prefix(':').is_some_and(port_ok));
+    }
+    let (host, port) = host_port.split_once(':').unwrap_or((host_port, ""));
+    !host.contains(['[', ']']) && port_ok(port)
+}
+
+/// Decodes `%XX` escapes of unreserved characters (`A-Z a-z 0-9 - . _ ~`),
+/// as Dart's URI normalization does; other escapes are left alone.
+fn decode_unreserved(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if b[i] == b'%' {
+            if let Some(c) = hex_byte(b, i + 1) {
+                if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'.' | b'_' | b'~') {
+                    out.push(char::from(c));
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        // Copy one character (s is valid UTF-8; `%` is one byte).
+        let ch = s[i..].chars().next().unwrap_or_default();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// The byte `%XX` at `b[i..i + 2]` stands for.
+fn hex_byte(b: &[u8], i: usize) -> Option<u8> {
+    let hi = char::from(*b.get(i)?).to_digit(16)?;
+    let lo = char::from(*b.get(i + 1)?).to_digit(16)?;
+    u8::try_from(hi * 16 + lo).ok()
+}
+
+/// `Uri.decodeComponent`, lossy where Dart throws (escapes that are not
+/// UTF-8). A `%` without two hex digits stays as it is (Dart's parser has
+/// escaped it as `%25` by then).
+fn percent_decode_lossy(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut bytes = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            if let Some(c) = hex_byte(b, i + 1) {
+                bytes.push(c);
+                i += 3;
+                continue;
+            }
+        }
+        bytes.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Dart's `_mayContainDotSegments`.
+fn may_contain_dot_segments(path: &str) -> bool {
+    path.starts_with('.') || path.contains("/.")
+}
+
+/// Dart's `_removeDotSegments` (RFC 3986 5.2.4).
+fn remove_dot_segments(path: &str) -> String {
+    if !may_contain_dot_segments(path) {
+        return path.to_owned();
+    }
+    let mut output: Vec<&str> = Vec::new();
+    let mut append_slash = false;
+    for segment in path.split('/') {
+        append_slash = false;
+        if segment == ".." {
+            if output.pop().is_some() && output.is_empty() {
+                output.push("");
+            }
+            append_slash = true;
+        } else if segment == "." {
+            append_slash = true;
+        } else {
+            output.push(segment);
+        }
+    }
+    if append_slash {
+        output.push("");
+    }
+    output.join("/")
+}
+
+/// Dart's `_normalizeRelativePath`: `.` dropped, `..` cancels the segment
+/// before it, leading `..` kept.
+fn normalize_relative_path(path: &str) -> String {
+    if !may_contain_dot_segments(path) {
+        return path.to_owned();
+    }
+    let mut output: Vec<&str> = Vec::new();
+    let mut append_slash = false;
+    for segment in path.split('/') {
+        append_slash = false;
+        if segment == ".." {
+            if output.last().is_some_and(|l| *l != "..") {
+                output.pop();
+                append_slash = true;
+            } else {
+                output.push("..");
+            }
+        } else if segment == "." {
+            append_slash = true;
+        } else {
+            output.push(segment);
+        }
+    }
+    if output.is_empty() || (output.len() == 1 && output[0].is_empty()) {
+        return "./".into();
+    }
+    if append_slash || output.last() == Some(&"..") {
+        output.push("");
+    }
+    output.join("/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,5 +770,56 @@ mod tests {
             (Dv::Str("b".into()), Dv::Map(vec![])),
         ]);
         assert_eq!(v.dart_string(), "{a: [1, 2.0, null, true, x], b: {}}");
+    }
+
+    #[test]
+    fn json_encodes_like_dart() {
+        // Expected values printed by `jsonEncode` on the Dart VM (3.47).
+        let v = Dv::from_json(&serde_json::json!({
+            "n": 1.0, "big": 1e21, "small": 1.5e-7, "i": -3,
+            "s": "\u{2028}\"\\/<\u{1}\u{8}\t\n\u{c}\r\u{1f}é",
+            "l": [null, true, {}],
+        }));
+        assert_eq!(
+            json_encode(&v),
+            "{\"n\":1.0,\"big\":1e+21,\"small\":1.5e-7,\"i\":-3,\
+             \"s\":\"\u{2028}\\\"\\\\/<\\u0001\\b\\t\\n\\f\\r\\u001fé\",\
+             \"l\":[null,true,{}]}"
+        );
+    }
+
+    #[test]
+    fn uri_path_segments_like_dart() {
+        // Expected values from `Uri.tryParse(s)?.pathSegments` on the
+        // Dart VM (3.47); more in tests/fixtures/l4_helpers.json.
+        let seg = |s: &str| uri_path_segments(s);
+        let v = |x: &[&str]| Some(x.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        assert_eq!(
+            seg("https://h/a/b.sgmodule?x=/y#/z"),
+            v(&["a", "b.sgmodule"])
+        );
+        assert_eq!(seg("https://h/a/b/"), v(&["a", "b", ""]));
+        assert_eq!(seg("https://h"), v(&[]));
+        assert_eq!(seg("https://h/a/./b/../c"), v(&["a", "c"]));
+        assert_eq!(seg("https://h/a/%2E%2E"), v(&[]));
+        assert_eq!(seg("https://h/a%2Fb/%252E"), v(&["a/b", "%2E"]));
+        assert_eq!(seg("http://h\\a\\b"), v(&["a", "b"]));
+        assert_eq!(seg("a\\b:c"), v(&["a", "b:c"]));
+        assert_eq!(seg("https:\\\\h\\a"), v(&["a"]));
+        assert_eq!(seg("a/../../b"), v(&["..", "b"]));
+        assert_eq!(seg("."), v(&[".", ""]));
+        assert_eq!(seg("file:"), v(&[]));
+        assert_eq!(seg("https://[::1]:80/x"), v(&["x"]));
+        assert_eq!(seg("https://h:/x"), v(&["x"]));
+        assert_eq!(seg("https://h:8a/x"), None);
+        assert_eq!(seg("https://a@b@c/x"), None);
+        assert_eq!(seg("https://[zz]/x"), None);
+        assert_eq!(seg("https://x]/y"), None);
+        assert_eq!(seg("1http://x/y"), None);
+        assert_eq!(seg(":x"), None);
+        assert_eq!(
+            uri_last_path_segment("https://h/%FF"),
+            Some("\u{fffd}".into())
+        );
     }
 }

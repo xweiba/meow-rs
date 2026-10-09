@@ -1,0 +1,5889 @@
+{
+ "clashProxyFor": [
+  {
+   "node": {
+    "name": "剩余流量：100 GB",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1000,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:剩余流量：100 GB",
+     "server": "1.2.3.4",
+     "port": 1000,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "套餐到期：2027-01-01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1001,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:套餐到期：2027-01-01",
+     "server": "1.2.3.4",
+     "port": 1001,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "香港 01 IEPL",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1002,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:香港 01 IEPL",
+     "server": "1.2.3.4",
+     "port": 1002,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "香港 02",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1003,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:香港 02",
+     "server": "1.2.3.4",
+     "port": 1003,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "HK 03 x2",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1004,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:HK 03 x2",
+     "server": "1.2.3.4",
+     "port": 1004,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "日本 01 中转",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1005,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:日本 01 中转",
+     "server": "1.2.3.4",
+     "port": 1005,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "JP 02",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1006,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:JP 02",
+     "server": "1.2.3.4",
+     "port": 1006,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "美国 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1007,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:美国 01",
+     "server": "1.2.3.4",
+     "port": 1007,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "🇺🇸 美国 02 0.5x",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1008,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:🇺🇸 美国 02 0.5x",
+     "server": "1.2.3.4",
+     "port": 1008,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "新加坡 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1009,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:新加坡 01",
+     "server": "1.2.3.4",
+     "port": 1009,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "SG 02 专线",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1010,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:SG 02 专线",
+     "server": "1.2.3.4",
+     "port": 1010,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "台湾 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1011,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:台湾 01",
+     "server": "1.2.3.4",
+     "port": 1011,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "TW 02",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1012,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:TW 02",
+     "server": "1.2.3.4",
+     "port": 1012,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "韩国 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1013,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:韩国 01",
+     "server": "1.2.3.4",
+     "port": 1013,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "英国 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1014,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:英国 01",
+     "server": "1.2.3.4",
+     "port": 1014,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "德国 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1015,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:德国 01",
+     "server": "1.2.3.4",
+     "port": 1015,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "土耳其 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1016,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:土耳其 01",
+     "server": "1.2.3.4",
+     "port": 1016,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "马来西亚 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1017,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:马来西亚 01",
+     "server": "1.2.3.4",
+     "port": 1017,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "越南 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1018,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:越南 01",
+     "server": "1.2.3.4",
+     "port": 1018,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "香港 02",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1019,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:香港 02",
+     "server": "1.2.3.4",
+     "port": 1019,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "无名节点",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 1020,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:无名节点",
+     "server": "1.2.3.4",
+     "port": 1020,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "美国 v6",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "2001:db8::1",
+     "server_port": 1021,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:美国 v6",
+     "server": "2001:db8::1",
+     "port": 1021,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "HY 日本",
+    "outbound": {
+     "type": "hysteria2",
+     "server": "hy.example.com",
+     "server_port": 443,
+     "password": "x",
+     "tls": {
+      "enabled": true
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:HY 日本",
+     "server": "hy.example.com",
+     "port": 443,
+     "type": "hysteria2",
+     "password": "x",
+     "skip-cert-verify": false
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "TJ 新加坡",
+    "outbound": {
+     "type": "trojan",
+     "server": "tj.example.com",
+     "server_port": 443,
+     "password": "x",
+     "tls": {
+      "enabled": true,
+      "server_name": "tj.example.com"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:TJ 新加坡",
+     "server": "tj.example.com",
+     "port": 443,
+     "type": "trojan",
+     "password": "x",
+     "sni": "tj.example.com"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "香港 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 8388,
+     "method": "aes-256-gcm",
+     "password": "pass"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:香港 01",
+     "server": "1.2.3.4",
+     "port": 8388,
+     "type": "ss",
+     "cipher": "aes-256-gcm",
+     "password": "pass"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "日本 01",
+    "outbound": {
+     "type": "vmess",
+     "server": "jp.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "security": "auto",
+     "alter_id": 0,
+     "tls": {
+      "enabled": true,
+      "server_name": "cdn.example.com"
+     },
+     "transport": {
+      "type": "ws",
+      "path": "/ray",
+      "headers": {
+       "Host": "cdn.example.com"
+      }
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:日本 01",
+     "server": "jp.example.com",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": true,
+     "servername": "cdn.example.com",
+     "network": "ws",
+     "ws-opts": {
+      "path": "/ray",
+      "headers": {
+       "Host": "cdn.example.com"
+      }
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "WS 美国",
+    "outbound": {
+     "type": "vless",
+     "server": "w.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "tls": {
+      "enabled": true,
+      "server_name": "w.example.com"
+     },
+     "transport": {
+      "type": "ws",
+      "path": "/ws",
+      "headers": {
+       "Host": "w.example.com"
+      }
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:WS 美国",
+     "server": "w.example.com",
+     "port": 443,
+     "type": "vless",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "tls": true,
+     "servername": "w.example.com",
+     "network": "ws",
+     "ws-opts": {
+      "path": "/ws",
+      "headers": {
+       "Host": "w.example.com"
+      }
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "Trojan 台湾",
+    "outbound": {
+     "type": "trojan",
+     "server": "t.example.com",
+     "server_port": 443,
+     "password": "secret",
+     "tls": {
+      "enabled": true,
+      "server_name": "t.example.com"
+     },
+     "transport": {
+      "type": "grpc",
+      "service_name": "gun"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:Trojan 台湾",
+     "server": "t.example.com",
+     "port": 443,
+     "type": "trojan",
+     "password": "secret",
+     "sni": "t.example.com",
+     "network": "grpc",
+     "grpc-opts": {
+      "grpc-service-name": "gun"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "HY2 新加坡",
+    "outbound": {
+     "type": "hysteria2",
+     "server": "hy.example.com",
+     "server_port": 8443,
+     "password": "pw",
+     "obfs": {
+      "type": "salamander",
+      "password": "x"
+     },
+     "tls": {
+      "enabled": true,
+      "server_name": "hy.example.com",
+      "insecure": true
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:HY2 新加坡",
+     "server": "hy.example.com",
+     "port": 8443,
+     "type": "hysteria2",
+     "password": "pw",
+     "obfs": "salamander",
+     "obfs-password": "x",
+     "sni": "hy.example.com",
+     "skip-cert-verify": true
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "HK 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.1.1.1",
+     "server_port": 1,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:HK 01",
+     "server": "1.1.1.1",
+     "port": 1,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "JP 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.1.1.2",
+     "server_port": 2,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:JP 01",
+     "server": "1.1.1.2",
+     "port": 2,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "US 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.1.1.3",
+     "server_port": 3,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:US 01",
+     "server": "1.1.1.3",
+     "port": 3,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "🎥 奈飞 SG",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.1.1.4",
+     "server_port": 4,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:🎥 奈飞 SG",
+     "server": "1.1.1.4",
+     "port": 4,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "香港 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 8388,
+     "method": "aes-256-gcm",
+     "password": "pass"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:香港 01",
+     "server": "1.2.3.4",
+     "port": 8388,
+     "type": "ss",
+     "cipher": "aes-256-gcm",
+     "password": "pass"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "2022",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "h.example.com",
+     "server_port": 443,
+     "method": "2022-blake3-aes-128-gcm",
+     "password": "AAAAAAAAAAAAAAAAAAAAAA=="
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:2022",
+     "server": "h.example.com",
+     "port": 443,
+     "type": "ss",
+     "cipher": "2022-blake3-aes-128-gcm",
+     "password": "AAAAAAAAAAAAAAAAAAAAAA=="
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "old",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "5.6.7.8",
+     "server_port": 1234,
+     "method": "aes-128-gcm",
+     "password": "pw"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:old",
+     "server": "5.6.7.8",
+     "port": 1234,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "pw"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "日本 01",
+    "outbound": {
+     "type": "vmess",
+     "server": "jp.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "security": "auto",
+     "alter_id": 0,
+     "tls": {
+      "enabled": true,
+      "server_name": "cdn.example.com"
+     },
+     "transport": {
+      "type": "ws",
+      "path": "/ray",
+      "headers": {
+       "Host": "cdn.example.com"
+      }
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:日本 01",
+     "server": "jp.example.com",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": true,
+     "servername": "cdn.example.com",
+     "network": "ws",
+     "ws-opts": {
+      "path": "/ray",
+      "headers": {
+       "Host": "cdn.example.com"
+      }
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "Reality",
+    "outbound": {
+     "type": "vless",
+     "server": "r.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "flow": "xtls-rprx-vision",
+     "tls": {
+      "enabled": true,
+      "server_name": "www.apple.com",
+      "utls": {
+       "enabled": true,
+       "fingerprint": "chrome"
+      },
+      "reality": {
+       "enabled": true,
+       "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+       "short_id": "0123abcd"
+      }
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:Reality",
+     "server": "r.example.com",
+     "port": 443,
+     "type": "vless",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "flow": "xtls-rprx-vision",
+     "tls": true,
+     "servername": "www.apple.com",
+     "client-fingerprint": "chrome",
+     "reality-opts": {
+      "public-key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+      "short-id": "0123abcd"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "WS",
+    "outbound": {
+     "type": "vless",
+     "server": "w.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "tls": {
+      "enabled": true,
+      "server_name": "w.example.com"
+     },
+     "transport": {
+      "type": "ws",
+      "path": "/ws",
+      "headers": {
+       "Host": "w.example.com"
+      }
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:WS",
+     "server": "w.example.com",
+     "port": 443,
+     "type": "vless",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "tls": true,
+     "servername": "w.example.com",
+     "network": "ws",
+     "ws-opts": {
+      "path": "/ws",
+      "headers": {
+       "Host": "w.example.com"
+      }
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "Trojan",
+    "outbound": {
+     "type": "trojan",
+     "server": "t.example.com",
+     "server_port": 443,
+     "password": "secret",
+     "tls": {
+      "enabled": true,
+      "server_name": "t.example.com"
+     },
+     "transport": {
+      "type": "grpc",
+      "service_name": "gun"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:Trojan",
+     "server": "t.example.com",
+     "port": 443,
+     "type": "trojan",
+     "password": "secret",
+     "sni": "t.example.com",
+     "network": "grpc",
+     "grpc-opts": {
+      "grpc-service-name": "gun"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "HY2",
+    "outbound": {
+     "type": "hysteria2",
+     "server": "hy.example.com",
+     "server_port": 8443,
+     "password": "pw",
+     "obfs": {
+      "type": "salamander",
+      "password": "x"
+     },
+     "tls": {
+      "enabled": true,
+      "server_name": "hy.example.com",
+      "insecure": true
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:HY2",
+     "server": "hy.example.com",
+     "port": 8443,
+     "type": "hysteria2",
+     "password": "pw",
+     "obfs": "salamander",
+     "obfs-password": "x",
+     "sni": "hy.example.com",
+     "skip-cert-verify": true
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "TUIC",
+    "outbound": {
+     "type": "tuic",
+     "server": "tu.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "password": "pw",
+     "congestion_control": "bbr",
+     "udp_relay_mode": "native",
+     "tls": {
+      "enabled": true,
+      "server_name": "tu.example.com",
+      "alpn": [
+       "h3"
+      ]
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:TUIC",
+     "server": "tu.example.com",
+     "port": 443,
+     "type": "tuic",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "password": "pw",
+     "sni": "tu.example.com",
+     "alpn": [
+      "h3"
+     ],
+     "congestion-controller": "bbr",
+     "udp-relay-mode": "native"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "S5",
+    "outbound": {
+     "type": "socks",
+     "server": "9.9.9.9",
+     "server_port": 1080,
+     "version": "5",
+     "username": "u",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:S5",
+     "server": "9.9.9.9",
+     "port": 1080,
+     "type": "socks5",
+     "username": "u",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "香港 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 8388,
+     "method": "aes-256-gcm",
+     "password": "pass"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:香港 01",
+     "server": "1.2.3.4",
+     "port": 8388,
+     "type": "ss",
+     "cipher": "aes-256-gcm",
+     "password": "pass"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "2022",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "h.example.com",
+     "server_port": 443,
+     "method": "2022-blake3-aes-128-gcm",
+     "password": "AAAAAAAAAAAAAAAAAAAAAA=="
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:2022",
+     "server": "h.example.com",
+     "port": 443,
+     "type": "ss",
+     "cipher": "2022-blake3-aes-128-gcm",
+     "password": "AAAAAAAAAAAAAAAAAAAAAA=="
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "old",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "5.6.7.8",
+     "server_port": 1234,
+     "method": "aes-128-gcm",
+     "password": "pw"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:old",
+     "server": "5.6.7.8",
+     "port": 1234,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "pw"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "日本 01",
+    "outbound": {
+     "type": "vmess",
+     "server": "jp.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "security": "auto",
+     "alter_id": 0,
+     "tls": {
+      "enabled": true,
+      "server_name": "cdn.example.com"
+     },
+     "transport": {
+      "type": "ws",
+      "path": "/ray",
+      "headers": {
+       "Host": "cdn.example.com"
+      }
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:日本 01",
+     "server": "jp.example.com",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": true,
+     "servername": "cdn.example.com",
+     "network": "ws",
+     "ws-opts": {
+      "path": "/ray",
+      "headers": {
+       "Host": "cdn.example.com"
+      }
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "Reality",
+    "outbound": {
+     "type": "vless",
+     "server": "r.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "flow": "xtls-rprx-vision",
+     "tls": {
+      "enabled": true,
+      "server_name": "www.apple.com",
+      "utls": {
+       "enabled": true,
+       "fingerprint": "chrome"
+      },
+      "reality": {
+       "enabled": true,
+       "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+       "short_id": "0123abcd"
+      }
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:Reality",
+     "server": "r.example.com",
+     "port": 443,
+     "type": "vless",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "flow": "xtls-rprx-vision",
+     "tls": true,
+     "servername": "www.apple.com",
+     "client-fingerprint": "chrome",
+     "reality-opts": {
+      "public-key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+      "short-id": "0123abcd"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "WS",
+    "outbound": {
+     "type": "vless",
+     "server": "w.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "tls": {
+      "enabled": true,
+      "server_name": "w.example.com"
+     },
+     "transport": {
+      "type": "ws",
+      "path": "/ws",
+      "headers": {
+       "Host": "w.example.com"
+      }
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:WS",
+     "server": "w.example.com",
+     "port": 443,
+     "type": "vless",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "tls": true,
+     "servername": "w.example.com",
+     "network": "ws",
+     "ws-opts": {
+      "path": "/ws",
+      "headers": {
+       "Host": "w.example.com"
+      }
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "Trojan",
+    "outbound": {
+     "type": "trojan",
+     "server": "t.example.com",
+     "server_port": 443,
+     "password": "secret",
+     "tls": {
+      "enabled": true,
+      "server_name": "t.example.com"
+     },
+     "transport": {
+      "type": "grpc",
+      "service_name": "gun"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:Trojan",
+     "server": "t.example.com",
+     "port": 443,
+     "type": "trojan",
+     "password": "secret",
+     "sni": "t.example.com",
+     "network": "grpc",
+     "grpc-opts": {
+      "grpc-service-name": "gun"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "HY2",
+    "outbound": {
+     "type": "hysteria2",
+     "server": "hy.example.com",
+     "server_port": 8443,
+     "password": "pw",
+     "obfs": {
+      "type": "salamander",
+      "password": "x"
+     },
+     "tls": {
+      "enabled": true,
+      "server_name": "hy.example.com",
+      "insecure": true
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:HY2",
+     "server": "hy.example.com",
+     "port": 8443,
+     "type": "hysteria2",
+     "password": "pw",
+     "obfs": "salamander",
+     "obfs-password": "x",
+     "sni": "hy.example.com",
+     "skip-cert-verify": true
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "TUIC",
+    "outbound": {
+     "type": "tuic",
+     "server": "tu.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "password": "pw",
+     "congestion_control": "bbr",
+     "udp_relay_mode": "native",
+     "tls": {
+      "enabled": true,
+      "server_name": "tu.example.com",
+      "alpn": [
+       "h3"
+      ]
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:TUIC",
+     "server": "tu.example.com",
+     "port": 443,
+     "type": "tuic",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "password": "pw",
+     "sni": "tu.example.com",
+     "alpn": [
+      "h3"
+     ],
+     "congestion-controller": "bbr",
+     "udp-relay-mode": "native"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "S5",
+    "outbound": {
+     "type": "socks",
+     "server": "9.9.9.9",
+     "server_port": 1080,
+     "version": "5",
+     "username": "u",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:S5",
+     "server": "9.9.9.9",
+     "port": 1080,
+     "type": "socks5",
+     "username": "u",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "香港 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.2.3.4",
+     "server_port": 8388,
+     "method": "aes-256-gcm",
+     "password": "pass"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:香港 01",
+     "server": "1.2.3.4",
+     "port": 8388,
+     "type": "ss",
+     "cipher": "aes-256-gcm",
+     "password": "pass"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "2022",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "h.example.com",
+     "server_port": 443,
+     "method": "2022-blake3-aes-128-gcm",
+     "password": "AAAAAAAAAAAAAAAAAAAAAA=="
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:2022",
+     "server": "h.example.com",
+     "port": 443,
+     "type": "ss",
+     "cipher": "2022-blake3-aes-128-gcm",
+     "password": "AAAAAAAAAAAAAAAAAAAAAA=="
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "old",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "5.6.7.8",
+     "server_port": 1234,
+     "method": "aes-128-gcm",
+     "password": "pw"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:old",
+     "server": "5.6.7.8",
+     "port": 1234,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "pw"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "日本 01",
+    "outbound": {
+     "type": "vmess",
+     "server": "jp.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "security": "auto",
+     "alter_id": 0,
+     "tls": {
+      "enabled": true,
+      "server_name": "cdn.example.com"
+     },
+     "transport": {
+      "type": "ws",
+      "path": "/ray",
+      "headers": {
+       "Host": "cdn.example.com"
+      }
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:日本 01",
+     "server": "jp.example.com",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": true,
+     "servername": "cdn.example.com",
+     "network": "ws",
+     "ws-opts": {
+      "path": "/ray",
+      "headers": {
+       "Host": "cdn.example.com"
+      }
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "Reality",
+    "outbound": {
+     "type": "vless",
+     "server": "r.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "flow": "xtls-rprx-vision",
+     "tls": {
+      "enabled": true,
+      "server_name": "www.apple.com",
+      "utls": {
+       "enabled": true,
+       "fingerprint": "chrome"
+      },
+      "reality": {
+       "enabled": true,
+       "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+       "short_id": "0123abcd"
+      }
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:Reality",
+     "server": "r.example.com",
+     "port": 443,
+     "type": "vless",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "flow": "xtls-rprx-vision",
+     "tls": true,
+     "servername": "www.apple.com",
+     "client-fingerprint": "chrome",
+     "reality-opts": {
+      "public-key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+      "short-id": "0123abcd"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "WS",
+    "outbound": {
+     "type": "vless",
+     "server": "w.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "tls": {
+      "enabled": true,
+      "server_name": "w.example.com"
+     },
+     "transport": {
+      "type": "ws",
+      "path": "/ws",
+      "headers": {
+       "Host": "w.example.com"
+      }
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:WS",
+     "server": "w.example.com",
+     "port": 443,
+     "type": "vless",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "tls": true,
+     "servername": "w.example.com",
+     "network": "ws",
+     "ws-opts": {
+      "path": "/ws",
+      "headers": {
+       "Host": "w.example.com"
+      }
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "Trojan",
+    "outbound": {
+     "type": "trojan",
+     "server": "t.example.com",
+     "server_port": 443,
+     "password": "secret",
+     "tls": {
+      "enabled": true,
+      "server_name": "t.example.com"
+     },
+     "transport": {
+      "type": "grpc",
+      "service_name": "gun"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:Trojan",
+     "server": "t.example.com",
+     "port": 443,
+     "type": "trojan",
+     "password": "secret",
+     "sni": "t.example.com",
+     "network": "grpc",
+     "grpc-opts": {
+      "grpc-service-name": "gun"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "HY2",
+    "outbound": {
+     "type": "hysteria2",
+     "server": "hy.example.com",
+     "server_port": 8443,
+     "password": "pw",
+     "obfs": {
+      "type": "salamander",
+      "password": "x"
+     },
+     "tls": {
+      "enabled": true,
+      "server_name": "hy.example.com",
+      "insecure": true
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:HY2",
+     "server": "hy.example.com",
+     "port": 8443,
+     "type": "hysteria2",
+     "password": "pw",
+     "obfs": "salamander",
+     "obfs-password": "x",
+     "sni": "hy.example.com",
+     "skip-cert-verify": true
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "TUIC",
+    "outbound": {
+     "type": "tuic",
+     "server": "tu.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "password": "pw",
+     "congestion_control": "bbr",
+     "udp_relay_mode": "native",
+     "tls": {
+      "enabled": true,
+      "server_name": "tu.example.com",
+      "alpn": [
+       "h3"
+      ]
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:TUIC",
+     "server": "tu.example.com",
+     "port": 443,
+     "type": "tuic",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "password": "pw",
+     "sni": "tu.example.com",
+     "alpn": [
+      "h3"
+     ],
+     "congestion-controller": "bbr",
+     "udp-relay-mode": "native"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "S5",
+    "outbound": {
+     "type": "socks",
+     "server": "9.9.9.9",
+     "server_port": 1080,
+     "version": "5",
+     "username": "u",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:S5",
+     "server": "9.9.9.9",
+     "port": 1080,
+     "type": "socks5",
+     "username": "u",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "HK 1",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "hk.example.com",
+     "server_port": 8388,
+     "method": "chacha20-ietf-poly1305",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:HK 1",
+     "server": "hk.example.com",
+     "port": 8388,
+     "type": "ss",
+     "cipher": "chacha20-ietf-poly1305",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "obfs",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "o.example.com",
+     "server_port": 443,
+     "method": "aes-128-gcm",
+     "password": "p",
+     "plugin": "obfs-local",
+     "plugin_opts": "obfs=tls;obfs-host=bing.com"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:obfs",
+     "server": "o.example.com",
+     "port": 443,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p",
+     "plugin": "obfs",
+     "plugin-opts": {
+      "mode": "tls",
+      "host": "bing.com"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vm",
+    "outbound": {
+     "type": "vmess",
+     "server": "vm.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "security": "auto",
+     "alter_id": 0,
+     "tls": {
+      "enabled": true
+     },
+     "transport": {
+      "type": "ws",
+      "path": "/p",
+      "headers": {
+       "Host": "vm.example.com"
+      }
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vm",
+     "server": "vm.example.com",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": true,
+     "network": "ws",
+     "ws-opts": {
+      "path": "/p",
+      "headers": {
+       "Host": "vm.example.com"
+      }
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "reality",
+    "outbound": {
+     "type": "vless",
+     "server": "re.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "flow": "xtls-rprx-vision",
+     "tls": {
+      "enabled": true,
+      "server_name": "www.apple.com",
+      "utls": {
+       "enabled": true,
+       "fingerprint": "chrome"
+      },
+      "reality": {
+       "enabled": true,
+       "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+       "short_id": "0123abcd"
+      }
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:reality",
+     "server": "re.example.com",
+     "port": 443,
+     "type": "vless",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "flow": "xtls-rprx-vision",
+     "tls": true,
+     "servername": "www.apple.com",
+     "client-fingerprint": "chrome",
+     "reality-opts": {
+      "public-key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+      "short-id": "0123abcd"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "tj",
+    "outbound": {
+     "type": "trojan",
+     "server": "tj.example.com",
+     "server_port": 443,
+     "password": "x",
+     "tls": {
+      "enabled": true,
+      "server_name": "tj.example.com",
+      "insecure": true
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:tj",
+     "server": "tj.example.com",
+     "port": 443,
+     "type": "trojan",
+     "password": "x",
+     "sni": "tj.example.com",
+     "skip-cert-verify": true
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "hy",
+    "outbound": {
+     "type": "hysteria2",
+     "server": "hy.example.com",
+     "server_port": 443,
+     "password": "x",
+     "up_mbps": 50,
+     "down_mbps": 200,
+     "tls": {
+      "enabled": true
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:hy",
+     "server": "hy.example.com",
+     "port": 443,
+     "type": "hysteria2",
+     "password": "x",
+     "skip-cert-verify": false,
+     "up": 50,
+     "down": 200
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "tu",
+    "outbound": {
+     "type": "tuic",
+     "server": "tu.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "password": "x",
+     "congestion_control": "bbr",
+     "tls": {
+      "enabled": true,
+      "alpn": [
+       "h3"
+      ]
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:tu",
+     "server": "tu.example.com",
+     "port": 443,
+     "type": "tuic",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "password": "x",
+     "alpn": [
+      "h3"
+     ],
+     "congestion-controller": "bbr"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "香港 SB",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "2.2.2.2",
+     "server_port": 8388,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:香港 SB",
+     "server": "2.2.2.2",
+     "port": 8388,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "日本 SB",
+    "outbound": {
+     "type": "vless",
+     "server": "jp.sb.example",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "tls": {
+      "enabled": true,
+      "server_name": "jp.sb.example"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:日本 SB",
+     "server": "jp.sb.example",
+     "port": 443,
+     "type": "vless",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "tls": true,
+     "servername": "jp.sb.example"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "新加坡 SIP",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "4.4.4.4",
+     "server_port": 8388,
+     "method": "aes-256-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:新加坡 SIP",
+     "server": "4.4.4.4",
+     "port": 8388,
+     "type": "ss",
+     "cipher": "aes-256-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "5.5.5.5",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "5.5.5.5",
+     "server_port": 9000,
+     "method": "chacha20-ietf-poly1305",
+     "password": "p",
+     "plugin": "obfs-local",
+     "plugin_opts": "obfs=http"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:5.5.5.5",
+     "server": "5.5.5.5",
+     "port": 9000,
+     "type": "ss",
+     "cipher": "chacha20-ietf-poly1305",
+     "password": "p",
+     "plugin": "obfs",
+     "plugin-opts": {
+      "mode": "http",
+      "host": null
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "12345",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "7.7.7.7",
+     "server_port": 8388,
+     "method": "aes-128-gcm",
+     "password": "123"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:12345",
+     "server": "7.7.7.7",
+     "port": 8388,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "123"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "v2p",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "7.7.7.8",
+     "server_port": 1,
+     "method": "aes-128-gcm",
+     "password": "p",
+     "plugin": "v2ray-plugin",
+     "plugin_opts": "mode=websocket;host=a.com;path=/x;tls"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:v2p",
+     "server": "7.7.7.8",
+     "port": 1,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p",
+     "plugin": "v2ray-plugin",
+     "plugin-opts": {
+      "mode": "websocket",
+      "host": "a.com",
+      "path": "/x",
+      "tls": true
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "hy-auth",
+    "outbound": {
+     "type": "hysteria2",
+     "server": "h.example.com",
+     "server_port": 443,
+     "password": "secret",
+     "up_mbps": 100,
+     "down_mbps": 1,
+     "obfs": {
+      "type": "salamander",
+      "password": "o"
+     },
+     "tls": {
+      "enabled": true,
+      "alpn": [
+       "h3"
+      ]
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:hy-auth",
+     "server": "h.example.com",
+     "port": 443,
+     "type": "hysteria2",
+     "password": "secret",
+     "obfs": "salamander",
+     "obfs-password": "o",
+     "alpn": [
+      "h3"
+     ],
+     "skip-cert-verify": false,
+     "up": 100,
+     "down": 1
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "grpc",
+    "outbound": {
+     "type": "vless",
+     "server": "g.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "tls": {
+      "enabled": true,
+      "alpn": [
+       "h2",
+       "http/1.1"
+      ]
+     },
+     "transport": {
+      "type": "grpc",
+      "service_name": "svc"
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:grpc",
+     "server": "g.example.com",
+     "port": 443,
+     "type": "vless",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "tls": true,
+     "network": "grpc",
+     "grpc-opts": {
+      "grpc-service-name": "svc"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "h2",
+    "outbound": {
+     "type": "vmess",
+     "server": "h2.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "security": "auto",
+     "alter_id": 0,
+     "tls": {
+      "enabled": true
+     },
+     "transport": {
+      "type": "http",
+      "host": [
+       "h2.example.com"
+      ],
+      "path": "/h2"
+     },
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:h2",
+     "server": "h2.example.com",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": true,
+     "network": "h2",
+     "h2-opts": {
+      "host": [
+       "h2.example.com"
+      ],
+      "path": "/h2"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "http-tls",
+    "outbound": {
+     "type": "http",
+     "server": "p.example.com",
+     "server_port": 443,
+     "username": "u",
+     "password": "p",
+     "tls": {
+      "enabled": true,
+      "server_name": "p.example.com"
+     }
+    }
+   },
+   "got": {
+    "ok": null
+   }
+  },
+  {
+   "node": {
+    "name": "socks",
+    "outbound": {
+     "type": "socks",
+     "server": "s.example.com",
+     "server_port": 1080,
+     "version": "5"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:socks",
+     "server": "s.example.com",
+     "port": 1080,
+     "type": "socks5"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "any",
+    "outbound": {
+     "type": "anytls",
+     "server": "a.example.com",
+     "server_port": 443,
+     "password": "p",
+     "tls": {
+      "enabled": true,
+      "server_name": "a.example.com",
+      "insecure": true
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:any",
+     "server": "a.example.com",
+     "port": 443,
+     "type": "anytls",
+     "password": "p",
+     "sni": "a.example.com",
+     "skip-cert-verify": true
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "tuic-alpn",
+    "outbound": {
+     "type": "tuic",
+     "server": "t.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "password": "p",
+     "udp_relay_mode": "quic",
+     "tls": {
+      "enabled": true,
+      "alpn": [
+       "h3"
+      ]
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:tuic-alpn",
+     "server": "t.example.com",
+     "port": 443,
+     "type": "tuic",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "password": "p",
+     "alpn": [
+      "h3"
+     ],
+     "udp-relay-mode": "quic"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "HK 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.1.1.1",
+     "server_port": 1,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:HK 01",
+     "server": "1.1.1.1",
+     "port": 1,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "JP 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.1.1.2",
+     "server_port": 2,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:JP 01",
+     "server": "1.1.1.2",
+     "port": 2,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "US 01",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.1.1.3",
+     "server_port": 3,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:US 01",
+     "server": "1.1.1.3",
+     "port": 3,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "🎥 奈飞 SG",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "1.1.1.4",
+     "server_port": 4,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:🎥 奈飞 SG",
+     "server": "1.1.1.4",
+     "port": 4,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "v6 trojan",
+    "outbound": {
+     "type": "trojan",
+     "server": "2001:db8::2",
+     "server_port": 443,
+     "password": "pw",
+     "tls": {
+      "enabled": true,
+      "server_name": "x.example"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:v6 trojan",
+     "server": "2001:db8::2",
+     "port": 443,
+     "type": "trojan",
+     "password": "pw",
+     "sni": "x.example"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "v.example.com",
+    "outbound": {
+     "type": "vless",
+     "server": "v.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "packet_encoding": "xudp"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:v.example.com",
+     "server": "v.example.com",
+     "port": 443,
+     "type": "vless",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "tls": false
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "hy2",
+    "outbound": {
+     "type": "hysteria2",
+     "server": "hy.example.com",
+     "server_port": 443,
+     "password": "pw",
+     "tls": {
+      "enabled": true,
+      "server_name": "hy.example.com"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:hy2",
+     "server": "hy.example.com",
+     "port": 443,
+     "type": "hysteria2",
+     "password": "pw",
+     "sni": "hy.example.com",
+     "skip-cert-verify": false
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "socks-b64",
+    "outbound": {
+     "type": "socks",
+     "server": "1.1.1.1",
+     "server_port": 1080,
+     "version": "5",
+     "username": "u",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:socks-b64",
+     "server": "1.1.1.1",
+     "port": 1080,
+     "type": "socks5",
+     "username": "u",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "any",
+    "outbound": {
+     "type": "anytls",
+     "server": "a.example.com",
+     "server_port": 443,
+     "password": "pw",
+     "tls": {
+      "enabled": true,
+      "server_name": "a.example.com",
+      "insecure": true
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:any",
+     "server": "a.example.com",
+     "port": 443,
+     "type": "anytls",
+     "password": "pw",
+     "sni": "a.example.com",
+     "skip-cert-verify": true
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "tuic2",
+    "outbound": {
+     "type": "tuic",
+     "server": "t.example.com",
+     "server_port": 443,
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "password": "pw",
+     "tls": {
+      "enabled": true,
+      "alpn": [
+       "h3",
+       "h2"
+      ]
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:tuic2",
+     "server": "t.example.com",
+     "port": 443,
+     "type": "tuic",
+     "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+     "password": "pw",
+     "alpn": [
+      "h3",
+      "h2"
+     ]
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "ss-plugin",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "9.9.9.9",
+     "server_port": 443,
+     "method": "aes-128-gcm",
+     "password": "pw",
+     "plugin": "obfs-local",
+     "plugin_opts": "obfs=http;obfs-host=a.com"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:ss-plugin",
+     "server": "9.9.9.9",
+     "port": 443,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "pw",
+     "plugin": "obfs",
+     "plugin-opts": {
+      "mode": "http",
+      "host": "a.com"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "ss plain",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "a",
+     "server_port": 1,
+     "method": "aes-128-gcm",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:ss plain",
+     "server": "a",
+     "port": 1,
+     "type": "ss",
+     "cipher": "aes-128-gcm",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "ss no method",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "a",
+     "server_port": 1
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:ss no method",
+     "server": "a",
+     "port": 1,
+     "type": "ss",
+     "cipher": null,
+     "password": null
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "ss obfs",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "a",
+     "server_port": 1,
+     "method": "m",
+     "password": "p",
+     "plugin": "obfs-local",
+     "plugin_opts": "obfs=http;obfs-host=a.com"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:ss obfs",
+     "server": "a",
+     "port": 1,
+     "type": "ss",
+     "cipher": "m",
+     "password": "p",
+     "plugin": "obfs",
+     "plugin-opts": {
+      "mode": "http",
+      "host": "a.com"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "ss obfs empty",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "a",
+     "server_port": 1,
+     "method": "m",
+     "password": "p",
+     "plugin": "obfs-local"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:ss obfs empty",
+     "server": "a",
+     "port": 1,
+     "type": "ss",
+     "cipher": "m",
+     "password": "p",
+     "plugin": "obfs",
+     "plugin-opts": {
+      "mode": null,
+      "host": null
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "ss v2ray",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "a",
+     "server_port": 1,
+     "method": "m",
+     "password": "p",
+     "plugin": "v2ray-plugin",
+     "plugin_opts": "mode=websocket;tls;host=x=y;;=z;tls;mode=quic; sp =1"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:ss v2ray",
+     "server": "a",
+     "port": 1,
+     "type": "ss",
+     "cipher": "m",
+     "password": "p",
+     "plugin": "v2ray-plugin",
+     "plugin-opts": {
+      "mode": "quic",
+      "tls": true,
+      "host": "x=y",
+      " sp ": "1"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "ss plugin int opts",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "a",
+     "server_port": 1,
+     "method": "m",
+     "plugin": "x",
+     "plugin_opts": 5
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:ss plugin int opts",
+     "server": "a",
+     "port": 1,
+     "type": "ss",
+     "cipher": "m",
+     "plugin": "x",
+     "plugin-opts": {
+      "5": true
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "ss plugin no pw",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "a",
+     "server_port": 1,
+     "plugin": "x",
+     "plugin_opts": ""
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:ss plugin no pw",
+     "server": "a",
+     "port": 1,
+     "type": "ss",
+     "plugin": "x",
+     "plugin-opts": {}
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "ss plugin non-string",
+    "outbound": {
+     "type": "shadowsocks",
+     "server": "a",
+     "server_port": 1,
+     "plugin": 5
+    }
+   },
+   "got": {
+    "throws": "_TypeError"
+   }
+  },
+  {
+   "node": {
+    "name": "vmess bare",
+    "outbound": {
+     "type": "vmess",
+     "server": "v",
+     "server_port": 443,
+     "uuid": "u"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vmess bare",
+     "server": "v",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "u",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": false
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vmess ws",
+    "outbound": {
+     "type": "vmess",
+     "server": "v",
+     "server_port": 443,
+     "uuid": "u",
+     "alter_id": 2,
+     "security": "aes-128-gcm",
+     "tls": {
+      "enabled": true,
+      "server_name": "s",
+      "insecure": true
+     },
+     "transport": {
+      "type": "ws",
+      "path": "/p",
+      "headers": {
+       "Host": "h"
+      }
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vmess ws",
+     "server": "v",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "u",
+     "alterId": 2,
+     "cipher": "aes-128-gcm",
+     "tls": true,
+     "servername": "s",
+     "skip-cert-verify": true,
+     "network": "ws",
+     "ws-opts": {
+      "path": "/p",
+      "headers": {
+       "Host": "h"
+      }
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vmess ws nopath",
+    "outbound": {
+     "type": "vmess",
+     "server": "v",
+     "server_port": 443,
+     "uuid": "u",
+     "tls": {
+      "insecure": false
+     },
+     "transport": {
+      "type": "ws"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vmess ws nopath",
+     "server": "v",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "u",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": true,
+     "network": "ws",
+     "ws-opts": {}
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vmess grpc",
+    "outbound": {
+     "type": "vmess",
+     "server": "v",
+     "server_port": 443,
+     "uuid": "u",
+     "transport": {
+      "type": "grpc",
+      "service_name": "g"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vmess grpc",
+     "server": "v",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "u",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": false,
+     "network": "grpc",
+     "grpc-opts": {
+      "grpc-service-name": "g"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vmess grpc bare",
+    "outbound": {
+     "type": "vmess",
+     "server": "v",
+     "server_port": 443,
+     "uuid": "u",
+     "transport": {
+      "type": "grpc"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vmess grpc bare",
+     "server": "v",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "u",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": false,
+     "network": "grpc",
+     "grpc-opts": {}
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vmess h2",
+    "outbound": {
+     "type": "vmess",
+     "server": "v",
+     "server_port": 443,
+     "uuid": "u",
+     "transport": {
+      "type": "http",
+      "host": [
+       "a",
+       "b"
+      ],
+      "path": "/x"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vmess h2",
+     "server": "v",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "u",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": false,
+     "network": "h2",
+     "h2-opts": {
+      "host": [
+       "a",
+       "b"
+      ],
+      "path": "/x"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vmess httpupgrade",
+    "outbound": {
+     "type": "vmess",
+     "server": "v",
+     "server_port": 443,
+     "uuid": "u",
+     "transport": {
+      "type": "httpupgrade"
+     }
+    }
+   },
+   "got": {
+    "ok": null
+   }
+  },
+  {
+   "node": {
+    "name": "vmess transport list",
+    "outbound": {
+     "type": "vmess",
+     "server": "v",
+     "server_port": 443,
+     "uuid": "u",
+     "transport": [
+      "ws"
+     ]
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vmess transport list",
+     "server": "v",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "u",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": false
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vmess tls true",
+    "outbound": {
+     "type": "vmess",
+     "server": "v",
+     "server_port": 443,
+     "uuid": "u",
+     "tls": true
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vmess tls true",
+     "server": "v",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "u",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": false
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vmess alter null",
+    "outbound": {
+     "type": "vmess",
+     "server": "v",
+     "server_port": 443,
+     "uuid": "u",
+     "alter_id": null,
+     "security": null
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vmess alter null",
+     "server": "v",
+     "port": 443,
+     "type": "vmess",
+     "uuid": "u",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": false
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vmess no uuid",
+    "outbound": {
+     "type": "vmess",
+     "server": "v",
+     "server_port": 443
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vmess no uuid",
+     "server": "v",
+     "port": 443,
+     "type": "vmess",
+     "alterId": 0,
+     "cipher": "auto",
+     "tls": false
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vless reality",
+    "outbound": {
+     "type": "vless",
+     "server": "r",
+     "server_port": 443,
+     "uuid": "u",
+     "flow": "xtls-rprx-vision",
+     "tls": {
+      "enabled": true,
+      "server_name": "sni",
+      "utls": {
+       "enabled": true,
+       "fingerprint": "chrome"
+      },
+      "reality": {
+       "enabled": true,
+       "public_key": "pk"
+      }
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vless reality",
+     "server": "r",
+     "port": 443,
+     "type": "vless",
+     "uuid": "u",
+     "flow": "xtls-rprx-vision",
+     "tls": true,
+     "servername": "sni",
+     "client-fingerprint": "chrome",
+     "reality-opts": {
+      "public-key": "pk",
+      "short-id": ""
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vless reality sid",
+    "outbound": {
+     "type": "vless",
+     "server": "r",
+     "server_port": 443,
+     "uuid": "u",
+     "tls": {
+      "reality": {
+       "public_key": "pk",
+       "short_id": "ab"
+      }
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vless reality sid",
+     "server": "r",
+     "port": 443,
+     "type": "vless",
+     "uuid": "u",
+     "tls": true,
+     "reality-opts": {
+      "public-key": "pk",
+      "short-id": "ab"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vless reality empty",
+    "outbound": {
+     "type": "vless",
+     "server": "r",
+     "server_port": 443,
+     "uuid": "u",
+     "tls": {
+      "reality": {}
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vless reality empty",
+     "server": "r",
+     "port": 443,
+     "type": "vless",
+     "uuid": "u",
+     "tls": true,
+     "reality-opts": {
+      "public-key": null,
+      "short-id": ""
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vless ws",
+    "outbound": {
+     "type": "vless",
+     "server": "r",
+     "server_port": 443,
+     "uuid": "u",
+     "transport": {
+      "type": "ws",
+      "path": "/"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vless ws",
+     "server": "r",
+     "port": 443,
+     "type": "vless",
+     "uuid": "u",
+     "tls": false,
+     "network": "ws",
+     "ws-opts": {
+      "path": "/"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "vless quic",
+    "outbound": {
+     "type": "vless",
+     "server": "r",
+     "server_port": 443,
+     "uuid": "u",
+     "transport": {
+      "type": "quic"
+     }
+    }
+   },
+   "got": {
+    "ok": null
+   }
+  },
+  {
+   "node": {
+    "name": "vless utls nofp",
+    "outbound": {
+     "type": "vless",
+     "server": "r",
+     "server_port": 443,
+     "uuid": "u",
+     "tls": {
+      "utls": {
+       "enabled": true
+      }
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vless utls nofp",
+     "server": "r",
+     "port": 443,
+     "type": "vless",
+     "uuid": "u",
+     "tls": true
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "trojan",
+    "outbound": {
+     "type": "trojan",
+     "server": "t",
+     "server_port": 443,
+     "password": "p",
+     "tls": {
+      "enabled": true,
+      "server_name": "s",
+      "alpn": [
+       "h2",
+       "http/1.1"
+      ]
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:trojan",
+     "server": "t",
+     "port": 443,
+     "type": "trojan",
+     "password": "p",
+     "sni": "s",
+     "alpn": [
+      "h2",
+      "http/1.1"
+     ]
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "trojan h2",
+    "outbound": {
+     "type": "trojan",
+     "server": "t",
+     "server_port": 443,
+     "password": "p",
+     "transport": {
+      "type": "http"
+     }
+    }
+   },
+   "got": {
+    "ok": null
+   }
+  },
+  {
+   "node": {
+    "name": "trojan grpc",
+    "outbound": {
+     "type": "trojan",
+     "server": "t",
+     "server_port": 443,
+     "password": "p",
+     "transport": {
+      "type": "grpc",
+      "service_name": "s"
+     },
+     "tls": {
+      "insecure": true
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:trojan grpc",
+     "server": "t",
+     "port": 443,
+     "type": "trojan",
+     "password": "p",
+     "skip-cert-verify": true,
+     "network": "grpc",
+     "grpc-opts": {
+      "grpc-service-name": "s"
+     }
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "trojan alpn empty",
+    "outbound": {
+     "type": "trojan",
+     "server": "t",
+     "server_port": 443,
+     "password": "p",
+     "tls": {
+      "alpn": []
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:trojan alpn empty",
+     "server": "t",
+     "port": 443,
+     "type": "trojan",
+     "password": "p",
+     "alpn": []
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "anytls",
+    "outbound": {
+     "type": "anytls",
+     "server": "a",
+     "server_port": 443,
+     "password": "p",
+     "tls": {
+      "server_name": "s",
+      "insecure": true,
+      "utls": {
+       "fingerprint": "ff"
+      },
+      "alpn": [
+       "h2"
+      ]
+     },
+     "transport": {
+      "type": "quic"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:anytls",
+     "server": "a",
+     "port": 443,
+     "type": "anytls",
+     "password": "p",
+     "sni": "s",
+     "alpn": [
+      "h2"
+     ],
+     "skip-cert-verify": true,
+     "client-fingerprint": "ff"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "anytls bare",
+    "outbound": {
+     "type": "anytls",
+     "server": "a",
+     "server_port": 443
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:anytls bare",
+     "server": "a",
+     "port": 443,
+     "type": "anytls"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "hy2",
+    "outbound": {
+     "type": "hysteria2",
+     "server": "h",
+     "server_port": 443,
+     "password": "p",
+     "obfs": {
+      "type": "salamander",
+      "password": "op"
+     },
+     "tls": {
+      "server_name": "s",
+      "alpn": [
+       "h3"
+      ]
+     },
+     "up_mbps": 100,
+     "down_mbps": 200.5
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:hy2",
+     "server": "h",
+     "port": 443,
+     "type": "hysteria2",
+     "password": "p",
+     "obfs": "salamander",
+     "obfs-password": "op",
+     "sni": "s",
+     "alpn": [
+      "h3"
+     ],
+     "skip-cert-verify": false,
+     "up": 100,
+     "down": 200.5
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "hy2 bare",
+    "outbound": {
+     "type": "hysteria2",
+     "server": "h",
+     "server_port": 443
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:hy2 bare",
+     "server": "h",
+     "port": 443,
+     "type": "hysteria2",
+     "skip-cert-verify": false
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "hy2 insecure",
+    "outbound": {
+     "type": "hysteria2",
+     "server": "h",
+     "server_port": 443,
+     "tls": {
+      "insecure": true
+     },
+     "up_mbps": 1e+21,
+     "down_mbps": 0.5
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:hy2 insecure",
+     "server": "h",
+     "port": 443,
+     "type": "hysteria2",
+     "skip-cert-verify": true,
+     "up": 1e+21,
+     "down": 0.5
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "tuic",
+    "outbound": {
+     "type": "tuic",
+     "server": "q",
+     "server_port": 443,
+     "uuid": "u",
+     "password": "p",
+     "congestion_control": "bbr",
+     "udp_relay_mode": "native",
+     "tls": {
+      "server_name": "s",
+      "alpn": [
+       "h3"
+      ],
+      "insecure": true
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:tuic",
+     "server": "q",
+     "port": 443,
+     "type": "tuic",
+     "uuid": "u",
+     "password": "p",
+     "sni": "s",
+     "alpn": [
+      "h3"
+     ],
+     "skip-cert-verify": true,
+     "congestion-controller": "bbr",
+     "udp-relay-mode": "native"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "tuic bare",
+    "outbound": {
+     "type": "tuic",
+     "server": "q",
+     "server_port": 443
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:tuic bare",
+     "server": "q",
+     "port": 443,
+     "type": "tuic"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "socks",
+    "outbound": {
+     "type": "socks",
+     "server": "s",
+     "server_port": 1080,
+     "username": "u",
+     "password": "p"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:socks",
+     "server": "s",
+     "port": 1080,
+     "type": "socks5",
+     "username": "u",
+     "password": "p"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "socks bare",
+    "outbound": {
+     "type": "socks",
+     "server": "s",
+     "server_port": 1080
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:socks bare",
+     "server": "s",
+     "port": 1080,
+     "type": "socks5"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "http",
+    "outbound": {
+     "type": "http",
+     "server": "h",
+     "server_port": 80
+    }
+   },
+   "got": {
+    "ok": null
+   }
+  },
+  {
+   "node": {
+    "name": "wg",
+    "outbound": {
+     "type": "wireguard",
+     "server": "h",
+     "server_port": 80
+    }
+   },
+   "got": {
+    "ok": null
+   }
+  },
+  {
+   "node": {
+    "name": "no server",
+    "outbound": {
+     "type": "socks",
+     "server_port": 1080
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:no server",
+     "server": "",
+     "port": 1080,
+     "type": "socks5"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "int server",
+    "outbound": {
+     "type": "socks",
+     "server": 1234,
+     "server_port": 1080.0
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:int server",
+     "server": "1234",
+     "port": 1080,
+     "type": "socks5"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "double port",
+    "outbound": {
+     "type": "socks",
+     "server": "s",
+     "server_port": 443.9
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:double port",
+     "server": "s",
+     "port": 443,
+     "type": "socks5"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "no port",
+    "outbound": {
+     "type": "socks",
+     "server": "s"
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:no port",
+     "server": "s",
+     "port": 0,
+     "type": "socks5"
+    }
+   }
+  },
+  {
+   "node": {
+    "name": "string port",
+    "outbound": {
+     "type": "socks",
+     "server": "s",
+     "server_port": "443"
+    }
+   },
+   "got": {
+    "throws": "_TypeError"
+   }
+  },
+  {
+   "node": {
+    "name": "sni int",
+    "outbound": {
+     "type": "trojan",
+     "server": "t",
+     "server_port": 443,
+     "tls": {
+      "server_name": 5
+     }
+    }
+   },
+   "got": {
+    "throws": "_TypeError"
+   }
+  },
+  {
+   "node": {
+    "name": "alpn mixed",
+    "outbound": {
+     "type": "trojan",
+     "server": "t",
+     "server_port": 443,
+     "tls": {
+      "alpn": [
+       "h2",
+       5
+      ]
+     }
+    }
+   },
+   "got": {
+    "throws": "_TypeError"
+   }
+  },
+  {
+   "node": {
+    "name": "ws headers mixed",
+    "outbound": {
+     "type": "vmess",
+     "server": "v",
+     "server_port": 443,
+     "transport": {
+      "type": "ws",
+      "headers": {
+       "a": 1
+      }
+     }
+    }
+   },
+   "got": {
+    "throws": "_TypeError"
+   }
+  },
+  {
+   "node": {
+    "name": "ws headers list",
+    "outbound": {
+     "type": "vmess",
+     "server": "v",
+     "server_port": 443,
+     "transport": {
+      "type": "ws",
+      "headers": [
+       1
+      ]
+     }
+    }
+   },
+   "got": {
+    "throws": "_TypeError"
+   }
+  },
+  {
+   "node": {
+    "name": "hy2 obfs list",
+    "outbound": {
+     "type": "hysteria2",
+     "server": "h",
+     "server_port": 443,
+     "obfs": [
+      "x"
+     ]
+    }
+   },
+   "got": {
+    "throws": "_TypeError"
+   }
+  },
+  {
+   "node": {
+    "name": "vmess transport type int",
+    "outbound": {
+     "type": "vmess",
+     "server": "v",
+     "server_port": 443,
+     "transport": {
+      "type": 5
+     }
+    }
+   },
+   "got": {
+    "ok": null
+   }
+  },
+  {
+   "node": {
+    "name": "vless reality not map",
+    "outbound": {
+     "type": "vless",
+     "server": "r",
+     "server_port": 443,
+     "tls": {
+      "reality": true,
+      "utls": "chrome"
+     }
+    }
+   },
+   "got": {
+    "ok": {
+     "name": "tag:vless reality not map",
+     "server": "r",
+     "port": 443,
+     "type": "vless",
+     "tls": true
+    }
+   }
+  }
+ ],
+ "unique": [
+  {
+   "nodes": [
+    {
+     "name": "a",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "a",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "a",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    }
+   ],
+   "got": {
+    "ok": {
+     "names": [
+      "a",
+      "a 2",
+      "a 3"
+     ],
+     "unsupported": 0
+    }
+   }
+  },
+  {
+   "nodes": [
+    {
+     "name": "proxy",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "auto",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "DIRECT",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "REJECT",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "direct",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "block",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "speedtest",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "auto~fastest",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    }
+   ],
+   "got": {
+    "ok": {
+     "names": [
+      "proxy 2",
+      "auto 2",
+      "DIRECT 2",
+      "REJECT 2",
+      "direct",
+      "block",
+      "speedtest",
+      "auto~fastest"
+     ],
+     "unsupported": 0
+    }
+   }
+  },
+  {
+   "nodes": [
+    {
+     "name": "",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "  ",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": " node ",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "node",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    }
+   ],
+   "got": {
+    "ok": {
+     "names": [
+      "node",
+      "node 2",
+      "node 3",
+      "node 4"
+     ],
+     "unsupported": 0
+    }
+   }
+  },
+  {
+   "nodes": [
+    {
+     "name": "region:HK",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": " region:HK",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "region:HK",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "group:x",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "ssh:y",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "sub:z",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    }
+   ],
+   "got": {
+    "ok": {
+     "names": [
+      " region:HK",
+      " region:HK 2",
+      " region:HK 3",
+      " group:x",
+      " ssh:y",
+      " sub:z"
+     ],
+     "unsupported": 0
+    }
+   }
+  },
+  {
+   "nodes": [
+    {
+     "name": "x",
+     "outbound": {
+      "type": "http",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "x",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "x",
+     "outbound": {
+      "type": "http",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "x",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    }
+   ],
+   "got": {
+    "ok": {
+     "names": [
+      "x",
+      "x 2"
+     ],
+     "unsupported": 2
+    }
+   }
+  },
+  {
+   "nodes": [
+    {
+     "name": "x",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "x 2",
+     "outbound": {
+      "type": "http",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "x",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "x 2",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    }
+   ],
+   "got": {
+    "ok": {
+     "names": [
+      "x",
+      "x 2",
+      "x 2 2"
+     ],
+     "unsupported": 1
+    }
+   }
+  },
+  {
+   "nodes": [
+    {
+     "name": "a 2",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "a",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "a",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    }
+   ],
+   "got": {
+    "ok": {
+     "names": [
+      "a 2",
+      "a",
+      "a 3"
+     ],
+     "unsupported": 0
+    }
+   }
+  },
+  {
+   "nodes": [
+    {
+     "name": "﻿a",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "a",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": " b ",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    },
+    {
+     "name": "b",
+     "outbound": {
+      "type": "socks",
+      "server": "s",
+      "server_port": 1
+     }
+    }
+   ],
+   "got": {
+    "ok": {
+     "names": [
+      "a",
+      "a 2",
+      "b",
+      "b 2"
+     ],
+     "unsupported": 0
+    }
+   }
+  },
+  {
+   "nodes": [
+    {
+     "name": "only",
+     "outbound": {
+      "type": "http",
+      "server": "s",
+      "server_port": 1
+     }
+    }
+   ],
+   "got": {
+    "ok": {
+     "names": [],
+     "unsupported": 1
+    }
+   }
+  },
+  {
+   "nodes": [],
+   "got": {
+    "ok": {
+     "names": [],
+     "unsupported": 0
+    }
+   }
+  }
+ ],
+ "ssh": {
+  "secrets": {
+   "ssh/c/0": "KEY0",
+   "ssh/c/1": "PW1",
+   "ssh/c/2": "",
+   "ssh/one/0": "PW",
+   "ssh/skip/0": "S0",
+   "ssh/skip/1": "S1"
+  },
+  "cases": [
+   {
+    "chain": {
+     "id": "c",
+     "name": "n",
+     "hops": [
+      {
+       "host": "a",
+       "port": 22,
+       "user": "me",
+       "key": true
+      },
+      {
+       "host": "b",
+       "port": 2222,
+       "user": "ops",
+       "key": false,
+       "host_key": "ssh-ed25519 AAA"
+      },
+      {
+       "host": "c"
+      }
+     ]
+    },
+    "got": {
+     "ok": [
+      {
+       "name": "ssh:c#0",
+       "type": "ssh",
+       "server": "a",
+       "port": 22,
+       "username": "me",
+       "private-key": "KEY0"
+      },
+      {
+       "name": "ssh:c#1",
+       "type": "ssh",
+       "server": "b",
+       "port": 2222,
+       "username": "ops",
+       "password": "PW1",
+       "host-key": [
+        "ssh-ed25519 AAA"
+       ],
+       "dialer-proxy": "ssh:c#0"
+      },
+      {
+       "name": "ssh:c",
+       "type": "ssh",
+       "server": "c",
+       "port": 22,
+       "username": "root",
+       "private-key": "",
+       "dialer-proxy": "ssh:c#1"
+      }
+     ]
+    }
+   },
+   {
+    "chain": {
+     "id": "one",
+     "hops": [
+      {
+       "host": "x",
+       "host_key": "k",
+       "key": false
+      }
+     ]
+    },
+    "got": {
+     "ok": [
+      {
+       "name": "ssh:one",
+       "type": "ssh",
+       "server": "x",
+       "port": 22,
+       "username": "root",
+       "password": "PW",
+       "host-key": [
+        "k"
+       ]
+      }
+     ]
+    }
+   },
+   {
+    "chain": {
+     "id": "skip",
+     "hops": [
+      {
+       "host": 5
+      },
+      {
+       "host": "y",
+       "port": 22.7,
+       "user": 7
+      }
+     ]
+    },
+    "got": {
+     "ok": [
+      {
+       "name": "ssh:skip",
+       "type": "ssh",
+       "server": "y",
+       "port": 22,
+       "username": "7",
+       "private-key": "S0"
+      }
+     ]
+    }
+   },
+   {
+    "chain": {
+     "id": "nosecret",
+     "hops": [
+      {
+       "host": "a"
+      },
+      {
+       "host": "b",
+       "key": false
+      }
+     ]
+    },
+    "got": {
+     "ok": [
+      {
+       "name": "ssh:nosecret#0",
+       "type": "ssh",
+       "server": "a",
+       "port": 22,
+       "username": "root"
+      },
+      {
+       "name": "ssh:nosecret",
+       "type": "ssh",
+       "server": "b",
+       "port": 22,
+       "username": "root",
+       "dialer-proxy": "ssh:nosecret#0"
+      }
+     ]
+    }
+   }
+  ]
+ },
+ "hosts": {
+  "entries": [
+   {
+    "match": "exact",
+    "pattern": "a.b",
+    "address": "1.2.3.4"
+   },
+   {
+    "match": "domain",
+    "pattern": " x.y ",
+    "address": " ::1 "
+   },
+   {
+    "match": "keyword",
+    "pattern": "cdn"
+   },
+   {
+    "match": "regex",
+    "pattern": "^x\\.",
+    "address": "null"
+   },
+   {
+    "match": "wildcard",
+    "pattern": "*.w",
+    "address": "",
+    "network": "home"
+   },
+   {
+    "match": "nope",
+    "pattern": "z"
+   },
+   {
+    "match": "exact",
+    "pattern": " "
+   },
+   {
+    "match": "exact",
+    "pattern": 5,
+    "address": 6
+   }
+  ],
+  "got": [
+   {
+    "type": "exact",
+    "value": "a.b",
+    "address": "1.2.3.4"
+   },
+   {
+    "type": "suffix",
+    "value": "x.y",
+    "address": "::1"
+   },
+   {
+    "type": "keyword",
+    "value": "cdn"
+   },
+   {
+    "type": "regex",
+    "value": "^x\\."
+   },
+   {
+    "type": "wildcard",
+    "value": "*.w"
+   },
+   {
+    "type": "exact",
+    "value": "5",
+    "address": "6"
+   }
+  ]
+ },
+ "modules": [
+  {
+   "modules": [
+    {
+     "id": "module0",
+     "url": "https://m.example/ad.sgmodule",
+     "enabled": true,
+     "spec": {
+      "name": "去广告",
+      "scripts": [
+       {
+        "name": "fix",
+        "response": true,
+        "pattern": "^https://api\\.example\\.com/feed",
+        "url": "https://example.com/fix.js",
+        "body": true,
+        "timeout": 10
+       }
+      ],
+      "rewrites": [
+       {
+        "pattern": "^https?://ad\\.example\\.com/x",
+        "action": {
+         "op": "reject",
+         "kind": "plain"
+        }
+       }
+      ],
+      "hostnames": [
+       "api.example.com",
+       "*.ads.example.net"
+      ],
+      "rules": [
+       "DOMAIN-SUFFIX,ad.example.com,REJECT",
+       "DOMAIN,track.example.com,REJECT"
+      ]
+     },
+     "source": "#!name=去广告\n[Rule]\nDOMAIN-SUFFIX,ad.example.com,REJECT\nDOMAIN,track.example.com,REJECT-TINYGIF\n[URL Rewrite]\n^https?://ad\\.example\\.com/x - reject\n[Script]\nfix = type=http-response, pattern=^https://api\\.example\\.com/feed, script-path=https://example.com/fix.js, requires-body=1\n[MITM]\nhostname = %APPEND% api.example.com, *.ads.example.net\n"
+    },
+    {
+     "id": "module1",
+     "url": "https://m.example/a.plugin",
+     "enabled": true,
+     "spec": {
+      "name": "Loon 参数",
+      "scripts": [
+       {
+        "name": "x",
+        "response": true,
+        "pattern": "^https://a\\.example\\.net/x",
+        "url": "https://example.com/x.js",
+        "argument": "{\"lat\":\"31.2\",\"mode\":\"fast\"}",
+        "timeout": 10,
+        "argObject": true
+       },
+       {
+        "name": "y",
+        "response": true,
+        "pattern": "^https://a\\.example\\.net/y",
+        "url": "https://example.com/y.js",
+        "timeout": 10
+       },
+       {
+        "name": "tick",
+        "response": false,
+        "pattern": "",
+        "url": "https://example.com/c.js",
+        "timeout": 30,
+        "cron": "*/30 * * * *"
+       }
+      ],
+      "rewrites": [],
+      "hostnames": [
+       "a.example.net"
+      ],
+      "rules": [],
+      "arguments": [
+       {
+        "key": "lat",
+        "label": "纬度",
+        "kind": "input",
+        "default": "31.2",
+        "help": "十进制"
+       },
+       {
+        "key": "on",
+        "label": "开关",
+        "kind": "toggle",
+        "default": "true"
+       },
+       {
+        "key": "mode",
+        "label": "模式",
+        "kind": "choice",
+        "default": "fast",
+        "options": [
+         "fast",
+         "slow"
+        ]
+       }
+      ]
+     },
+     "source": "#!name=Loon 参数\n[Argument]\nlat = input,\"31.2\",tag=纬度,desc=十进制\non = switch,true,tag=开关\nmode = select,\"fast\",\"slow\",tag=模式\n[Script]\nhttp-response ^https://a\\.example\\.net/x script-path=https://example.com/x.js, tag=x, argument=[{lat},{mode}]\nhttp-response ^https://a\\.example\\.net/y script-path=https://example.com/y.js, tag=y, enable={on}\ncron \"*/30 * * * *\" script-path=https://example.com/c.js, tag=tick\n[Mitm]\nhostname = a.example.net\n"
+    }
+   ],
+   "returnPort": 7999,
+   "got": {
+    "ok": {
+     "proxies": [
+      {
+       "name": "paopao-mitm",
+       "type": "mitm",
+       "ca-cert": "mitm-ca.pem",
+       "ca-key": "mitm-ca-key.pem",
+       "store": "modules/store.json",
+       "notifications": "modules/notifications.jsonl",
+       "utc-offset": 480,
+       "dialer-proxy": "paopao-mitm-return",
+       "scripts": [
+        {
+         "name": "去广告: fix",
+         "type": "http-response",
+         "pattern": "^https://api\\.example\\.com/feed",
+         "script-path": "modules/module0/0.js",
+         "binary-body-mode": false,
+         "requires-body": true,
+         "timeout": 10
+        },
+        {
+         "name": "去广告: reject",
+         "type": "http-request",
+         "pattern": "^https?://ad\\.example\\.com/x",
+         "script-path": "modules/builtin.js",
+         "argument": "{\"op\":\"reject\",\"kind\":\"plain\"}",
+         "requires-body": false,
+         "timeout": 5
+        },
+        {
+         "name": "Loon 参数: x",
+         "type": "http-response",
+         "pattern": "^https://a\\.example\\.net/x",
+         "script-path": "modules/module1/0.js",
+         "argument": "{\"lat\":\"31.2\",\"mode\":\"fast\"}",
+         "argument-object": true,
+         "binary-body-mode": false,
+         "requires-body": false,
+         "timeout": 10
+        },
+        {
+         "name": "Loon 参数: y",
+         "type": "http-response",
+         "pattern": "^https://a\\.example\\.net/y",
+         "script-path": "modules/module1/1.js",
+         "binary-body-mode": false,
+         "requires-body": false,
+         "timeout": 10
+        },
+        {
+         "name": "Loon 参数: tick",
+         "type": "cron",
+         "cron": "*/30 * * * *",
+         "script-path": "modules/module1/2.js",
+         "binary-body-mode": false,
+         "requires-body": false,
+         "timeout": 30
+        }
+       ]
+      },
+      {
+       "name": "paopao-mitm-return",
+       "type": "socks5",
+       "server": "127.0.0.1",
+       "port": 7999
+      }
+     ],
+     "listener": {
+      "name": "mitm-return",
+      "type": "mixed",
+      "port": 7999,
+      "listen": "127.0.0.1"
+     },
+     "rules": [
+      "AND,((NETWORK,UDP),(DOMAIN,api.example.com)),REJECT",
+      "AND,((DOMAIN,api.example.com),(NOT,((IN-NAME,mitm-return)))),paopao-mitm",
+      "AND,((NETWORK,UDP),(DOMAIN-SUFFIX,ads.example.net)),REJECT",
+      "AND,((DOMAIN-SUFFIX,ads.example.net),(NOT,((IN-NAME,mitm-return)))),paopao-mitm",
+      "AND,((NETWORK,UDP),(DOMAIN,a.example.net)),REJECT",
+      "AND,((DOMAIN,a.example.net),(NOT,((IN-NAME,mitm-return)))),paopao-mitm",
+      "DOMAIN-SUFFIX,ad.example.com,REJECT",
+      "DOMAIN,track.example.com,REJECT"
+     ]
+    }
+   }
+  },
+  {
+   "modules": [
+    {
+     "id": "module0",
+     "url": "https://m.example/ad.sgmodule",
+     "enabled": true,
+     "spec": {
+      "name": "去广告",
+      "scripts": [
+       {
+        "name": "fix",
+        "response": true,
+        "pattern": "^https://api\\.example\\.com/feed",
+        "url": "https://example.com/fix.js",
+        "body": true,
+        "timeout": 10
+       }
+      ],
+      "rewrites": [
+       {
+        "pattern": "^https?://ad\\.example\\.com/x",
+        "action": {
+         "op": "reject",
+         "kind": "plain"
+        }
+       }
+      ],
+      "hostnames": [
+       "api.example.com",
+       "*.ads.example.net"
+      ],
+      "rules": [
+       "DOMAIN-SUFFIX,ad.example.com,REJECT",
+       "DOMAIN,track.example.com,REJECT"
+      ]
+     },
+     "source": "#!name=去广告\n[Rule]\nDOMAIN-SUFFIX,ad.example.com,REJECT\nDOMAIN,track.example.com,REJECT-TINYGIF\n[URL Rewrite]\n^https?://ad\\.example\\.com/x - reject\n[Script]\nfix = type=http-response, pattern=^https://api\\.example\\.com/feed, script-path=https://example.com/fix.js, requires-body=1\n[MITM]\nhostname = %APPEND% api.example.com, *.ads.example.net\n"
+    },
+    {
+     "id": "module1",
+     "url": "https://m.example/a.plugin",
+     "enabled": true,
+     "spec": {
+      "name": "Loon 参数",
+      "scripts": [
+       {
+        "name": "x",
+        "response": true,
+        "pattern": "^https://a\\.example\\.net/x",
+        "url": "https://example.com/x.js",
+        "argument": "{\"lat\":\"31.2\",\"mode\":\"fast\"}",
+        "timeout": 10,
+        "argObject": true
+       },
+       {
+        "name": "y",
+        "response": true,
+        "pattern": "^https://a\\.example\\.net/y",
+        "url": "https://example.com/y.js",
+        "timeout": 10
+       },
+       {
+        "name": "tick",
+        "response": false,
+        "pattern": "",
+        "url": "https://example.com/c.js",
+        "timeout": 30,
+        "cron": "*/30 * * * *"
+       }
+      ],
+      "rewrites": [],
+      "hostnames": [
+       "a.example.net"
+      ],
+      "rules": [],
+      "arguments": [
+       {
+        "key": "lat",
+        "label": "纬度",
+        "kind": "input",
+        "default": "31.2",
+        "help": "十进制"
+       },
+       {
+        "key": "on",
+        "label": "开关",
+        "kind": "toggle",
+        "default": "true"
+       },
+       {
+        "key": "mode",
+        "label": "模式",
+        "kind": "choice",
+        "default": "fast",
+        "options": [
+         "fast",
+         "slow"
+        ]
+       }
+      ]
+     },
+     "source": "#!name=Loon 参数\n[Argument]\nlat = input,\"31.2\",tag=纬度,desc=十进制\non = switch,true,tag=开关\nmode = select,\"fast\",\"slow\",tag=模式\n[Script]\nhttp-response ^https://a\\.example\\.net/x script-path=https://example.com/x.js, tag=x, argument=[{lat},{mode}]\nhttp-response ^https://a\\.example\\.net/y script-path=https://example.com/y.js, tag=y, enable={on}\ncron \"*/30 * * * *\" script-path=https://example.com/c.js, tag=tick\n[Mitm]\nhostname = a.example.net\n"
+    }
+   ],
+   "returnPort": null,
+   "got": {
+    "ok": {
+     "proxies": [],
+     "listener": null,
+     "rules": [
+      "DOMAIN-SUFFIX,ad.example.com,REJECT",
+      "DOMAIN,track.example.com,REJECT"
+     ]
+    }
+   }
+  },
+  {
+   "modules": [
+    {
+     "id": "m",
+     "url": "u",
+     "spec": {
+      "name": "",
+      "rules": [
+       "DOMAIN,a,REJECT",
+       "DOMAIN,b,PROXY",
+       "DOMAIN,b,PROXY",
+       "MATCH,PROXY",
+       "GEOIP,CN,PROXY,no-resolve",
+       ""
+      ],
+      "hostnames": [
+       "*.x.com",
+       "a*b",
+       "q?",
+       "plain",
+       "plain"
+      ],
+      "excluded": [
+       "*.no.x.com",
+       "n?"
+      ]
+     }
+    }
+   ],
+   "returnPort": 7999,
+   "got": {
+    "ok": {
+     "proxies": [],
+     "listener": null,
+     "rules": [
+      "DOMAIN,a,REJECT",
+      "DOMAIN,b,proxy",
+      "MATCH,PROXY",
+      "GEOIP,CN,proxy,no-resolve",
+      ""
+     ]
+    }
+   }
+  },
+  {
+   "modules": [
+    {
+     "id": "m",
+     "url": "u",
+     "spec": {
+      "name": "",
+      "rules": [
+       "DOMAIN,a,REJECT",
+       "DOMAIN,b,PROXY",
+       "DOMAIN,b,PROXY",
+       "MATCH,PROXY",
+       "GEOIP,CN,PROXY,no-resolve",
+       ""
+      ],
+      "hostnames": [
+       "*.x.com",
+       "a*b",
+       "q?",
+       "plain",
+       "plain"
+      ],
+      "excluded": [
+       "*.no.x.com",
+       "n?"
+      ]
+     }
+    }
+   ],
+   "returnPort": null,
+   "got": {
+    "ok": {
+     "proxies": [],
+     "listener": null,
+     "rules": [
+      "DOMAIN,a,REJECT",
+      "DOMAIN,b,proxy",
+      "MATCH,PROXY",
+      "GEOIP,CN,proxy,no-resolve",
+      ""
+     ]
+    }
+   }
+  },
+  {
+   "modules": [
+    {
+     "id": "r",
+     "url": "https://x/a/b.sgmodule?x=1#f",
+     "enabled": true,
+     "spec": {
+      "rewrites": [
+       {
+        "pattern": "p",
+        "action": {
+         "op": "header",
+         "ops": [
+          [
+           "add",
+           "a",
+           "b",
+           null
+          ]
+         ],
+         "n": 1.0,
+         "big": 1e+21,
+         "small": 1.5e-7,
+         "u": " \"\\/<"
+        },
+        "response": true,
+        "body": true
+       },
+       {
+        "pattern": "q",
+        "action": "bad"
+       }
+      ],
+      "rejects": [
+       {
+        "pattern": "old",
+        "kind": "dict"
+       },
+       "x"
+      ],
+      "hostnames": [
+       "h.com"
+      ]
+     }
+    },
+    {
+     "id": "off",
+     "url": "u",
+     "enabled": false,
+     "spec": {
+      "name": "off",
+      "hostnames": [
+       "off.com"
+      ],
+      "rules": [
+       "DOMAIN,off,REJECT"
+      ],
+      "scripts": [
+       {
+        "name": "s",
+        "pattern": "p",
+        "url": "u"
+       }
+      ]
+     }
+    },
+    {
+     "id": 7,
+     "url": "https://x/%E5%8E%BB%E5%B9%BF%E5%91%8A.sgmodule",
+     "enabled": "yes",
+     "spec": {
+      "scripts": [
+       {
+        "name": null,
+        "pattern": null,
+        "timeout": 3.9,
+        "argument": "",
+        "binary": true,
+        "body": 1
+       },
+       "bad",
+       {
+        "cron": "* * * * *",
+        "argObject": true,
+        "argument": "a"
+       }
+      ]
+     }
+    },
+    {
+     "url": "no id"
+    },
+    "junk",
+    {
+     "id": "nospec",
+     "url": ""
+    }
+   ],
+   "returnPort": 7999,
+   "got": {
+    "ok": {
+     "proxies": [
+      {
+       "name": "paopao-mitm",
+       "type": "mitm",
+       "ca-cert": "mitm-ca.pem",
+       "ca-key": "mitm-ca-key.pem",
+       "store": "modules/store.json",
+       "notifications": "modules/notifications.jsonl",
+       "utc-offset": 480,
+       "dialer-proxy": "paopao-mitm-return",
+       "scripts": [
+        {
+         "name": "b.sgmodule: header",
+         "type": "http-response",
+         "pattern": "p",
+         "script-path": "modules/builtin.js",
+         "argument": "{\"op\":\"header\",\"ops\":[[\"add\",\"a\",\"b\",null]],\"n\":1.0,\"big\":1e+21,\"small\":1.5e-7,\"u\":\" \\\"\\\\/<\"}",
+         "requires-body": true,
+         "timeout": 5
+        },
+        {
+         "name": "b.sgmodule: reject",
+         "type": "http-request",
+         "pattern": "old",
+         "script-path": "modules/builtin.js",
+         "argument": "{\"op\":\"reject\",\"kind\":\"dict\"}",
+         "requires-body": false,
+         "timeout": 5
+        },
+        {
+         "name": "去广告.sgmodule: null",
+         "type": "http-request",
+         "pattern": "null",
+         "script-path": "modules/7/0.js",
+         "binary-body-mode": true,
+         "requires-body": false,
+         "timeout": 3
+        },
+        {
+         "name": "去广告.sgmodule: null",
+         "type": "cron",
+         "cron": "* * * * *",
+         "script-path": "modules/7/1.js",
+         "argument": "a",
+         "argument-object": true,
+         "binary-body-mode": false,
+         "requires-body": false,
+         "timeout": 10
+        }
+       ]
+      },
+      {
+       "name": "paopao-mitm-return",
+       "type": "socks5",
+       "server": "127.0.0.1",
+       "port": 7999
+      }
+     ],
+     "listener": {
+      "name": "mitm-return",
+      "type": "mixed",
+      "port": 7999,
+      "listen": "127.0.0.1"
+     },
+     "rules": [
+      "AND,((NETWORK,UDP),(DOMAIN,h.com)),REJECT",
+      "AND,((DOMAIN,h.com),(NOT,((IN-NAME,mitm-return)))),paopao-mitm"
+     ]
+    }
+   }
+  },
+  {
+   "modules": [
+    {
+     "id": "r",
+     "url": "https://x/a/b.sgmodule?x=1#f",
+     "enabled": true,
+     "spec": {
+      "rewrites": [
+       {
+        "pattern": "p",
+        "action": {
+         "op": "header",
+         "ops": [
+          [
+           "add",
+           "a",
+           "b",
+           null
+          ]
+         ],
+         "n": 1.0,
+         "big": 1e+21,
+         "small": 1.5e-7,
+         "u": " \"\\/<"
+        },
+        "response": true,
+        "body": true
+       },
+       {
+        "pattern": "q",
+        "action": "bad"
+       }
+      ],
+      "rejects": [
+       {
+        "pattern": "old",
+        "kind": "dict"
+       },
+       "x"
+      ],
+      "hostnames": [
+       "h.com"
+      ]
+     }
+    },
+    {
+     "id": "off",
+     "url": "u",
+     "enabled": false,
+     "spec": {
+      "name": "off",
+      "hostnames": [
+       "off.com"
+      ],
+      "rules": [
+       "DOMAIN,off,REJECT"
+      ],
+      "scripts": [
+       {
+        "name": "s",
+        "pattern": "p",
+        "url": "u"
+       }
+      ]
+     }
+    },
+    {
+     "id": 7,
+     "url": "https://x/%E5%8E%BB%E5%B9%BF%E5%91%8A.sgmodule",
+     "enabled": "yes",
+     "spec": {
+      "scripts": [
+       {
+        "name": null,
+        "pattern": null,
+        "timeout": 3.9,
+        "argument": "",
+        "binary": true,
+        "body": 1
+       },
+       "bad",
+       {
+        "cron": "* * * * *",
+        "argObject": true,
+        "argument": "a"
+       }
+      ]
+     }
+    },
+    {
+     "url": "no id"
+    },
+    "junk",
+    {
+     "id": "nospec",
+     "url": ""
+    }
+   ],
+   "returnPort": null,
+   "got": {
+    "ok": {
+     "proxies": [],
+     "listener": null,
+     "rules": []
+    }
+   }
+  },
+  {
+   "modules": [
+    {
+     "id": "cron",
+     "url": "https://x/",
+     "spec": {
+      "scripts": [
+       {
+        "name": "c",
+        "cron": "0 9 * * *",
+        "url": "u"
+       }
+      ]
+     }
+    }
+   ],
+   "returnPort": 7999,
+   "got": {
+    "ok": {
+     "proxies": [
+      {
+       "name": "paopao-mitm",
+       "type": "mitm",
+       "ca-cert": "mitm-ca.pem",
+       "ca-key": "mitm-ca-key.pem",
+       "store": "modules/store.json",
+       "notifications": "modules/notifications.jsonl",
+       "utc-offset": 480,
+       "dialer-proxy": "paopao-mitm-return",
+       "scripts": [
+        {
+         "name": "https://x/: c",
+         "type": "cron",
+         "cron": "0 9 * * *",
+         "script-path": "modules/cron/0.js",
+         "binary-body-mode": false,
+         "requires-body": false,
+         "timeout": 10
+        }
+       ]
+      },
+      {
+       "name": "paopao-mitm-return",
+       "type": "socks5",
+       "server": "127.0.0.1",
+       "port": 7999
+      }
+     ],
+     "listener": {
+      "name": "mitm-return",
+      "type": "mixed",
+      "port": 7999,
+      "listen": "127.0.0.1"
+     },
+     "rules": []
+    }
+   }
+  },
+  {
+   "modules": [
+    {
+     "id": "cron",
+     "url": "https://x/",
+     "spec": {
+      "scripts": [
+       {
+        "name": "c",
+        "cron": "0 9 * * *",
+        "url": "u"
+       }
+      ]
+     }
+    }
+   ],
+   "returnPort": null,
+   "got": {
+    "ok": {
+     "proxies": [],
+     "listener": null,
+     "rules": []
+    }
+   }
+  },
+  {
+   "modules": [
+    {
+     "id": "rw",
+     "url": "u",
+     "spec": {
+      "rewrites": [
+       {
+        "pattern": "p",
+        "action": {
+         "op": "reject"
+        }
+       }
+      ]
+     }
+    }
+   ],
+   "returnPort": 7999,
+   "got": {
+    "ok": {
+     "proxies": [],
+     "listener": null,
+     "rules": []
+    }
+   }
+  },
+  {
+   "modules": [
+    {
+     "id": "rw",
+     "url": "u",
+     "spec": {
+      "rewrites": [
+       {
+        "pattern": "p",
+        "action": {
+         "op": "reject"
+        }
+       }
+      ]
+     }
+    }
+   ],
+   "returnPort": null,
+   "got": {
+    "ok": {
+     "proxies": [],
+     "listener": null,
+     "rules": []
+    }
+   }
+  }
+ ],
+ "moduleNames": [
+  {
+   "url": "https://m.example/ad.sgmodule",
+   "got": {
+    "ok": "ad.sgmodule"
+   }
+  },
+  {
+   "url": "https://m.example/a/b/",
+   "got": {
+    "ok": ""
+   }
+  },
+  {
+   "url": "https://m.example",
+   "got": {
+    "ok": "https://m.example"
+   }
+  },
+  {
+   "url": "https://m.example/",
+   "got": {
+    "ok": "https://m.example/"
+   }
+  },
+  {
+   "url": "https://m.example/a/./b/../c.plugin",
+   "got": {
+    "ok": "c.plugin"
+   }
+  },
+  {
+   "url": "https://m.example/a/..",
+   "got": {
+    "ok": "https://m.example/a/.."
+   }
+  },
+  {
+   "url": "https://m.example/%E5%8E%BB.sgmodule",
+   "got": {
+    "ok": "去.sgmodule"
+   }
+  },
+  {
+   "url": "https://m.example/%zz",
+   "got": {
+    "ok": "%zz"
+   }
+  },
+  {
+   "url": "https://m.example/a%2Fb",
+   "got": {
+    "ok": "a/b"
+   }
+  },
+  {
+   "url": "https://m.example/%FF",
+   "got": {
+    "throws": "FormatException"
+   }
+  },
+  {
+   "url": "https://m.example/x?y=/z#/w",
+   "got": {
+    "ok": "x"
+   }
+  },
+  {
+   "url": "https://m.example:abc/x",
+   "got": {
+    "ok": "https://m.example:abc/x"
+   }
+  },
+  {
+   "url": "https://m.example:99999/x",
+   "got": {
+    "ok": "x"
+   }
+  },
+  {
+   "url": "https://[::1]/x",
+   "got": {
+    "ok": "x"
+   }
+  },
+  {
+   "url": "https://[zz]/x",
+   "got": {
+    "ok": "https://[zz]/x"
+   }
+  },
+  {
+   "url": "http://user:pw@h:8080/p/q.lpx",
+   "got": {
+    "ok": "q.lpx"
+   }
+  },
+  {
+   "url": "u",
+   "got": {
+    "ok": "u"
+   }
+  },
+  {
+   "url": "",
+   "got": {
+    "ok": ""
+   }
+  },
+  {
+   "url": "a/b",
+   "got": {
+    "ok": "b"
+   }
+  },
+  {
+   "url": "./a",
+   "got": {
+    "ok": "a"
+   }
+  },
+  {
+   "url": "../a/b",
+   "got": {
+    "ok": "b"
+   }
+  },
+  {
+   "url": "a/../../b",
+   "got": {
+    "ok": "b"
+   }
+  },
+  {
+   "url": "/abs/x",
+   "got": {
+    "ok": "x"
+   }
+  },
+  {
+   "url": "//host/x",
+   "got": {
+    "ok": "x"
+   }
+  },
+  {
+   "url": "file:///C:/x/y.sgmodule",
+   "got": {
+    "ok": "y.sgmodule"
+   }
+  },
+  {
+   "url": "mailto:x",
+   "got": {
+    "ok": "x"
+   }
+  },
+  {
+   "url": "1http://x/y",
+   "got": {
+    "ok": "1http://x/y"
+   }
+  },
+  {
+   "url": "a b:c/d",
+   "got": {
+    "ok": "a b:c/d"
+   }
+  },
+  {
+   "url": ":x/y",
+   "got": {
+    "ok": ":x/y"
+   }
+  },
+  {
+   "url": "ht+tp://x/y",
+   "got": {
+    "ok": "y"
+   }
+  },
+  {
+   "url": "https://x/a b/c d",
+   "got": {
+    "ok": "c d"
+   }
+  },
+  {
+   "url": "https://x/去广告.sgmodule",
+   "got": {
+    "ok": "去广告.sgmodule"
+   }
+  },
+  {
+   "url": "https://x/a\\b",
+   "got": {
+    "ok": "b"
+   }
+  },
+  {
+   "url": "https://x/a;b",
+   "got": {
+    "ok": "a;b"
+   }
+  },
+  {
+   "url": "HTTPS://X/Y",
+   "got": {
+    "ok": "Y"
+   }
+  },
+  {
+   "url": "https:x/y",
+   "got": {
+    "ok": "y"
+   }
+  },
+  {
+   "url": "https://x/a/%2e%2e/b",
+   "got": {
+    "ok": "b"
+   }
+  },
+  {
+   "url": "https://x/a/.%2E",
+   "got": {
+    "ok": "https://x/a/.%2E"
+   }
+  },
+  {
+   "url": "?q",
+   "got": {
+    "ok": "?q"
+   }
+  },
+  {
+   "url": "#f",
+   "got": {
+    "ok": "#f"
+   }
+  },
+  {
+   "url": "a:",
+   "got": {
+    "ok": "a:"
+   }
+  },
+  {
+   "url": "https://x/a%",
+   "got": {
+    "ok": "a%"
+   }
+  },
+  {
+   "url": "https://x/a%4",
+   "got": {
+    "ok": "a%4"
+   }
+  },
+  {
+   "url": "https://x/a+b",
+   "got": {
+    "ok": "a+b"
+   }
+  },
+  {
+   "url": "https://a@b@c/x",
+   "got": {
+    "ok": "https://a@b@c/x"
+   }
+  },
+  {
+   "url": "https://a b/x",
+   "got": {
+    "ok": "x"
+   }
+  },
+  {
+   "url": "https://x:/y",
+   "got": {
+    "ok": "y"
+   }
+  },
+  {
+   "url": "https://[::1]:80/x",
+   "got": {
+    "ok": "x"
+   }
+  },
+  {
+   "url": "https://[::1/x",
+   "got": {
+    "ok": "https://[::1/x"
+   }
+  },
+  {
+   "url": "https://x]/y",
+   "got": {
+    "ok": "https://x]/y"
+   }
+  },
+  {
+   "url": "https://a[b/x",
+   "got": {
+    "ok": "https://a[b/x"
+   }
+  },
+  {
+   "url": "http://:80/x",
+   "got": {
+    "ok": "x"
+   }
+  },
+  {
+   "url": "http://x\\y/z",
+   "got": {
+    "ok": "z"
+   }
+  },
+  {
+   "url": "x\\y",
+   "got": {
+    "ok": "y"
+   }
+  },
+  {
+   "url": "mailto:a\\b",
+   "got": {
+    "ok": "b"
+   }
+  },
+  {
+   "url": "file:",
+   "got": {
+    "ok": "file:"
+   }
+  },
+  {
+   "url": "file:x",
+   "got": {
+    "ok": "x"
+   }
+  },
+  {
+   "url": ".",
+   "got": {
+    "ok": ""
+   }
+  },
+  {
+   "url": "..",
+   "got": {
+    "ok": ""
+   }
+  },
+  {
+   "url": "a/..",
+   "got": {
+    "ok": ""
+   }
+  },
+  {
+   "url": "a/.",
+   "got": {
+    "ok": ""
+   }
+  },
+  {
+   "url": "https://x/.",
+   "got": {
+    "ok": "https://x/."
+   }
+  },
+  {
+   "url": "https://x/a/%2E%2E",
+   "got": {
+    "ok": "https://x/a/%2E%2E"
+   }
+  },
+  {
+   "url": "https://x/a/%2F..",
+   "got": {
+    "ok": "/.."
+   }
+  },
+  {
+   "url": "https://x/a/b/..",
+   "got": {
+    "ok": ""
+   }
+  },
+  {
+   "url": "https://x/a/b/../",
+   "got": {
+    "ok": ""
+   }
+  },
+  {
+   "url": "https://x/%41%42",
+   "got": {
+    "ok": "AB"
+   }
+  },
+  {
+   "url": "https://x/a%252E",
+   "got": {
+    "ok": "a%2E"
+   }
+  },
+  {
+   "url": "https://user@/x",
+   "got": {
+    "ok": "x"
+   }
+  },
+  {
+   "url": "https://x:8a/y",
+   "got": {
+    "ok": "https://x:8a/y"
+   }
+  },
+  {
+   "url": "https://[v1.x]/y",
+   "got": {
+    "ok": "y"
+   }
+  },
+  {
+   "url": "https://[fe80::1%25eth0]/y",
+   "got": {
+    "ok": "y"
+   }
+  },
+  {
+   "url": "https://h%41st/y",
+   "got": {
+    "ok": "y"
+   }
+  },
+  {
+   "url": "https://x/y#",
+   "got": {
+    "ok": "y"
+   }
+  },
+  {
+   "url": "https://x/y?",
+   "got": {
+    "ok": "y"
+   }
+  },
+  {
+   "url": "a:b:c",
+   "got": {
+    "ok": "b:c"
+   }
+  },
+  {
+   "url": "https://x/%e5%8e%bb",
+   "got": {
+    "ok": "去"
+   }
+  },
+  {
+   "url": "https://x/%C3",
+   "got": {
+    "throws": "FormatException"
+   }
+  },
+  {
+   "url": "//",
+   "got": {
+    "ok": "//"
+   }
+  },
+  {
+   "url": "///a",
+   "got": {
+    "ok": "a"
+   }
+  },
+  {
+   "url": "https://x//",
+   "got": {
+    "ok": ""
+   }
+  },
+  {
+   "url": "https://x//a",
+   "got": {
+    "ok": "a"
+   }
+  },
+  {
+   "url": "a//b",
+   "got": {
+    "ok": "b"
+   }
+  },
+  {
+   "url": "http://x/a\tb",
+   "got": {
+    "ok": "a\tb"
+   }
+  },
+  {
+   "url": "http://x/ a ",
+   "got": {
+    "ok": " a "
+   }
+  },
+  {
+   "url": " http://x/a",
+   "got": {
+    "ok": " http://x/a"
+   }
+  },
+  {
+   "url": "http://x/a\n",
+   "got": {
+    "ok": "a\n"
+   }
+  }
+ ]
+}

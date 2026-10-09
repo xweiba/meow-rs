@@ -9,12 +9,15 @@
 //! - [`pool`] (L2): subscriptions → one line pool, tags, region / kind groups.
 //! - [`plan`] (L3): business policies, the subscriptions' merged split, the
 //!   group tree.
+//! - [`rules`] (L4): config pieces without the tree: nodes and SSH chains as
+//!   proxies, hosts, rewrite modules, rule lines.
 
 mod dart;
 pub mod ingest;
 pub mod model;
 pub mod plan;
 pub mod pool;
+pub mod rules;
 
 pub use ingest::{
     parse_share_link, parse_share_links, parse_subscription, usage_from_names, ParseError,
@@ -29,3 +32,7 @@ pub use plan::{
     ImportedSplit,
 };
 pub use pool::{build_pool, NodeGroup, Pool, PoolInput, PoolNode, PoolSource, Region};
+pub use rules::{
+    clash_proxies, clash_proxy_for, module_config, paopao_hosts, ssh_proxies, ClashProxies,
+    ModuleConfig, ScriptModule, SshSecrets,
+};
