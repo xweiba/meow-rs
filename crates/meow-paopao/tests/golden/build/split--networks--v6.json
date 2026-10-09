@@ -219,21 +219,7 @@
         "hk:<routekey>",
         "jp:<routekey>",
         "sg:<routekey>",
-        "us:<routekey>",
-        "youtube:<routekey>",
-        "google:<routekey>",
-        "ai:<routekey>",
-        "telegram:<routekey>",
-        "social:<routekey>",
-        "netflix:<routekey>",
-        "games:<routekey>",
-        "cnmedia:<routekey>",
-        "media:<routekey>",
-        "dev:<routekey>",
-        "microsoft:<routekey>",
-        "apple:<routekey>",
-        "foreign:<routekey>",
-        "china:<routekey>"
+        "us:<routekey>"
       ],
       "skip-auth-prefixes": [
         "127.0.0.1/8",

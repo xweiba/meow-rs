@@ -78,7 +78,9 @@ pub struct EmitInput<'a> {
     /// The settings in force ([`crate::plan::BuildInput::effective`]).
     pub settings: &'a ProxySettings,
     pub runtime: &'a RuntimeOptions,
-    /// The route API's policies; used only when `runtime.route` is set.
+    /// The route API's policies, each with a target in the config
+    /// ([`crate::plan::offered_route_policies`]); used only when
+    /// `runtime.route` is set.
     pub route_policies: &'a [RoutePolicy],
     pub strategy: AutoStrategy,
     /// SSH credentials; written into the chains' proxies, never logged.
@@ -241,16 +243,17 @@ impl<'a> Plan<'a> {
                 outbound_tags::SPEED_TEST
             ));
         }
-        for p in route.unwrap_or_default() {
-            let t = p.target.as_str();
-            if t == outbound_tags::DIRECT || t == outbound_tags::PROXY || self.choices.contains(t) {
-                let t = if t == outbound_tags::DIRECT {
-                    "DIRECT"
-                } else {
-                    t
-                };
-                out.push(format!("IN-USER,{},{t}", p.id));
-            }
+        // `rule` (no target) is left to the rules.
+        for p in route
+            .unwrap_or_default()
+            .iter()
+            .filter(|p| !p.target.is_empty())
+        {
+            let t = match p.target.as_str() {
+                outbound_tags::DIRECT => "DIRECT",
+                t => t,
+            };
+            out.push(format!("IN-USER,{},{t}", p.id));
         }
         out.extend(private_cidr_rules());
         let user: Vec<String> = s

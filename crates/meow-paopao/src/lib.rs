@@ -39,8 +39,9 @@ pub use model::settings::ProxySettings;
 pub use model::subscription::{SubGroup, SubRules, Subscription};
 pub use model::usage::Usage;
 pub use plan::{
-    build_tree, imported_split, route_catalog, tree_for, AutoStrategy, BuildInput, GroupKind,
-    GroupSpec, GroupTree, ImportedGroup, ImportedSplit, RoutePolicy, RuntimeOptions,
+    build_tree, imported_split, offered_route_policies, route_catalog, tree_for, AutoStrategy,
+    BuildInput, GroupKind, GroupSpec, GroupTree, ImportedGroup, ImportedSplit, RoutePolicy,
+    RuntimeOptions,
 };
 pub use pool::{
     build_pool, clash_proxy_for, NodeGroup, Pool, PoolInput, PoolNode, PoolSource, Region,

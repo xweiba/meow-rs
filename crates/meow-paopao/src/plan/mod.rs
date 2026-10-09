@@ -32,7 +32,7 @@ use crate::pool::{endpoint, is_usable_node, region_of, NodeGroup, Pool};
 pub use group_tree::{build_group_tree, GroupKind, GroupSpec, GroupTree, TreeInput};
 pub use input::{AutoStrategy, BuildInput, RouteAccess, RuntimeOptions};
 pub use policies::{final_policy, policy_by_tag, Policy, POLICIES};
-pub use route::{route_catalog, RoutePolicy};
+pub use route::{offered_route_policies, route_catalog, RoutePolicy};
 pub use sub_rules::{
     merge_subscription_splits, ImportedGroup, ImportedSplit, MergeTargets, SubSplit,
 };

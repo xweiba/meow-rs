@@ -203,3 +203,52 @@ fn b28_rules_are_the_configs() {
         .collect();
     assert_eq!(out.rules, want);
 }
+
+/// B29: in global mode there is no 🤖 AI 服务 group; Dart still let
+/// `ai:<key>` authenticate (no IN-USER line: the normal rules decided).
+/// With one line there is no 速度最快 either.
+#[test]
+fn b29_only_policies_the_config_has() {
+    let mut v = input(
+        &json!([vless("US 01", "a")]),
+        &json!({}),
+        &json!({"mode": "global"}),
+    );
+    v["runtime"]["route"] = json!({"key": "k"});
+    let out = run(&v);
+    let ids: Vec<&str> = out.route_policies.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(ids, ["auto", "rule", "proxy", "direct", "us"]);
+    let auth: Vec<&str> = out.config["authentication"]
+        .as_array()
+        .expect("auth")
+        .iter()
+        .filter_map(|a| a.as_str())
+        .collect();
+    assert_eq!(auth, ["auto:k", "rule:k", "proxy:k", "direct:k", "us:k"]);
+    // Every policy but `rule` has its IN-USER line.
+    let users: Vec<String> = config_rules(&out)
+        .into_iter()
+        .filter(|r| r.starts_with("IN-USER,"))
+        .collect();
+    assert_eq!(
+        users,
+        [
+            "IN-USER,auto,auto",
+            "IN-USER,proxy,proxy",
+            "IN-USER,direct,DIRECT",
+            "IN-USER,us,region:US"
+        ]
+    );
+
+    // Smart mode: the service groups are there, and so are their policies.
+    let mut v = input(
+        &json!([vless("US 01", "a"), vless("JP 01", "b")]),
+        &json!({}),
+        &json!({}),
+    );
+    v["runtime"]["route"] = json!({"key": "k"});
+    let out = run(&v);
+    for id in ["fastest", "ai", "google", "foreign"] {
+        assert!(out.route_policies.iter().any(|p| p.id == id), "{id}");
+    }
+}

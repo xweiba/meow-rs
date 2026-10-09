@@ -6,6 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::dart::to_lower_case;
 use crate::model::settings::SshChain;
+use crate::plan::group_tree::GroupTree;
 use crate::plan::outbound_tags;
 use crate::plan::policies::POLICIES;
 use crate::pool::NodeGroup;
@@ -48,6 +49,34 @@ impl RoutePolicy {
         m.insert("kind".into(), self.kind.into());
         Value::Object(m)
     }
+}
+
+impl RoutePolicy {
+    /// Whether the config has where it leads: `rule` (no target, the rules
+    /// decide) and 直连 always; a group when `tree` has it; an SSH chain
+    /// when it is one of `ssh_chains`.
+    pub fn in_config(&self, tree: &GroupTree, ssh_chains: &[SshChain]) -> bool {
+        let t = self.target.as_str();
+        t.is_empty()
+            || t == outbound_tags::DIRECT
+            || tree.by_tag(t).is_some()
+            || ssh_chains.iter().any(|c| c.tag() == t)
+    }
+}
+
+/// [`route_catalog`] minus what the config has no target for (B29): Dart
+/// let every policy authenticate but wrote `IN-USER` only for targets in
+/// the config, so outside smart mode (or with the built-in groups off)
+/// asking for `ai` silently went by the normal rules.
+pub fn offered_route_policies(
+    catalog: Vec<RoutePolicy>,
+    tree: &GroupTree,
+    ssh_chains: &[SshChain],
+) -> Vec<RoutePolicy> {
+    catalog
+        .into_iter()
+        .filter(|p| p.in_config(tree, ssh_chains))
+        .collect()
 }
 
 /// The policies on offer now (Dart: `routeCatalog`, as

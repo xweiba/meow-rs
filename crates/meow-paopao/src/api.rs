@@ -12,7 +12,10 @@
 use serde_json::{json, Map, Value};
 
 use crate::emit::{build_clash_config, effective_rules, EmitInput};
-use crate::plan::{imported_split, route_catalog, tree_for, BuildInput, GroupTree, RoutePolicy};
+use crate::plan::{
+    imported_split, offered_route_policies, route_catalog, tree_for, BuildInput, GroupTree,
+    RoutePolicy,
+};
 use crate::pool::{build_pool, Pool};
 use crate::rules::{ScriptModule, SshSecrets};
 use crate::{parse_subscription, usage_from_names};
@@ -48,7 +51,8 @@ pub struct BuildOutput {
     /// The config's rules, in order, without the route API's and the speed
     /// test's ([`effective_rules`]).
     pub rules: Vec<String>,
-    /// What the route API offers (Dart `ProxyController.routePolicies`).
+    /// What the route API offers (Dart `ProxyController.routePolicies`):
+    /// only policies the config has a target for (B29).
     pub route_policies: Vec<RoutePolicy>,
 }
 
@@ -101,7 +105,11 @@ pub fn build(input: &BuildInput) -> BuildOutput {
     let split = imported_split(input, &pool, &settings);
     // One tree: the screen's and the config's (B2).
     let tree = tree_for(&settings, &pool, &split);
-    let route_policies = route_catalog(&pool.groups, !pool.nodes.is_empty(), &settings.ssh_chains);
+    let route_policies = offered_route_policies(
+        route_catalog(&pool.groups, !pool.nodes.is_empty(), &settings.ssh_chains),
+        &tree,
+        &settings.ssh_chains,
+    );
     let modules: Vec<ScriptModule> = input
         .modules
         .iter()
