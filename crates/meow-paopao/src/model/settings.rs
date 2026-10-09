@@ -720,16 +720,16 @@ impl ProxySettings {
                 array(&self.custom_groups, CustomGroup::to_json),
             );
         }
-        if !self.group_edits.is_empty() {
-            // As in Dart: empty edits are left out, but the key stays even
-            // when that leaves it empty.
-            let o = self
-                .group_edits
-                .iter()
-                .filter(|(_, e)| !e.is_empty())
-                .map(|(k, e)| (k.clone(), e.to_json()))
-                .collect();
-            m.insert("group_edits".into(), Value::Object(o));
+        // Empty edits are left out, and the key with them when none is
+        // left (B14: Dart wrote `{}`).
+        let edits: Map<String, Value> = self
+            .group_edits
+            .iter()
+            .filter(|(_, e)| !e.is_empty())
+            .map(|(k, e)| (k.clone(), e.to_json()))
+            .collect();
+        if !edits.is_empty() {
+            m.insert("group_edits".into(), Value::Object(edits));
         }
         if !self.disabled_lines.is_empty() {
             m.insert("disabled_lines".into(), self.disabled_lines.clone().into());
@@ -923,9 +923,17 @@ mod tests {
         assert_eq!(RuleTarget::decode("whatever"), RuleTarget::Proxy);
     }
 
+    /// B14: no `group_edits: {}` when every edit is empty.
     #[test]
-    fn empty_group_edits_keep_the_key() {
+    fn empty_group_edits_are_not_written() {
         let s = ProxySettings::from_json(&json!({"group_edits": {"policy:ai": {}}}));
-        assert_eq!(s.to_json()["group_edits"], json!({}));
+        assert!(s.to_json().get("group_edits").is_none());
+        let s = ProxySettings::from_json(&json!({"group_edits": {
+            "policy:ai": {}, "policy:google": {"exclude": ["a.example"]},
+        }}));
+        assert_eq!(
+            s.to_json()["group_edits"],
+            json!({"policy:google": {"exclude": ["a.example"]}})
+        );
     }
 }
