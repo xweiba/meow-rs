@@ -143,3 +143,33 @@ fn missing_targets_reject() {
         assert!(out.rules.contains(&want), "{want} in {:?}", out.rules);
     }
 }
+
+/// B2: the screen's tree is the config's: same groups, same order, same
+/// members (the config's selectors list their pick first).
+#[test]
+fn tree_is_the_config_tree() {
+    for path in common::golden_files("build") {
+        let case = common::read_json(&path);
+        let out = build(&BuildInput::from_json(&case["input"]));
+        let groups: Vec<&serde_json::Value> = out.config["proxy-groups"]
+            .as_array()
+            .expect("groups")
+            .iter()
+            .filter(|g| g["name"] != "speedtest")
+            .collect();
+        assert_eq!(groups.len(), out.tree.groups.len(), "{}", path.display());
+        for (c, t) in groups.iter().zip(&out.tree.groups) {
+            assert_eq!(c["name"], t.tag.as_str(), "{}", path.display());
+            let mut got: Vec<&str> = c["proxies"]
+                .as_array()
+                .expect("proxies")
+                .iter()
+                .filter_map(|m| m.as_str())
+                .collect();
+            let mut want: Vec<&str> = t.members.iter().map(String::as_str).collect();
+            got.sort_unstable();
+            want.sort_unstable();
+            assert_eq!(got, want, "{} {}", path.display(), t.tag);
+        }
+    }
+}

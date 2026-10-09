@@ -94,3 +94,36 @@ fn b1_one_tag_scheme() {
     );
     assert!(out.rules.contains(&"DOMAIN,x.example,HK".to_owned()));
 }
+
+/// B2: with 完全按订阅 (`group_mode = subscription`) in global mode, Dart's
+/// screen showed our layers (no split outside smart mode) while the core
+/// ran the provider's groups. Now one tree: the config's groups are the
+/// tree's.
+#[test]
+fn b2_screen_tree_is_the_config_tree() {
+    let v = input(
+        &json!([vless("HK 01", "a"), vless("JP 01", "b")]),
+        &json!({
+            "groups": [
+                {"n": "🚀 节点选择", "t": "select", "m": ["AUTO", "HK 01", "JP 01"]},
+                {"n": "AUTO", "t": "url-test", "m": ["HK 01", "JP 01"]},
+            ],
+            "rules": ["MATCH,🚀 节点选择"],
+        }),
+        &json!({"mode": "global", "group_mode": "subscription"}),
+    );
+    let out = run(&v);
+    let tags: Vec<&str> = out.tree.groups.iter().map(|g| g.tag.as_str()).collect();
+    assert_eq!(tags, ["proxy", "sub:AUTO"]);
+    assert_eq!(config_group_names(&out), tags);
+}
+
+fn config_group_names(out: &BuildOutput) -> Vec<&str> {
+    out.config["proxy-groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .filter_map(|g| g["name"].as_str())
+        .filter(|n| *n != "speedtest")
+        .collect()
+}

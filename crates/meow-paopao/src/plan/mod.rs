@@ -3,11 +3,11 @@
 //! `custom_groups.dart`, `sub_rules.dart`, `group_tree.dart`, and how
 //! `ProxyController` assembles them).
 //!
+//! [`tree_for`] is the one group tree: the screen shows it and the config
+//! runs it (B2).
+//!
 //! Known Dart behaviours kept for parity (see the task's decisions):
 //!
-//! - B2: [`build_tree`] is the tree the screen shows. The config builds its
-//!   own tree, always with the split and with device exits; when
-//!   `group_mode = subscription` outside smart mode the two differ.
 //! - B3: [`imported_split`] reads the raw settings (`group_mode`,
 //!   `built_in_groups`), not the effective ones the tree is built from.
 //! - B5 / B6 live in the controller (rough rule matching, label cache) and
@@ -151,16 +151,20 @@ pub fn imported_split(input: &BuildInput, pool: &Pool) -> ImportedSplit {
     )
 }
 
-/// The group tree the screen shows (Dart `ProxyController.groupTree`):
-/// built from the effective settings ([`BuildInput::effective`]) over the
-/// pool, with the subscriptions' split in smart mode and the SSH chains as
-/// extra outlets.
-///
-/// B2 (kept for parity): outside smart mode the split is left out, and
-/// device exits are never extras — the config's own tree has both.
+/// The group tree of a build ([`tree_for`] with the effective settings
+/// and the subscriptions' split).
 pub fn build_tree(input: &BuildInput, pool: &Pool) -> GroupTree {
-    let s = input.effective();
-    let smart = s.mode == ProxyMode::Smart;
+    tree_for(&input.effective(), pool, &imported_split(input, pool))
+}
+
+/// The one group tree (B2): what the screen shows and the config runs,
+/// over the pool with the settings in force `s`, the subscriptions' merged
+/// `split` and the SSH chains as extra outlets.
+///
+/// Dart built it twice: the screen's left the split out outside smart mode
+/// (so with `group_mode = subscription` it showed our layers while the
+/// core ran the provider's groups).
+pub fn tree_for(s: &ProxySettings, pool: &Pool, split: &ImportedSplit) -> GroupTree {
     let usable: Vec<String> = pool
         .nodes
         .iter()
@@ -168,19 +172,14 @@ pub fn build_tree(input: &BuildInput, pool: &Pool) -> GroupTree {
         .filter(|(n, _)| is_usable_node(&n.node))
         .map(|(_, t)| t.clone())
         .collect();
-    let split = if smart {
-        imported_split(input, pool)
-    } else {
-        ImportedSplit::default()
-    };
     let extras: Vec<String> = s.ssh_chains.iter().map(SshChain::tag).collect();
     build_group_tree(&TreeInput {
         lines: &pool.tags,
         usable: &usable,
         base: &pool.groups,
-        settings: &s,
-        split: &split,
+        settings: s,
+        split,
         extras: &extras,
-        smart_mode: smart,
+        smart_mode: s.mode == ProxyMode::Smart,
     })
 }

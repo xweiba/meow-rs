@@ -11,8 +11,6 @@
 //!
 //! Known Dart behaviours kept for parity:
 //!
-//! - B2: the config's tree always has the split (the screen's only in smart
-//!   mode).
 //! - Device exits and `allowLan` are not ported (the controller never
 //!   passes them on the meow path): a user rule to a device is REJECT.
 
@@ -27,10 +25,10 @@ use serde_json::{Map, Value};
 use crate::model::settings::{ProxyMode, ProxySettings, RuleTarget, SshChain};
 use crate::plan::group_tree::BADGE_SUBSCRIPTION;
 use crate::plan::{
-    build_group_tree, final_policy, outbound_tags, AutoStrategy, GroupTree, ImportedSplit, Policy,
-    RoutePolicy, RuntimeOptions, TreeInput, POLICIES,
+    final_policy, outbound_tags, AutoStrategy, GroupTree, ImportedSplit, Policy, RoutePolicy,
+    RuntimeOptions, POLICIES,
 };
-use crate::pool::{clash_proxy_for, is_usable_node, Pool};
+use crate::pool::{clash_proxy_for, Pool};
 use crate::rules::{
     custom_rule_line, geo_rule, iface_tag, module_config, private_cidr_rules, rule_matcher,
     rule_target, rule_target_tag, ssh_proxies, without_sites, ModuleConfig, ScriptModule,
@@ -87,6 +85,9 @@ pub struct EmitInput<'a> {
     pub ssh_secrets: &'a SshSecrets,
     /// The subscriptions' merged split ([`crate::plan::imported_split`]).
     pub split: &'a ImportedSplit,
+    /// The group tree ([`crate::plan::tree_for`] over the same pool,
+    /// settings and split): the one the screen shows.
+    pub tree: &'a GroupTree,
     /// Every rewrite module (the disabled ones are skipped).
     pub modules: &'a [ScriptModule],
     /// The local time zone's offset in minutes, for cron scripts.
@@ -118,7 +119,7 @@ struct Plan<'a> {
     input: &'a EmitInput<'a>,
     /// The lines' `proxies:` entries, named by their tags.
     proxies: Vec<Map<String, Value>>,
-    tree: GroupTree,
+    tree: &'a GroupTree,
     /// Any line, chain or group a rule may point at.
     choices: HashSet<String>,
 }
@@ -135,23 +136,8 @@ impl<'a> Plan<'a> {
             .zip(names)
             .filter_map(|(n, t)| clash_proxy_for(&n.node, t))
             .collect();
-        let usable: Vec<String> = pool
-            .nodes
-            .iter()
-            .zip(names)
-            .filter(|(n, _)| is_usable_node(&n.node))
-            .map(|(_, t)| t.clone())
-            .collect();
         let ssh_names: Vec<String> = s.ssh_chains.iter().map(SshChain::tag).collect();
-        let tree = build_group_tree(&TreeInput {
-            lines: names,
-            usable: &usable,
-            base: &pool.groups,
-            settings: s,
-            split: input.split,
-            extras: &ssh_names,
-            smart_mode: s.mode == ProxyMode::Smart,
-        });
+        let tree = input.tree;
         let choices = names
             .iter()
             .chain(&ssh_names)

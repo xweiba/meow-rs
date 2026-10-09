@@ -12,7 +12,7 @@
 use serde_json::{json, Map, Value};
 
 use crate::emit::{build_clash_config, effective_rules, EmitInput};
-use crate::plan::{build_tree, imported_split, route_catalog, BuildInput, GroupTree, RoutePolicy};
+use crate::plan::{imported_split, route_catalog, tree_for, BuildInput, GroupTree, RoutePolicy};
 use crate::pool::{build_pool, Pool};
 use crate::rules::{ScriptModule, SshSecrets};
 use crate::{parse_subscription, usage_from_names};
@@ -42,7 +42,8 @@ pub struct BuildOutput {
     pub config: Map<String, Value>,
     /// The line pool (tags, nodes with exits, region / kind groups).
     pub pool: Pool,
-    /// The group tree the screen shows ([`build_tree`]).
+    /// The group tree the screen shows and the config runs
+    /// ([`crate::plan::tree_for`]).
     pub tree: GroupTree,
     /// The rules the core tries, in order, without the route API's and the
     /// speed test's (Dart `ProxyController.effectiveRules`).
@@ -97,6 +98,8 @@ pub fn build(input: &BuildInput) -> BuildOutput {
     let pool = build_pool(&input.pool_input());
     let settings = input.effective();
     let split = imported_split(input, &pool);
+    // One tree: the screen's and the config's (B2).
+    let tree = tree_for(&settings, &pool, &split);
     let route_policies = route_catalog(
         &pool.groups,
         !pool.nodes.is_empty(),
@@ -119,12 +122,12 @@ pub fn build(input: &BuildInput) -> BuildOutput {
         strategy: input.strategy,
         ssh_secrets: &secrets,
         split: &split,
+        tree: &tree,
         modules: &modules,
         utc_offset: input.utc_offset,
     };
     let config = build_clash_config(&emit).config;
     let rules = effective_rules(&emit);
-    let tree = build_tree(input, &pool);
     BuildOutput {
         config,
         pool,
