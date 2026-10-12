@@ -124,6 +124,43 @@ pub(super) async fn run_udp(
                 data.len(),
                 hex_prefix(&data, 48),
             );
+            // PaoPao: while another VPN's client program is known, the
+            // asking process decides first — the client's own lookups (its
+            // server's name) get real answers, never a fake address. Off
+            // the loop: the process lookup may scan a socket table.
+            if meow_common::route_table::vpn_clients_known() {
+                match Arc::clone(&hijack_permits).try_acquire_owned() {
+                    Ok(permit) => {
+                        let reply_tx = reply_tx.clone();
+                        let tunnel = tunnel.clone();
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            let client =
+                                tunnel.inner().is_vpn_client_source(Network::Udp, src).await;
+                            let outcome = AssertUnwindSafe(async {
+                                if client {
+                                    DnsServer::handle_query_real(&data, &resolver).await
+                                } else {
+                                    DnsServer::handle_query(&data, &resolver).await
+                                }
+                            })
+                            .catch_unwind()
+                            .await;
+                            match outcome {
+                                Ok(Ok(response)) => {
+                                    let _ = reply_tx.send((response, dst, src)).await;
+                                }
+                                Ok(Err(e)) => {
+                                    debug!("tun dns-hijack: unanswerable query from {src}: {e}");
+                                }
+                                Err(_) => warn!("tun dns-hijack: query task survived a panic"),
+                            }
+                        });
+                    }
+                    Err(_) => note_hijack_drop(&hijack_dropped),
+                }
+                continue;
+            }
             // Locally-decidable queries (hosts, fake-IP, fresh cache) are
             // answered inline — they never spend a hijack permit or a task
             // spawn, so a warm cache can't queue behind slow upstreams.
@@ -384,9 +421,12 @@ async fn relay_flow(tunnel: &Tunnel, spec: FlowSpec) -> Result<(), String> {
     // (issue #695): its socket may predate the new outbound binding.
     let mut flush = inner.udp_flush_watch();
     let conn: std::sync::Arc<dyn meow_common::ProxyPacketConn> = std::sync::Arc::from(
-        with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata))
-            .await
-            .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?,
+        meow_common::outbound_balance::scoped(
+            meow_common::outbound_balance::DialScope::for_target(&metadata.host, metadata.dst_ip),
+            with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata)),
+        )
+        .await
+        .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?,
     );
     // `_route` exists to pin the route-table generation across the dial
     // only — a long-lived flow must not keep its dial-time generation

@@ -282,6 +282,32 @@ pub struct TunConfig {
     /// Physical interface outbound sockets bind to in global mode; `None`
     /// = auto-detect from the default route at listener startup.
     pub outbound_interface: Option<String>,
+    /// PaoPao (`outbound-interfaces`): the members outbound connections
+    /// are spread over — empty (off) or at least two names. Global mode
+    /// only.
+    pub outbound_interfaces: Vec<String>,
+    /// PaoPao (`outbound-sticky`): the same destination keeps its member.
+    /// Always true while `outbound_interfaces` is empty.
+    pub outbound_sticky: bool,
+    /// PaoPao (`default-via`): the default outbound interface next to a
+    /// full-tunnel VPN. Global mode only (normalised to the default
+    /// elsewhere).
+    pub default_via: meow_common::route_table::DefaultVia,
+    /// PaoPao (`follow-system-routes`): outbound sockets follow the system
+    /// routing table per destination. Global mode only.
+    pub follow_system_routes: bool,
+    /// `route-exclude-address`: nets kept out of the global routes. Global
+    /// mode only.
+    pub route_exclude_address: Vec<ipnet::IpNet>,
+    /// PaoPao (`vpn-domains`): names of another VPN entered by hand.
+    /// Global mode only.
+    pub vpn_domains: Vec<meow_common::route_table::ManualVpnDomain>,
+    /// PaoPao (`vpn-client-apps`): another VPN's client programs entered
+    /// by hand. Global mode only.
+    pub vpn_client_apps: Vec<String>,
+    /// PaoPao (`vpn-gateway-domains`): another VPN's server names entered
+    /// by hand, lower case. Global mode only.
+    pub vpn_gateway_domains: Vec<String>,
     /// True when `dns-hijack` contains at least one usable (`:53`) entry.
     pub dns_hijack: bool,
     pub udp_timeout: std::time::Duration,
@@ -321,6 +347,14 @@ impl Default for TunConfig {
             auto_route: true,
             route_mode: TunRouteMode::FakeIp,
             outbound_interface: None,
+            outbound_interfaces: Vec::new(),
+            outbound_sticky: true,
+            default_via: meow_common::route_table::DefaultVia::Physical,
+            follow_system_routes: false,
+            route_exclude_address: Vec::new(),
+            vpn_domains: Vec::new(),
+            vpn_client_apps: Vec::new(),
+            vpn_gateway_domains: Vec::new(),
             dns_hijack: false,
             udp_timeout: std::time::Duration::from_secs(60),
             max_connections: 256,
@@ -359,7 +393,6 @@ pub fn parse_tun_config(
         ("endpoint-independent-nat", &r.endpoint_independent_nat),
         ("mtu-v6", &r.mtu_v6),
         ("route-address", &r.route_address),
-        ("route-exclude-address", &r.route_exclude_address),
         ("include-uid", &r.include_uid),
         ("exclude-uid", &r.exclude_uid),
     ] {
@@ -434,6 +467,30 @@ pub fn parse_tun_config(
     // (issue #543 review).
     let outbound_interface = outbound_interface.filter(|_| route_mode == TunRouteMode::Global);
 
+    // PaoPao: `outbound-interfaces` / `outbound-sticky`, normalised out
+    // the same way outside global mode.
+    let dropped = raw_dropped_members(r);
+    if dropped > 0 {
+        warn!(
+            "tun.outbound-interfaces: {dropped} entries are not usable interface names \
+             (or are repeated); dropped"
+        );
+    }
+    let balance = raw_balance(r);
+    if (r.outbound_interfaces.is_some() || r.outbound_sticky.is_some())
+        && route_mode != TunRouteMode::Global
+    {
+        warn!(
+            "tun.outbound-interfaces / outbound-sticky: only used with 'auto-route: global'; \
+             ignored in fake-ip mode"
+        );
+    }
+    let balance = balance.filter(|_| auto_route && route_mode == TunRouteMode::Global);
+    let (outbound_interfaces, outbound_sticky) = match balance {
+        Some(b) => (b.interfaces, b.sticky),
+        None => (Vec::new(), true),
+    };
+
     // `inet6-address` is validated in every mode, but only global mode has
     // IPv6 routes to send into the device — elsewhere an address on the
     // device would capture nothing, so it is normalised out for the same
@@ -447,6 +504,64 @@ pub fn parse_tun_config(
         );
     }
     let inet6_address = inet6_address.filter(|_| global);
+
+    // PaoPao: coexistence with another VPN. All three only mean something
+    // where we install the default routes and bind outbound sockets, and
+    // are normalised out elsewhere (restart-diff, as above).
+    let default_via = parse_default_via(r)?;
+    let route_exclude_address = parse_route_exclude(r.route_exclude_address.as_ref())?;
+    let follow_system_routes = r.follow_system_routes.unwrap_or(false);
+    let vpn_domains = parse_vpn_domains(r.vpn_domains.as_ref())?;
+    let mut vpn_client_apps: Vec<String> = Vec::new();
+    for app in r.vpn_client_apps.iter().flatten() {
+        let app = app.trim();
+        if !app.is_empty() && !vpn_client_apps.iter().any(|a| a == app) {
+            vpn_client_apps.push(app.to_string());
+        }
+    }
+    let mut vpn_gateway_domains: Vec<String> = Vec::new();
+    for name in r.vpn_gateway_domains.iter().flatten() {
+        let name = name.trim();
+        let name = name
+            .strip_prefix("+.")
+            .or_else(|| name.strip_prefix("*."))
+            .unwrap_or(name)
+            .trim_matches('.')
+            .to_ascii_lowercase();
+        if !name.is_empty() && !vpn_gateway_domains.contains(&name) {
+            vpn_gateway_domains.push(name);
+        }
+    }
+    if !global
+        && (r.default_via.is_some()
+            || !route_exclude_address.is_empty()
+            || r.follow_system_routes.is_some()
+            || !vpn_domains.is_empty()
+            || !vpn_client_apps.is_empty()
+            || !vpn_gateway_domains.is_empty())
+    {
+        warn!(
+            "tun.default-via / follow-system-routes / route-exclude-address / vpn-domains / \
+             vpn-client-apps / vpn-gateway-domains: only used with 'auto-route: global'; ignored"
+        );
+    }
+    let (vpn_domains, vpn_client_apps, vpn_gateway_domains) = if global {
+        (vpn_domains, vpn_client_apps, vpn_gateway_domains)
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
+    let default_via = if global {
+        default_via
+    } else {
+        defaults.default_via
+    };
+    let follow_system_routes = follow_system_routes && global;
+    let route_exclude_address = if global {
+        route_exclude_address
+    } else {
+        Vec::new()
+    };
+    check_route_exclude_size(&route_exclude_address)?;
 
     // A platform-owned device comes with its routes: never install ours.
     let file_descriptor = r.file_descriptor.filter(|fd| *fd >= 0);
@@ -464,10 +579,204 @@ pub fn parse_tun_config(
         auto_route,
         route_mode,
         outbound_interface,
+        outbound_interfaces,
+        outbound_sticky,
+        default_via,
+        follow_system_routes,
+        route_exclude_address,
+        vpn_domains,
+        vpn_client_apps,
+        vpn_gateway_domains,
         dns_hijack,
         udp_timeout,
         max_connections: global_max_connections.unwrap_or(defaults.max_connections),
     })
+}
+
+/// `tun.default-via`: `physical` (default) or `other-vpn`.
+fn parse_default_via(
+    r: &raw::RawTun,
+) -> Result<meow_common::route_table::DefaultVia, anyhow::Error> {
+    use meow_common::route_table::DefaultVia;
+    match r.default_via.as_deref().filter(|s| !s.is_empty()) {
+        None => Ok(DefaultVia::Physical),
+        Some(s) => DefaultVia::parse(s).ok_or_else(|| {
+            anyhow::anyhow!("tun.default-via: unknown value '{s}' (expected physical or other-vpn)")
+        }),
+    }
+}
+
+/// `tun.vpn-domains`: a list whose entries are a suffix string or a
+/// `{suffix, servers?, iface?}` map. Suffixes are lower-cased and lose a
+/// leading `+.` / `*.` / `.`; a repeated suffix keeps its first entry.
+fn parse_vpn_domains(
+    raw: Option<&serde_yaml::Value>,
+) -> Result<Vec<meow_common::route_table::ManualVpnDomain>, anyhow::Error> {
+    use meow_common::route_table::ManualVpnDomain;
+    let seq = match raw {
+        None | Some(serde_yaml::Value::Null) => return Ok(Vec::new()),
+        Some(serde_yaml::Value::Sequence(seq)) => seq,
+        Some(_) => return Err(anyhow::anyhow!("tun.vpn-domains: expected a list")),
+    };
+    let clean = |s: &str| -> String {
+        let s = s.trim();
+        let s = s
+            .strip_prefix("+.")
+            .or_else(|| s.strip_prefix("*."))
+            .unwrap_or(s);
+        s.trim_matches('.').to_ascii_lowercase()
+    };
+    let mut out: Vec<ManualVpnDomain> = Vec::with_capacity(seq.len());
+    for item in seq {
+        let entry = match item {
+            serde_yaml::Value::String(s) => ManualVpnDomain {
+                suffix: clean(s),
+                ..Default::default()
+            },
+            serde_yaml::Value::Mapping(map) => {
+                let suffix = map
+                    .get("suffix")
+                    .and_then(|v| v.as_str())
+                    .map(clean)
+                    .unwrap_or_default();
+                let mut servers = Vec::new();
+                if let Some(list) = map.get("servers").and_then(|v| v.as_sequence()) {
+                    for v in list {
+                        let text = v.as_str().unwrap_or_default().trim();
+                        let ip = text.parse::<std::net::IpAddr>().map_err(|e| {
+                            anyhow::anyhow!(
+                                "tun.vpn-domains: '{suffix}': invalid server address '{text}': {e}"
+                            )
+                        })?;
+                        if !servers.contains(&ip) {
+                            servers.push(ip);
+                        }
+                    }
+                }
+                let iface = map
+                    .get("iface")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                ManualVpnDomain {
+                    suffix,
+                    servers,
+                    iface,
+                }
+            }
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "tun.vpn-domains: entries must be a suffix or a {{suffix, servers, iface}} map"
+                ));
+            }
+        };
+        if entry.suffix.is_empty() {
+            return Err(anyhow::anyhow!("tun.vpn-domains: an entry has no suffix"));
+        }
+        if !out.iter().any(|e| e.suffix == entry.suffix) {
+            out.push(entry);
+        }
+    }
+    Ok(out)
+}
+
+/// `tun.route-exclude-address`: a list of CIDRs (or bare addresses), or one
+/// string. Host bits are dropped; duplicates removed.
+fn parse_route_exclude(
+    raw: Option<&serde_yaml::Value>,
+) -> Result<Vec<ipnet::IpNet>, anyhow::Error> {
+    let items: Vec<&str> = match raw {
+        None | Some(serde_yaml::Value::Null) => return Ok(Vec::new()),
+        Some(serde_yaml::Value::String(s)) => vec![s.as_str()],
+        Some(serde_yaml::Value::Sequence(seq)) => seq
+            .iter()
+            .map(|v| {
+                v.as_str().ok_or_else(|| {
+                    anyhow::anyhow!("tun.route-exclude-address: entries must be CIDR strings")
+                })
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => {
+            return Err(anyhow::anyhow!(
+                "tun.route-exclude-address: expected a list of CIDRs"
+            ));
+        }
+    };
+    let mut out: Vec<ipnet::IpNet> = Vec::with_capacity(items.len());
+    for item in items.into_iter().map(str::trim).filter(|s| !s.is_empty()) {
+        let net = item
+            .parse::<ipnet::IpNet>()
+            .or_else(|_| item.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+            .map_err(|e| anyhow::anyhow!("tun.route-exclude-address: invalid CIDR '{item}': {e}"))?
+            .trunc();
+        if !out.contains(&net) {
+            out.push(net);
+        }
+    }
+    Ok(out)
+}
+
+/// Above this many routes for `tun.route-exclude-address` a warning is
+/// logged (start-up and shutdown add and remove them one by one).
+const ROUTE_EXCLUDE_WARN_ROUTES: usize = 256;
+/// Above this many the configuration is refused: every excluded net costs
+/// up to one route per prefix bit, so a long list of single addresses
+/// grows into tens of thousands of routes.
+const ROUTE_EXCLUDE_MAX_ROUTES: usize = 4096;
+
+/// How many routes the split default routes of both families become once
+/// `exclude` is cut out of them (the Linux / Windows form; the macOS form
+/// is at most 14 more).
+fn route_exclude_route_count(exclude: &[ipnet::IpNet]) -> usize {
+    ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"]
+        .iter()
+        .map(|net| {
+            let net: ipnet::IpNet = net.parse().expect("static CIDR parses");
+            meow_common::route_table::subtract_nets(net, exclude).len()
+        })
+        .sum()
+}
+
+/// Keeps `tun.route-exclude-address` within what a routing table should be
+/// asked to take.
+fn check_route_exclude_size(exclude: &[ipnet::IpNet]) -> Result<(), anyhow::Error> {
+    if exclude.is_empty() {
+        return Ok(());
+    }
+    let routes = route_exclude_route_count(exclude);
+    if routes > ROUTE_EXCLUDE_MAX_ROUTES {
+        return Err(anyhow::anyhow!(
+            "tun.route-exclude-address: {} entries need {routes} routes (at most \
+             {ROUTE_EXCLUDE_MAX_ROUTES}); list fewer or wider networks",
+            exclude.len()
+        ));
+    }
+    if routes > ROUTE_EXCLUDE_WARN_ROUTES {
+        warn!(
+            "tun.route-exclude-address: {} entries need {routes} routes; starting and \
+             stopping the TUN will be slower",
+            exclude.len()
+        );
+    }
+    Ok(())
+}
+
+/// PaoPao: `(default-via, follow-system-routes)` of a raw `tun:` section,
+/// for installing the outbound binding ahead of [`build_config`] (next to
+/// [`global_route_outbound_interface`]). Side-effect free; an invalid
+/// `default-via` reads as the default here and is rejected later by
+/// [`parse_tun_config`].
+pub fn global_route_binding_policy(
+    raw: Option<&raw::RawTun>,
+) -> (meow_common::route_table::DefaultVia, bool) {
+    let Some(r) = raw else {
+        return (meow_common::route_table::DefaultVia::Physical, false);
+    };
+    (
+        parse_default_via(r).unwrap_or_default(),
+        r.follow_system_routes.unwrap_or(false),
+    )
 }
 
 /// `tun.inet6-address` (#375): one IPv6 CIDR, as a string or as mihomo's
@@ -534,8 +843,61 @@ fn parse_auto_route(r: &raw::RawTun) -> Result<(bool, TunRouteMode), anyhow::Err
 }
 
 /// `tun.outbound-interface` with the empty string normalised to "unset".
+/// PaoPao: a single usable `outbound-interfaces` entry reads as this key
+/// when it is not set itself.
 fn raw_outbound_interface(r: &raw::RawTun) -> Option<String> {
-    r.outbound_interface.clone().filter(|s| !s.is_empty())
+    r.outbound_interface
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let mut members = raw_members(r);
+            (members.len() == 1).then(|| members.remove(0))
+        })
+}
+
+/// The string entries of `tun.outbound-interfaces` (a list, or one name).
+fn raw_member_strings(r: &raw::RawTun) -> (Vec<&str>, usize) {
+    match r.outbound_interfaces.as_ref() {
+        Some(serde_yaml::Value::Sequence(entries)) => {
+            let names: Vec<&str> = entries.iter().filter_map(|e| e.as_str()).collect();
+            let skipped = entries.len() - names.len();
+            (names, skipped)
+        }
+        Some(serde_yaml::Value::String(s)) => (vec![s.as_str()], 0),
+        None | Some(serde_yaml::Value::Null) => (Vec::new(), 0),
+        Some(_) => (Vec::new(), 1),
+    }
+}
+
+/// `tun.outbound-interfaces`, cleaned: usable names, each once.
+fn raw_members(r: &raw::RawTun) -> Vec<String> {
+    meow_common::outbound_balance::clean_interfaces(raw_member_strings(r).0)
+}
+
+/// How many `tun.outbound-interfaces` entries cleaning dropped.
+fn raw_dropped_members(r: &raw::RawTun) -> usize {
+    let (names, skipped) = raw_member_strings(r);
+    skipped + names.len() - raw_members(r).len()
+}
+
+/// `tun.outbound-interfaces` / `outbound-sticky` when they turn balancing
+/// on: at least two usable names.
+fn raw_balance(r: &raw::RawTun) -> Option<meow_common::outbound_balance::BalanceOptions> {
+    let interfaces = raw_members(r);
+    (interfaces.len() >= 2).then(|| meow_common::outbound_balance::BalanceOptions {
+        interfaces,
+        sticky: r.outbound_sticky.unwrap_or(true),
+    })
+}
+
+/// PaoPao: the outbound balancing of a raw `tun:` section, for installing
+/// the outbound binding ahead of [`build_config`] (next to
+/// [`global_route_outbound_interface`], which decides whether there is a
+/// binding at all). Side-effect free.
+pub fn global_route_balance(
+    raw: Option<&raw::RawTun>,
+) -> Option<meow_common::outbound_balance::BalanceOptions> {
+    raw_balance(raw?)
 }
 
 /// Whether `raw` selects an enabled TUN with `auto-route: global`, and if

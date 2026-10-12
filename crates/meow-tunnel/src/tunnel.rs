@@ -3,17 +3,18 @@ use crate::rule_ir::{CompiledMatchResult, CompiledRuleSet, LazyMatchOutcome};
 use crate::statistics::Statistics;
 use crate::udp::{self, NatTable};
 use meow_common::{
-    metadata_ip_literal, AdapterType, Metadata, Network, Proxy, ProxyAdapter, Rule, TargetCheck,
-    TargetProbe, TunnelMode,
+    metadata_ip_literal, AdapterType, ConnType, Metadata, Network, Proxy, ProxyAdapter, Rule,
+    TargetCheck, TargetProbe, TunnelMode,
 };
 use meow_dns::Resolver;
 use meow_proxy::DirectAdapter;
 use parking_lot::{Mutex, RwLock};
 use smol_str::SmolStr;
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 /// Bundled rules + domain index + proxies map, swapped as one `Arc` on
@@ -118,6 +119,9 @@ pub struct TunnelInner {
     /// internal resolver so hostname dials avoid the OS resolver; its
     /// resolver slot is swapped alongside `resolver` on reload.
     pub direct: Arc<DirectAdapter>,
+    /// PaoPao: DIRECT by the physical uplink, whatever the system routes
+    /// and the default binding say — for another VPN's client program.
+    vpn_client_direct: Arc<DirectAdapter>,
     /// Immediate-reject adapter for the defence-in-depth arm in
     /// `materialize_rule_match`: a matched non-DIRECT target absent from
     /// the registry must fail closed, never fall through to direct egress
@@ -216,7 +220,227 @@ async fn teardown_tun(handle: TunHandle) {
     }
 }
 
+/// Where the process lookup finds the process itself, so a connection can
+/// be told to be the core's own (Android knows the owning app only; its
+/// sockets stay out of the VPN through `protect()`).
+const OWN_PID_LOOKUP: bool = cfg!(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows"
+));
+
+/// This program's file name as the process lookup reports one (the real
+/// file's name, behind any link it was started through); None when the
+/// system does not say.
+fn own_program_name() -> Option<&'static str> {
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        let exe = std::env::current_exe().ok()?;
+        let exe = exe.canonicalize().unwrap_or(exe);
+        let name = exe.file_name()?.to_string_lossy();
+        Some(sans_deleted(&name).to_owned())
+    })
+    .as_deref()
+}
+
+/// A program's file name without the ` (deleted)` Linux adds once the
+/// file it runs from was replaced (an upgrade in place): the core started
+/// before and looked up after is still the same program.
+fn sans_deleted(name: &str) -> &str {
+    name.strip_suffix(" (deleted)").unwrap_or(name)
+}
+
+/// Whether `ip` is an address of this machine: one a socket can be bound
+/// to (no packet is sent; the socket is closed at once). An address that
+/// cannot be told — a link-local one without its interface — counts as
+/// another machine's, so its connection is routed, not refused.
+fn is_host_address(ip: IpAddr) -> bool {
+    ip.is_loopback() || std::net::UdpSocket::bind(SocketAddr::new(ip, 0)).is_ok()
+}
+
+/// One own-traffic-loop warning per this long; the rest are counted.
+const OWN_LOOP_WARN_EVERY: Duration = Duration::from_secs(10);
+
+/// Warns that the core's own connection came back in through the TUN, at
+/// most once per [`OWN_LOOP_WARN_EVERY`] (a loop refuses many per second).
+fn warn_own_loop(metadata: &Metadata, pid: u32) {
+    static LAST: Mutex<(Option<Instant>, u64)> = Mutex::new((None, 0));
+    let more = {
+        let mut last = LAST.lock();
+        if last.0.is_some_and(|at| at.elapsed() < OWN_LOOP_WARN_EVERY) {
+            last.1 += 1;
+            return;
+        }
+        last.0 = Some(Instant::now());
+        std::mem::take(&mut last.1)
+    };
+    // Interpolated into the message: the /logs broadcast keeps only that.
+    let iface = meow_common::outbound_interface();
+    warn!(
+        "refused the core's own {} connection to {} coming back in through the TUN \
+         (pid {pid}): outbound traffic is not leaving through the outbound interface \
+         ({}); {more} more refused since the last warning",
+        metadata.network,
+        metadata.remote_address(),
+        iface.as_deref().unwrap_or("none bound"),
+    );
+}
+
 impl TunnelInner {
+    /// The core's own traffic coming back in through the TUN (the outbound
+    /// interface binding did not hold): refused before any mode or rule —
+    /// sending it DIRECT would dial through the same route and come back
+    /// again. Only a TUN connection whose process is known to be this one;
+    /// everything else gets `None` and is routed as usual.
+    async fn own_loop_reject(&self, metadata: &Metadata) -> Option<ResolvedTarget> {
+        if metadata.conn_type != ConnType::Tun || !OWN_PID_LOOKUP {
+            return None;
+        }
+        // Looked up already (`find-process-mode: always`) and another
+        // program: no second scan. `Metadata` has no room for the pid
+        // (ADR-0011 footprint guard), so only a same-named program — this
+        // one, or another copy of it — is looked up again for it.
+        if !metadata.process.is_empty()
+            && own_program_name()
+                .is_some_and(|n| !n.eq_ignore_ascii_case(sans_deleted(&metadata.process)))
+        {
+            return None;
+        }
+        let src_ip = metadata.src_ip?;
+        if metadata.src_port == 0 {
+            return None;
+        }
+        let local = SocketAddr::new(src_ip, metadata.src_port);
+        let pid = meow_common::find_process_async(metadata.network, local)
+            .await?
+            .pid?;
+        // The lookup goes by port for a socket bound to no address in
+        // particular (the core's UDP ones), so a forwarded connection —
+        // a device behind `meow box`, a container — using the same source
+        // port is named the core as well: only a source address of this
+        // machine is the core's own. Asked last: almost nothing gets here.
+        if pid != std::process::id() || !is_host_address(src_ip) {
+            return None;
+        }
+        warn_own_loop(metadata, pid);
+        Some(ResolvedTarget {
+            adapter: Arc::clone(&self.reject) as Arc<dyn ProxyAdapter>,
+            rule_name: SmolStr::new_static("OwnTraffic"),
+            rule_payload: SmolStr::default(),
+            route: self.route(),
+        })
+    }
+
+    /// PaoPao: whatever belongs to another VPN is passed through, ahead of
+    /// the mode and of every rule (nothing the user configures overrides
+    /// it):
+    ///
+    /// - `VpnClient`: a connection of that VPN's client program coming in
+    ///   through the TUN (its tunnel's outer packets, its control
+    ///   connection) goes DIRECT by the *physical* interface.
+    /// - `VpnGateway`: a connection to that VPN's server by name
+    ///   (`tun.vpn-gateway-domains`) goes the same way.
+    /// - `OtherRoute`: a destination inside a route that VPN pushed goes
+    ///   DIRECT — the dial then binds to that VPN's interface by the route
+    ///   snapshot. Any inbound: a program using the proxy port names an
+    ///   intranet host just the same. A destination known by name only is
+    ///   judged when the name is one of the VPN's own (and so resolved at
+    ///   the VPN's DNS); the address found is returned for the dial.
+    ///
+    /// `None` — the usual case, at the cost of two atomic-sized reads —
+    /// routes the connection as usual.
+    async fn other_vpn_passthrough(
+        &self,
+        metadata: &Metadata,
+    ) -> Option<(ResolvedTarget, Option<IpAddr>)> {
+        use meow_common::route_table as rt;
+        if metadata.conn_type == ConnType::Tun && OWN_PID_LOOKUP && rt::vpn_clients_known() {
+            if let Some(src_ip) = metadata.src_ip.filter(|_| metadata.src_port != 0) {
+                let local = SocketAddr::new(src_ip, metadata.src_port);
+                let info = meow_common::find_process_async(metadata.network, local).await;
+                if let Some(target) = self.vpn_client_target(info.as_ref(), src_ip) {
+                    return Some((target, None));
+                }
+            }
+        }
+        // The other VPN's own server, known by name (sniffed, or asked
+        // for through the proxy port): direct by the physical interface.
+        if !metadata.host.is_empty() && rt::is_vpn_gateway_domain(&metadata.host) {
+            return Some((
+                ResolvedTarget {
+                    adapter: Arc::clone(&self.vpn_client_direct) as Arc<dyn ProxyAdapter>,
+                    rule_name: SmolStr::new_static("VpnGateway"),
+                    rule_payload: metadata.host.clone(),
+                    route: self.route(),
+                },
+                None,
+            ));
+        }
+        if !meow_common::outbound_iface::follows_system_routes() {
+            return None;
+        }
+        let mut resolved = None;
+        let ip = match metadata.dst_ip {
+            Some(ip) => ip.to_canonical(),
+            None if !metadata.host.is_empty() && rt::vpn_dns_for(&metadata.host).is_some() => {
+                let ip = self.resolver().resolve_ip_real(&metadata.host).await?;
+                resolved = Some(ip);
+                ip
+            }
+            None => return None,
+        };
+        let hit = meow_common::outbound_iface::other_vpn_route(ip)?;
+        debug!(
+            "{} is inside {} of '{}' (another VPN's route): passed through",
+            metadata.remote_address(),
+            hit.prefix,
+            hit.iface
+        );
+        Some((
+            ResolvedTarget {
+                adapter: Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>,
+                rule_name: SmolStr::new_static("OtherRoute"),
+                rule_payload: SmolStr::new(&*hit.iface),
+                route: self.route(),
+            },
+            resolved,
+        ))
+    }
+
+    /// The `VpnClient` decision for a connection whose process lookup gave
+    /// `info`: another VPN's client (found holding its device, or named by
+    /// the user), on this machine (the lookup goes by port for unbound
+    /// sockets — a forwarded device's connection must not borrow the name).
+    fn vpn_client_target(
+        &self,
+        info: Option<&meow_common::ProcessInfo>,
+        src_ip: IpAddr,
+    ) -> Option<ResolvedTarget> {
+        let info = info?;
+        if !meow_common::route_table::is_vpn_client(info.pid, &info.name, &info.path)
+            || !is_host_address(src_ip)
+        {
+            return None;
+        }
+        Some(ResolvedTarget {
+            adapter: Arc::clone(&self.vpn_client_direct) as Arc<dyn ProxyAdapter>,
+            rule_name: SmolStr::new_static("VpnClient"),
+            rule_payload: SmolStr::new(&info.name),
+            route: self.route(),
+        })
+    }
+
+    /// Whether the process behind a datagram from `src` (a DNS query the
+    /// TUN hijacked) is another VPN's client: its lookups get real
+    /// answers. `false` at once while no client is known.
+    pub async fn is_vpn_client_source(&self, network: Network, src: SocketAddr) -> bool {
+        if !OWN_PID_LOOKUP || !meow_common::route_table::vpn_clients_known() {
+            return false;
+        }
+        let info = meow_common::find_process_async(network, src).await;
+        self.vpn_client_target(info.as_ref(), src.ip()).is_some()
+    }
+
     /// Snapshot the current route table: one short read lock + `Arc` clone.
     /// The returned `Arc` is safe to hold across `.await` points.
     pub fn route(&self) -> Arc<RouteTable> {
@@ -392,6 +616,17 @@ impl TunnelInner {
     /// on the blocking pool — keeping it synchronous here would stall the
     /// calling worker on hosts with large socket tables (issue #515).
     pub async fn resolve_proxy(&self, metadata: &Metadata) -> Option<ResolvedTarget> {
+        if let Some(target) = self.own_loop_reject(metadata).await {
+            return Some(target);
+        }
+        if let Some((target, _)) = self.other_vpn_passthrough(metadata).await {
+            return Some(target);
+        }
+        self.resolve_proxy_checked(metadata).await
+    }
+
+    /// [`Self::resolve_proxy`] after the own-traffic check.
+    async fn resolve_proxy_checked(&self, metadata: &Metadata) -> Option<ResolvedTarget> {
         if let Some((target, _)) = self.paopao_lan_direct(metadata) {
             return Some(target);
         }
@@ -455,6 +690,15 @@ impl TunnelInner {
     /// UDP paths must keep calling `pre_resolve`: their NAT session key
     /// requires a resolved `dst_ip` regardless of what the rules demand.
     pub async fn resolve_proxy_lazy(&self, metadata: &mut Metadata) -> Option<ResolvedTarget> {
+        if let Some(target) = self.own_loop_reject(metadata).await {
+            return Some(target);
+        }
+        if let Some((target, resolved)) = self.other_vpn_passthrough(metadata).await {
+            if let Some(ip) = resolved {
+                metadata.dst_ip = Some(ip);
+            }
+            return Some(target);
+        }
         if let Some((target, ip)) = self.paopao_lan_direct(metadata) {
             // Normally already set by `pre_handle_metadata`; make sure the
             // DIRECT dial connects to the pinned address either way.
@@ -463,7 +707,7 @@ impl TunnelInner {
         }
         let mode = *self.mode.read();
         if mode != TunnelMode::Rule {
-            return self.resolve_proxy(metadata).await;
+            return self.resolve_proxy_checked(metadata).await;
         }
 
         // Owned `Arc` snapshot: the enrichment arm holds it across an
@@ -530,6 +774,16 @@ impl TunnelInner {
         // same way before matching; a Drop verdict (stale fake IP) still
         // gets an answer here — the explain caller asked about a host.
         let _ = self.pre_handle_metadata(&mut meta);
+        // Another VPN's destination is decided before everything else, as
+        // for live traffic (the query has no process: no `VpnClient`).
+        if let Some((target, _)) = self.other_vpn_passthrough(&meta).await {
+            let rule = match target.rule_name.as_str() {
+                "VpnClient" => "VpnClient",
+                "VpnGateway" => "VpnGateway",
+                _ => "OtherRoute",
+            };
+            return fixed(rule, target.rule_payload, "DIRECT");
+        }
         if let Some((target, _)) = self.paopao_lan_direct(&meta) {
             return fixed("PaoPaoHosts", target.rule_payload, "DIRECT");
         }
@@ -837,12 +1091,18 @@ impl Tunnel {
     /// `inner.direct` observe `set_resolver` swaps identically.
     pub fn new_with_slot(resolver: meow_dns::ResolverSlot) -> Self {
         let direct = Arc::new(DirectAdapter::new().with_resolver_slot(Arc::clone(&resolver)));
+        let vpn_client_direct = Arc::new(
+            DirectAdapter::new()
+                .with_resolver_slot(Arc::clone(&resolver))
+                .with_physical_uplink(),
+        );
         Self {
             inner: Arc::new(TunnelInner {
                 mode: RwLock::new(TunnelMode::Rule),
                 route: RwLock::new(Arc::new(RouteTable::empty())),
                 resolver,
                 direct,
+                vpn_client_direct,
                 reject: Arc::new(meow_proxy::RejectAdapter::new(false)),
                 nat_table: udp::new_nat_table(),
                 stats: Arc::new(Statistics::new()),
@@ -2307,6 +2567,351 @@ mod tests {
             resolved.rule_name, "PROCESS-NAME",
             "PROCESS-NAME rule must match the enrichment done inside resolve_proxy"
         );
+    }
+
+    /// PaoPao: what belongs to another VPN is passed through before the
+    /// mode and before every rule (here: a rule that would refuse it) — a
+    /// destination inside a route the VPN pushed, on any inbound and both
+    /// resolve paths, and the VPN's client program.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn another_vpns_routes_and_client_come_before_mode_and_rules() {
+        use meow_common::route_table::{
+            self as rt, RawRoute, RouteIfaceKind, RouteTable as Routes,
+        };
+
+        let tunnel = test_tunnel();
+        let res = meow_config::rebuild_from_raw(&Default::default()).unwrap();
+        tunnel.update_routing(
+            res.proxies,
+            vec![Box::new(meow_rules::final_rule::FinalRule::new("REJECT")) as Box<dyn Rule>],
+            res.dialer_registry,
+        );
+        let inner = tunnel.inner();
+        let to = |ip: &str, conn_type| Metadata {
+            network: Network::Tcp,
+            conn_type,
+            dst_ip: Some(ip.parse().unwrap()),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let raw = |net: &str, iface: &str| RawRoute {
+            net: net.parse().unwrap(),
+            iface: iface.into(),
+            index: 7,
+            gateway: None,
+            metric: 0,
+            table: Some(254),
+            scoped: false,
+        };
+        rt::publish_route_table(Routes::build(
+            vec![
+                raw("10.99.0.0/16", "meow-vpn0"),
+                raw("192.168.77.0/24", "meow-eth0"),
+            ],
+            |_| false,
+            |name| {
+                if name == "meow-vpn0" {
+                    RouteIfaceKind::OtherVpn
+                } else {
+                    RouteIfaceKind::Physical
+                }
+            },
+        ));
+
+        // Nothing bound, or bound without `follow-system-routes`: rules.
+        let plain = inner
+            .resolve_proxy(&to("10.99.1.1", ConnType::Tun))
+            .await
+            .unwrap();
+        assert_ne!(plain.rule_name, "OtherRoute");
+        let mut binding = meow_common::install_outbound_interface("lo").unwrap();
+        let plain = inner
+            .resolve_proxy(&to("10.99.1.1", ConnType::Tun))
+            .await
+            .unwrap();
+        assert_eq!(plain.adapter.adapter_type(), AdapterType::Reject);
+
+        binding.set_follow_routes(true);
+        for mode in [TunnelMode::Rule, TunnelMode::Global, TunnelMode::Direct] {
+            tunnel.set_mode(mode);
+            for conn_type in [ConnType::Tun, ConnType::Socks5] {
+                let got = inner
+                    .resolve_proxy(&to("10.99.1.1", conn_type))
+                    .await
+                    .unwrap();
+                assert_eq!(got.rule_name, "OtherRoute", "{mode:?}");
+                assert_eq!(got.rule_payload, "meow-vpn0");
+                assert_eq!(got.adapter.adapter_type(), AdapterType::Direct);
+                let got = inner
+                    .resolve_proxy_lazy(&mut to("10.99.1.1", conn_type))
+                    .await
+                    .unwrap();
+                assert_eq!(got.rule_name, "OtherRoute", "lazy, {mode:?}");
+            }
+        }
+        tunnel.set_mode(TunnelMode::Rule);
+        assert_eq!(
+            inner
+                .explain(&to("10.99.1.1", ConnType::Socks5), None)
+                .await
+                .rule,
+            "OtherRoute"
+        );
+        // Outside every pushed route, and inside a physical NIC's subnet
+        // (which only decides the interface, not the rule): rules.
+        for ip in ["93.184.216.34", "192.168.77.5"] {
+            let got = inner.resolve_proxy(&to(ip, ConnType::Tun)).await.unwrap();
+            assert_eq!(got.adapter.adapter_type(), AdapterType::Reject, "{ip}");
+        }
+
+        // The VPN's client program: found holding the device, or named.
+        let here: IpAddr = "127.0.0.1".parse().unwrap();
+        let process = |pid, name: &str| meow_common::ProcessInfo {
+            pid: Some(pid),
+            name: name.into(),
+            path: format!("/usr/sbin/{name}"),
+            ..Default::default()
+        };
+        let found = process(4_000_001, "openconnect");
+        assert!(inner.vpn_client_target(Some(&found), here).is_none());
+        rt::publish_vpn_clients(vec![rt::VpnClientProc {
+            pid: 4_000_001,
+            name: "openconnect".into(),
+            path: "/usr/sbin/openconnect".into(),
+            iface: "meow-vpn0".into(),
+        }]);
+        let got = inner.vpn_client_target(Some(&found), here).unwrap();
+        assert_eq!(got.rule_name, "VpnClient");
+        assert_eq!(got.rule_payload, "openconnect");
+        assert_eq!(got.adapter.adapter_type(), AdapterType::Direct);
+        // Another process; no process; a forwarded device borrowing the port.
+        assert!(inner
+            .vpn_client_target(Some(&process(4_000_002, "curl")), here)
+            .is_none());
+        assert!(inner.vpn_client_target(None, here).is_none());
+        let elsewhere: IpAddr = "192.0.2.9".parse().unwrap();
+        assert!(inner.vpn_client_target(Some(&found), elsewhere).is_none());
+        let named = rt::install_vpn_manual(rt::VpnManual {
+            client_apps: vec!["path:/usr/sbin/curl".into()],
+            gateway_domains: vec!["vpn.corp.example".into()],
+            ..Default::default()
+        });
+        // The VPN's server by name, in every mode.
+        let mut gw = to("93.184.216.34", ConnType::Tun);
+        gw.host = "a.vpn.corp.example".into();
+        for mode in [TunnelMode::Global, TunnelMode::Rule] {
+            tunnel.set_mode(mode);
+            let got = inner.resolve_proxy(&gw).await.unwrap();
+            assert_eq!(got.rule_name, "VpnGateway", "{mode:?}");
+            assert_eq!(got.adapter.adapter_type(), AdapterType::Direct);
+        }
+        assert!(inner
+            .vpn_client_target(Some(&process(4_000_002, "curl")), here)
+            .is_some());
+
+        drop(named);
+        drop(binding);
+        rt::clear_vpn_clients();
+        rt::clear_route_table();
+    }
+
+    /// The core's own connection coming back in through the TUN is refused
+    /// before any rule (here: a rule that would send it DIRECT), on both
+    /// resolve paths; the same socket through a local port, another
+    /// process's pid, or an unknown one follow the rules as before.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[tokio::test]
+    async fn own_connection_through_the_tun_is_refused() {
+        meow_common::disable_socket_table_cache();
+        // This test process stands in for the core: a socket it owns.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let local = listener.local_addr().unwrap();
+
+        let tunnel = test_tunnel();
+        let res = meow_config::rebuild_from_raw(&Default::default()).unwrap();
+        tunnel.update_routing(
+            res.proxies,
+            vec![Box::new(meow_rules::final_rule::FinalRule::new("DIRECT")) as Box<dyn Rule>],
+            res.dialer_registry,
+        );
+        let from = |conn_type| Metadata {
+            network: Network::Tcp,
+            conn_type,
+            src_ip: Some(local.ip()),
+            src_port: local.port(),
+            dst_ip: Some("93.184.216.34".parse().unwrap()),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let inner = tunnel.inner();
+
+        for mode in [TunnelMode::Rule, TunnelMode::Global, TunnelMode::Direct] {
+            tunnel.set_mode(mode);
+            let own = inner.resolve_proxy(&from(ConnType::Tun)).await.unwrap();
+            assert_eq!(own.rule_name, "OwnTraffic", "{mode:?}");
+            assert_eq!(own.adapter.adapter_type(), AdapterType::Reject, "{mode:?}");
+            let own = inner
+                .resolve_proxy_lazy(&mut from(ConnType::Tun))
+                .await
+                .unwrap();
+            assert_eq!(own.rule_name, "OwnTraffic", "lazy, {mode:?}");
+            assert_eq!(own.adapter.adapter_type(), AdapterType::Reject);
+        }
+        tunnel.set_mode(TunnelMode::Rule);
+
+        // `find-process-mode: always` looked it up first: still refused.
+        let mut known = from(ConnType::Tun);
+        inner.find_process_always.store(true, Ordering::Relaxed);
+        inner.enrich_process(&mut known).await;
+        inner.find_process_always.store(false, Ordering::Relaxed);
+        assert_eq!(Some(known.process.as_str()), own_program_name());
+        let own = inner.resolve_proxy(&known).await.unwrap();
+        assert_eq!(own.rule_name, "OwnTraffic");
+
+        // Through a local port: the rules decide.
+        for conn_type in [ConnType::Socks5, ConnType::Http] {
+            let port = inner.resolve_proxy(&from(conn_type)).await.unwrap();
+            assert_eq!(port.rule_name, "MATCH", "{conn_type:?}");
+            assert_eq!(port.adapter.name(), "DIRECT");
+            let port = inner
+                .resolve_proxy_lazy(&mut from(conn_type))
+                .await
+                .unwrap();
+            assert_eq!(port.rule_name, "MATCH", "lazy, {conn_type:?}");
+        }
+
+        // Another program through the TUN, already looked up (the source
+        // is not asked about again), and a source no process owns.
+        let mut other = from(ConnType::Tun);
+        other.process = "curl".into();
+        let hit = inner.resolve_proxy(&other).await.unwrap();
+        assert_eq!(hit.rule_name, "MATCH");
+        assert_eq!(hit.adapter.name(), "DIRECT");
+        let mut unknown = from(ConnType::Tun);
+        unknown.src_ip = Some("127.0.0.1".parse().unwrap());
+        unknown.src_port = 1;
+        let hit = inner.resolve_proxy_lazy(&mut unknown).await.unwrap();
+        assert_eq!(hit.rule_name, "MATCH");
+        // Another copy of this program (same name, another pid) is told
+        // apart by the pid: here a source it does not own.
+        unknown.process = own_program_name().unwrap().into();
+        let hit = inner.resolve_proxy(&unknown).await.unwrap();
+        assert_eq!(hit.rule_name, "MATCH");
+    }
+
+    /// A socket the core bound to no address in particular (its UDP ones)
+    /// answers for its port on any address, so the lookup names the core
+    /// for a forwarded connection — another device behind `meow box`, a
+    /// container — that happens to use the same source port. Only a source
+    /// address of this machine can be the core's own.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[tokio::test]
+    async fn forwarded_source_sharing_a_port_with_the_core_is_not_refused() {
+        meow_common::disable_socket_table_cache();
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+
+        let tunnel = test_tunnel();
+        let res = meow_config::rebuild_from_raw(&Default::default()).unwrap();
+        tunnel.update_routing(
+            res.proxies,
+            vec![Box::new(meow_rules::final_rule::FinalRule::new("DIRECT")) as Box<dyn Rule>],
+            res.dialer_registry,
+        );
+        let from = |src: &str| Metadata {
+            network: Network::Udp,
+            conn_type: ConnType::Tun,
+            src_ip: Some(src.parse().unwrap()),
+            src_port: port,
+            dst_ip: Some("93.184.216.34".parse().unwrap()),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let inner = tunnel.inner();
+
+        // The lookup does name this process for the other device's source.
+        let seen = meow_common::find_process_async(
+            Network::Udp,
+            SocketAddr::new("203.0.113.7".parse().unwrap(), port),
+        )
+        .await
+        .expect("a socket on every address answers for any");
+        assert_eq!(seen.pid, Some(std::process::id()));
+
+        // Another device (TEST-NET-3: never an address of this machine).
+        let mut lan = from("203.0.113.7");
+        let hit = inner.resolve_proxy(&lan).await.unwrap();
+        assert_eq!(hit.rule_name, "MATCH");
+        let hit = inner.resolve_proxy_lazy(&mut lan).await.unwrap();
+        assert_eq!(hit.rule_name, "MATCH", "lazy");
+        // `find-process-mode: always` named the core for it: still routed.
+        lan.process = own_program_name().unwrap().into();
+        let hit = inner.resolve_proxy(&lan).await.unwrap();
+        assert_eq!(hit.rule_name, "MATCH", "looked up before");
+
+        // The same socket from this machine is the core's own.
+        let own = inner.resolve_proxy(&from("127.0.0.1")).await.unwrap();
+        assert_eq!(own.rule_name, "OwnTraffic");
+        assert_eq!(own.adapter.adapter_type(), AdapterType::Reject);
+    }
+
+    /// Linux names a running program whose file was replaced (an upgrade
+    /// in place) `<name> (deleted)`: still the same program.
+    #[test]
+    fn replaced_program_file_keeps_its_name() {
+        assert_eq!(sans_deleted("meow (deleted)"), "meow");
+        assert_eq!(sans_deleted("meow"), "meow");
+        assert_eq!(sans_deleted(""), "");
+    }
+
+    /// PaoPao's own-app rule (meow-paopao `own_app_rule`): the app's
+    /// connections through the TUN match it, the same program through a
+    /// local port and other programs through the TUN go on to the rules
+    /// after it.
+    #[tokio::test]
+    async fn own_app_rule_takes_only_what_came_through_the_tun() {
+        let tunnel = test_tunnel();
+        let res = meow_config::rebuild_from_raw(&Default::default()).unwrap();
+        let mut proxies = res.proxies;
+        let direct = Arc::clone(proxies.get("DIRECT").unwrap());
+        proxies.insert("line".into(), direct);
+        let ctx = meow_rules::ParserContext::empty();
+        let rules = [
+            "AND,((IN-NAME,meow-tun),(PROCESS-PATH,/opt/paopao)),DIRECT",
+            "AND,((IN-NAME,meow-tun),(PROCESS-NAME,paopao.exe)),DIRECT",
+            "MATCH,line",
+        ]
+        .map(|l| meow_rules::parse_rule(l, &ctx).expect("rule line parses"));
+        tunnel.update_routing(proxies, rules.into(), res.dialer_registry);
+
+        let from = |conn_type, in_name: &str, name: &str, path: &str| Metadata {
+            network: Network::Tcp,
+            conn_type,
+            in_name: in_name.into(),
+            process: name.into(),
+            process_path: path.into(),
+            dst_ip: Some("93.184.216.34".parse().unwrap()),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let tun = meow_common::TUN_INBOUND_NAME;
+        let cases = [
+            (ConnType::Tun, tun, "paopao", "/opt/paopao/paopao", "AND"),
+            (ConnType::Tun, tun, "paopao.exe", "C:\\x\\paopao.exe", "AND"),
+            // The app asking for the proxy through the local port.
+            (ConnType::Http, "", "paopao", "/opt/paopao/paopao", "MATCH"),
+            (ConnType::Socks5, "", "paopao.exe", "", "MATCH"),
+            // Another program through the TUN.
+            (ConnType::Tun, tun, "curl", "/usr/bin/curl", "MATCH"),
+        ];
+        for (conn_type, in_name, name, path, want) in cases {
+            let mut m = from(conn_type, in_name, name, path);
+            let eager = tunnel.inner().resolve_proxy(&m).await.unwrap();
+            assert_eq!(eager.rule_name, want, "{conn_type:?} {name}");
+            let lazy = tunnel.inner().resolve_proxy_lazy(&mut m).await.unwrap();
+            assert_eq!(lazy.rule_name, want, "lazy, {conn_type:?} {name}");
+        }
     }
 
     /// Adapter counting `reset_sessions` calls; a group when `members` is

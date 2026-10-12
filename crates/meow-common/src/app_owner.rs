@@ -154,6 +154,7 @@ impl AppOwners {
             name: package.map(|p| p.to_string()).unwrap_or_default(),
             path: String::new(),
             uid: Some(uid),
+            pid: None,
         }
     }
 }

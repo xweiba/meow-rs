@@ -35,6 +35,11 @@ pub struct DirectAdapter {
     /// PaoPao: leave by this interface (`interface-name:`, e.g. another
     /// VPN's `utun6`), whatever the global binding.
     interface: Option<String>,
+    /// PaoPao: leave by the physical uplink whatever the destination and
+    /// whatever the default binding (another VPN's client must reach its
+    /// server outside every tunnel). Falls back to the usual binding when
+    /// no uplink is known.
+    physical: bool,
     /// PaoPao: the name a configured `type: direct` proxy was given (e.g.
     /// `iface:utun6`); groups list, pick and show it by that name (mihomo
     /// keeps it too). None: the built-in `DIRECT` / `COMPATIBLE`.
@@ -50,8 +55,25 @@ impl DirectAdapter {
             resolver: None,
             connect_timeout: None,
             interface: None,
+            physical: false,
             name: None,
             health: ProxyHealth::new(),
+        }
+    }
+
+    /// Leave by the physical uplink, ignoring the system routes and the
+    /// default binding (PaoPao's passthrough for another VPN's client).
+    pub fn with_physical_uplink(mut self) -> Self {
+        self.physical = true;
+        self
+    }
+
+    /// The interface this adapter pins every socket to, if any.
+    fn pinned_interface(&self) -> Option<std::sync::Arc<str>> {
+        match &self.interface {
+            Some(name) => Some(std::sync::Arc::from(name.as_str())),
+            None if self.physical => meow_common::route_table::physical_interface(),
+            None => None,
         }
     }
 
@@ -67,10 +89,18 @@ impl DirectAdapter {
         self
     }
 
-    async fn bind_udp(&self, local: SocketAddr) -> std::io::Result<UdpSocket> {
-        match &self.interface {
-            Some(name) => meow_common::bind_udp_on(local, name),
-            None => meow_common::bind_udp(local).await,
+    /// `peer`: where the socket's datagrams go, when known — without a
+    /// per-rule interface the socket follows the system route to it
+    /// (PaoPao `tun.follow-system-routes`).
+    async fn bind_udp(
+        &self,
+        local: SocketAddr,
+        peer: Option<SocketAddr>,
+    ) -> std::io::Result<UdpSocket> {
+        match (self.pinned_interface(), peer) {
+            (Some(name), _) => meow_common::bind_udp_on(local, &name),
+            (None, Some(peer)) => meow_common::bind_udp_to(local, peer).await,
+            (None, None) => meow_common::bind_udp(local).await,
         }
     }
 
@@ -320,7 +350,7 @@ async fn connect_with_mark(
         // TUN global-route loop avoidance (#375): this branch bypasses
         // `meow_common::connect_tcp`, so apply the outbound-interface
         // binding here too (no-op when none is installed).
-        meow_common::apply_outbound_interface(&socket, domain)?;
+        meow_common::apply_outbound_interface_for(&socket, domain, Some(dest.ip()))?;
         socket.set_nonblocking(true)?;
 
         match socket.connect(&dest.into()) {
@@ -369,8 +399,8 @@ impl ProxyAdapter for DirectAdapter {
 
         for dest in dests {
             let connect = async {
-                match &self.interface {
-                    Some(name) => meow_common::connect_tcp_on(dest, name).await,
+                match self.pinned_interface() {
+                    Some(name) => meow_common::connect_tcp_on(dest, &name).await,
                     None => connect_with_mark(dest, self.routing_mark).await,
                 }
             };
@@ -412,7 +442,7 @@ impl ProxyAdapter for DirectAdapter {
                 } else {
                     "[::]:0".parse().expect("static")
                 };
-                let socket = match self.bind_udp(bind).await {
+                let socket = match self.bind_udp(bind, Some(addr)).await {
                     Ok(s) => s,
                     Err(e) => {
                         last_err = MeowError::prefer_errno_io(last_err, e);
@@ -449,8 +479,14 @@ impl ProxyAdapter for DirectAdapter {
             None => meow_common::metadata_ip_literal(&metadata.host).is_some_and(|ip| ip.is_ipv6()),
         };
         let bind_addr = if dst_is_v6 { "[::]:0" } else { "0.0.0.0:0" };
+        // One session, one destination (see above): its route decides the
+        // interface.
+        let peer = metadata
+            .dst_ip
+            .or_else(|| meow_common::metadata_ip_literal(&metadata.host))
+            .map(|ip| SocketAddr::new(ip, metadata.dst_port));
         let socket = self
-            .bind_udp(bind_addr.parse().expect("static"))
+            .bind_udp(bind_addr.parse().expect("static"), peer)
             .await
             .map_err(MeowError::Io)?;
         Ok(Box::new(DirectPacketConn {
@@ -484,6 +520,118 @@ impl ProxyAdapter for DirectAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PaoPao: a per-rule `interface-name` outranks both the system route
+    /// to the destination (`tun.follow-system-routes`) and the default
+    /// binding. The explicit interface here does not exist, so taking it
+    /// is visible as an error; without it the socket follows the route and
+    /// — the routed interface being made up too — lands on the default.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn explicit_interface_outranks_the_route_and_the_default_binding() {
+        use meow_common::route_table::{
+            clear_route_table, publish_route_table, RawRoute, RouteIfaceKind, RouteTable,
+        };
+        publish_route_table(RouteTable::build(
+            [RawRoute {
+                net: "198.51.100.0/24".parse().unwrap(),
+                iface: "zz-vpn0".into(),
+                index: 99,
+                gateway: None,
+                metric: 0,
+                table: None,
+                scoped: false,
+            }],
+            |_| false,
+            |_| RouteIfaceKind::OtherVpn,
+        ));
+        let mut owner = meow_common::install_outbound_interface("lo").expect("loopback exists");
+        owner.set_follow_routes(true);
+        let local: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        let peer: SocketAddr = "198.51.100.7:53".parse().unwrap();
+
+        let explicit = DirectAdapter::new().with_interface("zz-explicit9");
+        let err = explicit
+            .bind_udp(local, Some(peer))
+            .await
+            .expect_err("the explicit interface must be the one tried");
+        assert!(err.to_string().contains("zz-explicit9"), "{err}");
+
+        let routed = DirectAdapter::new()
+            .bind_udp(local, Some(peer))
+            .await
+            .expect("follows the route, falls back to the default binding");
+        let device = socket2::SockRef::from(&routed).device().unwrap();
+        assert_eq!(device.as_deref(), Some(&b"lo"[..]));
+
+        // PaoPao (`tun.outbound-interfaces`): with outbound balancing on, a
+        // per-rule interface and the physical-uplink passthrough (another
+        // VPN's client and gateway traffic) never ask the balancer, nor
+        // does a destination another VPN has a route for; a plain DIRECT
+        // socket to a public address does.
+        {
+            use meow_common::outbound_balance::{
+                BalanceOptions, Balancer, Link, LinkKind, LinkSource,
+            };
+            struct Links;
+            impl LinkSource for Links {
+                fn links(&self) -> Vec<Link> {
+                    vec![Link {
+                        name: "lo".into(),
+                        index: 1,
+                        kind: LinkKind::Physical,
+                        v4: true,
+                        v6: true,
+                        strict_rp_filter: false,
+                    }]
+                }
+                fn kind_of(&self, _name: &str) -> Option<LinkKind> {
+                    None
+                }
+            }
+            let balancer = Balancer::new(&BalanceOptions {
+                interfaces: vec!["lo".into(), "zz-gone9".into()],
+                sticky: true,
+            });
+            balancer.refresh(&Links);
+            owner.set_balance(Some(std::sync::Arc::clone(&balancer)));
+            let assigned = || -> u64 {
+                balancer
+                    .snapshot(std::time::Instant::now())
+                    .interfaces
+                    .iter()
+                    .map(|m| m.assigned)
+                    .sum()
+            };
+            let public: SocketAddr = "93.184.216.34:443".parse().unwrap();
+            for adapter in [
+                DirectAdapter::new().with_interface("lo"),
+                DirectAdapter::new().with_physical_uplink(),
+            ] {
+                let socket = adapter
+                    .bind_udp(local, Some(public))
+                    .await
+                    .expect("pinned to loopback");
+                let device = socket2::SockRef::from(&socket).device().unwrap();
+                assert_eq!(device.as_deref(), Some(&b"lo"[..]));
+            }
+            // The other VPN's prefix (`OtherRoute`).
+            DirectAdapter::new()
+                .bind_udp(local, Some(peer))
+                .await
+                .expect("routed, falls back to the default binding");
+            assert_eq!(assigned(), 0, "passthrough must not reach the balancer");
+            DirectAdapter::new()
+                .bind_udp(local, Some(public))
+                .await
+                .expect("a member");
+            assert_eq!(assigned(), 1);
+            owner.set_balance(None);
+        }
+
+        drop(owner);
+        clear_route_table();
+    }
     use meow_common::DnsMode;
     use meow_dns::HostEntry;
     use meow_trie::DomainTrie;

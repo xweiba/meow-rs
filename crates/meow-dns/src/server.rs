@@ -115,6 +115,25 @@ impl DnsServer {
         data: &[u8],
         resolver: &Resolver,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        Self::handle_query_as(data, resolver, false).await
+    }
+
+    /// PaoPao: [`Self::handle_query`] for another VPN's client program —
+    /// A/AAAA answers are the real addresses from the configured upstreams:
+    /// no fake IP, no hosts entry, no IPv6 suppression. (A fake address
+    /// would end up in the host route the client adds for its server.)
+    pub async fn handle_query_real(
+        data: &[u8],
+        resolver: &Resolver,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        Self::handle_query_as(data, resolver, true).await
+    }
+
+    async fn handle_query_as(
+        data: &[u8],
+        resolver: &Resolver,
+        real: bool,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         // Minimal DNS parsing: extract the query name and type
         if data.len() < 12 {
             return Err("DNS packet too short".into());
@@ -172,6 +191,20 @@ impl DnsServer {
             return Ok(Self::build_notimp(id, flags, arcount > 0));
         }
 
+        // PaoPao: a name another VPN owns is passed through to that VPN's
+        // DNS and its answer returned as received — every record type,
+        // ahead of hosts, fake-IP and nameserver policy.
+        if let Some(target) = crate::vpn_dns::target_for(&domain) {
+            debug!(
+                "DNS query: {domain} belongs to another VPN (.{}), passed through",
+                target.suffix
+            );
+            return Ok(match crate::vpn_dns::forward(data, &target).await {
+                Some(answer) => answer,
+                None => Self::build_servfail(id, data, flags, question_len),
+            });
+        }
+
         // Non-address queries (TXT, MX, SRV, HTTPS, SOA, PTR, …) go through
         // the same nameserver pipeline as A/AAAA — domain-gate → policy →
         // main → fallback — and the upstream `Message` is relayed back on
@@ -189,6 +222,29 @@ impl DnsServer {
                 resolver,
             )
             .await;
+        }
+
+        // The other VPN's own server names get real addresses for everyone
+        // — its client adds a host route for whatever it is told.
+        if real || meow_common::route_table::is_vpn_gateway_domain(&domain) {
+            let rtype = if qtype == 1 {
+                RecordType::A
+            } else {
+                RecordType::AAAA
+            };
+            return Ok(match resolver.lookup_real_family(&domain, rtype).await {
+                AddressLookupResult::Answer(addr, ttl) => {
+                    let ttl_secs = ttl.as_secs().clamp(1, u64::from(u32::MAX)) as u32;
+                    Self::build_response(id, data, flags, question_len, qtype, addr, ttl_secs)
+                }
+                AddressLookupResult::NoData => {
+                    Self::build_noerror_empty(id, data, flags, question_len)
+                }
+                AddressLookupResult::NxDomain => {
+                    Self::build_nxdomain(id, data, flags, question_len)
+                }
+                AddressLookupResult::Failed => Self::build_servfail(id, data, flags, question_len),
+            });
         }
 
         // `paopao-hosts:` (ordered, first match wins) decides before the
@@ -321,6 +377,13 @@ impl DnsServer {
         let qclass = u16::from_be_bytes([data[12 + question_len - 2], data[12 + question_len - 1]]);
         if qclass != 1 {
             return LocalAnswer::Answer(Self::build_notimp(id, flags, arcount > 0));
+        }
+        // Same rule as handle_query: another VPN's names are passed through
+        // (an upstream round-trip — never answered from local state).
+        if crate::vpn_dns::target_for(&domain).is_some()
+            || meow_common::route_table::is_vpn_gateway_domain(&domain)
+        {
+            return LocalAnswer::Upstream;
         }
         if qtype != 1 && qtype != 28 {
             // Generic queries escalate to the task path — the remaining

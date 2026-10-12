@@ -228,6 +228,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/", get(hello))
         .route("/version", get(version))
         .route("/network/outbound", get(network_outbound))
+        .route("/network/routes", get(network_routes))
+        .route("/network/vpns", get(network_vpns))
         .route("/proxies", get(get_proxies))
         .route(
             "/proxies/{name}",
@@ -362,6 +364,8 @@ struct VersionResponse {
 /// routing decides); `uplinks`: the interfaces holding an IPv4 default
 /// route, best first, each with its kind (`physical` / `unknown` /
 /// `virtual`) — the first is what the system and an automatic binding use.
+/// Plus `fullTunnel`, `physicalRouteMissing`, `routeConflict`, `defaultVia`
+/// and `followRoutes` (coexistence with another VPN).
 async fn network_outbound() -> Json<serde_json::Value> {
     #[cfg(all(
         feature = "listener-tun",
@@ -387,10 +391,123 @@ async fn network_outbound() -> Json<serde_json::Value> {
         not(any(target_os = "android", target_os = "ios"))
     )))]
     let uplinks: Vec<serde_json::Value> = Vec::new();
-    Json(serde_json::json!({
+    // PaoPao: what can be a member of `tun.outbound-interfaces`, and how
+    // the configured members are doing (see `network::balance_fields`).
+    #[cfg(all(
+        feature = "listener-tun",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    let candidates = tokio::task::spawn_blocking(|| {
+        meow_listener::tun::SystemLinks::read()
+            .map(meow_listener::tun::SystemLinks::into_links)
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
+    #[cfg(not(all(
+        feature = "listener-tun",
+        not(any(target_os = "android", target_os = "ios"))
+    )))]
+    let candidates: Vec<meow_common::outbound_balance::Link> = Vec::new();
+    let balance =
+        meow_common::outbound_iface::balancer().map(|b| b.snapshot(std::time::Instant::now()));
+    let mut body = serde_json::json!({
         "interface": meow_common::outbound_interface().map(|i| i.to_string()),
         "uplinks": uplinks,
-    }))
+    });
+    if let (Some(body), serde_json::Value::Object(fields)) = (
+        body.as_object_mut(),
+        crate::network::balance_fields(&candidates, balance.as_ref()),
+    ) {
+        body.extend(fields);
+    }
+    // PaoPao: what the monitor knows about another VPN holding the default
+    // route (see `network::outbound_status_fields` for the shape).
+    let status =
+        crate::network::outbound_status_fields(&meow_common::route_table::outbound_status());
+    if let (Some(body), serde_json::Value::Object(status)) = (body.as_object_mut(), status) {
+        body.extend(status);
+    }
+    Json(body)
+}
+
+/// The route snapshot the views are built from: the running monitor's, or
+/// — when no TUN in global mode is up — one read for this request.
+async fn network_snapshot() -> (std::sync::Arc<meow_common::route_table::RouteTable>, bool) {
+    let table = meow_common::route_table::route_table();
+    if !table.is_empty() || meow_common::outbound_interface().is_some() {
+        return (table, true);
+    }
+    #[cfg(all(
+        feature = "listener-tun",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    if let Ok(Ok(read)) = tokio::task::spawn_blocking(meow_listener::tun::route_snapshot).await {
+        return (std::sync::Arc::new(read), false);
+    }
+    (table, false)
+}
+
+/// PaoPao: `GET /network/routes` — the system routing table as the core
+/// sees it (see `network::routes_body` for the shape).
+async fn network_routes() -> Json<serde_json::Value> {
+    let (table, published) = network_snapshot().await;
+    let default_iface = meow_common::outbound_interface();
+    let physical = meow_common::route_table::physical_interface();
+    Json(crate::network::routes_body(
+        &table,
+        default_iface.as_deref(),
+        physical.as_deref(),
+        published,
+    ))
+}
+
+/// PaoPao: `GET /network/vpns` — the other VPNs next to us (see
+/// `network::vpns_body` for the shape).
+async fn network_vpns() -> Json<serde_json::Value> {
+    let (table, published) = network_snapshot().await;
+    #[cfg(all(
+        feature = "listener-tun",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    let addresses: Vec<(String, String)> =
+        tokio::task::spawn_blocking(meow_listener::tun::interface_addresses)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, net)| (name, net.to_string()))
+            .collect();
+    #[cfg(not(all(
+        feature = "listener-tun",
+        not(any(target_os = "android", target_os = "ios"))
+    )))]
+    let addresses: Vec<(String, String)> = Vec::new();
+    #[cfg(all(
+        feature = "listener-tun",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    let is_container = meow_listener::tun::is_container_like;
+    #[cfg(not(all(
+        feature = "listener-tun",
+        not(any(target_os = "android", target_os = "ios"))
+    )))]
+    let is_container = |_: &str| false;
+    let dns = meow_common::route_table::iface_dns();
+    let clients = meow_common::route_table::vpn_clients();
+    let manual = meow_common::route_table::vpn_manual();
+    let status = meow_common::route_table::outbound_status();
+    Json(crate::network::vpns_body(
+        &crate::network::VpnView {
+            table: &table,
+            dns: &dns,
+            addresses: &addresses,
+            clients: &clients,
+            manual: &manual,
+            status: &status,
+            published,
+        },
+        is_container,
+    ))
 }
 
 async fn version() -> Json<VersionResponse> {
@@ -2562,7 +2679,7 @@ async fn spawn_tun_from_raw(
     let mut listener = TunListener::new(
         tunnel.clone(),
         crate::tun_config_to_listener_config(&tun_cfg),
-        "meow-tun".to_string(),
+        meow_common::TUN_INBOUND_NAME.to_string(),
     )
     .with_readiness_signal(ready_tx)
     .with_sniffer(Arc::new(meow_listener::SnifferRuntime::new(sniffer)));
@@ -4895,7 +5012,11 @@ mod global_route_binding_tests {
 
         // ── Rejected PUT over a running global listener: its binding is
         // back in effect afterwards, and the PUT's own owner is gone.
-        let running = meow_listener::OutboundBinding::install(Some("lo")).unwrap();
+        let running = meow_listener::OutboundBinding::install(
+            Some("lo"),
+            &meow_listener::OutboundPolicy::default(),
+        )
+        .unwrap();
         let (status, body) = put(&state, &candidate(GLOBAL_LO, &origin, BAD_LISTENERS)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(origin.take_seen(), vec![Some("lo".to_string())]);
@@ -4919,7 +5040,13 @@ mod global_route_binding_tests {
         state.raw_config.write().tun = raw(GLOBAL_LO).tun;
         let after_drop = Arc::new(parking_lot::Mutex::new(None));
         let old = OldListener {
-            binding: Some(meow_listener::OutboundBinding::install(Some("lo")).unwrap()),
+            binding: Some(
+                meow_listener::OutboundBinding::install(
+                    Some("lo"),
+                    &meow_listener::OutboundPolicy::default(),
+                )
+                .unwrap(),
+            ),
             after_drop: Arc::clone(&after_drop),
         };
         state

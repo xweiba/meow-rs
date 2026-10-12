@@ -47,6 +47,7 @@ dashmap = { workspace = true }
 ipnet = { workspace = true }
 meow-config = { workspace = true }
 meow-rules = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }

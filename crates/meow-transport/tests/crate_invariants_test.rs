@@ -615,6 +615,14 @@ const RAW_SOCKET_ALLOWLIST: &[(&str, &str, usize, &str)] = &[
         "loopback DNS listener (127.0.0.1:53 / [::1]:53)",
     ),
     (
+        "crates/meow-tunnel/src/tunnel.rs",
+        "UdpSocket::bind(",
+        1,
+        "is_host_address: asks whether an address is this machine's by binding \
+         a socket to it; nothing is sent and it is closed at once — binding it \
+         to the outbound interface would break the probe",
+    ),
+    (
         "crates/meow-app/src/arp.rs",
         "libc::socket(",
         1,

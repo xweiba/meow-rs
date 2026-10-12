@@ -2,6 +2,7 @@
 //! document (Dart: `ProxyController.configInput()`).
 
 use std::fmt;
+use std::net::IpAddr;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer};
@@ -75,6 +76,184 @@ pub struct RuntimeOptions {
     pub mitm_port: Option<i64>,
     /// Look up every connection's program (desktops).
     pub find_process: bool,
+    /// The app itself as an app matcher (`path:<dir>` / `name:<file>`):
+    /// its connections through the TUN go direct. None (phones, an older
+    /// controller) = no such rule.
+    pub self_app: Option<String>,
+    /// Living beside another VPN (desktops, with the TUN). None (phones,
+    /// an older controller) = the tun section as before.
+    pub vpn: Option<VpnOptions>,
+    /// Which interfaces outbound connections leave by (desktops, with the
+    /// TUN). None (phones, an older controller, nothing chosen) = the tun
+    /// section as before.
+    pub outbound: Option<OutboundOptions>,
+}
+
+/// `runtime.outbound`: the physical interfaces the user chose for outbound
+/// connections. One = leave by it; two or more = spread connections over
+/// them (the core chooses per connection, skips one that is down and takes
+/// it back when it returns).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutboundOptions {
+    /// Interface names, cleaned, at least one.
+    pub interfaces: Vec<String>,
+    /// The same destination keeps its interface (default true). Only
+    /// means something with two or more interfaces.
+    pub sticky: bool,
+}
+
+/// Most interfaces kept (the core's `MAX_MEMBERS`).
+const OUTBOUND_MAX: usize = 8;
+/// Longest interface name kept (the core's `MAX_NAME_LEN`).
+const OUTBOUND_NAME_MAX: usize = 255;
+
+impl OutboundOptions {
+    /// Reads `runtime.outbound`; None unless it is an object with at least
+    /// one usable interface name. A name is trimmed; an empty one, one
+    /// with a control character, an over-long one and a repeated one are
+    /// dropped, as is everything past the eighth — the same cleaning the
+    /// core does (`meow_common::outbound_balance::clean_interfaces`).
+    pub fn from_json(v: &Value) -> Option<Self> {
+        let o = v.as_object()?;
+        let mut interfaces = list_of(o.get("interfaces"), |x| {
+            let name = x.as_str()?.trim();
+            (!name.is_empty()
+                && name.chars().count() <= OUTBOUND_NAME_MAX
+                && !name.chars().any(char::is_control))
+            .then(|| name.to_owned())
+        });
+        interfaces.truncate(OUTBOUND_MAX);
+        (!interfaces.is_empty()).then(|| Self {
+            interfaces,
+            sticky: bool_of(o.get("sticky"), true),
+        })
+    }
+}
+
+/// `runtime.vpn`: what the controller hands down about other VPNs. The
+/// core reads their routes, DNS and client processes itself; the lists
+/// here are the user's hand-entered fallbacks. Entries the core would
+/// refuse (it fails to start on one) are dropped on reading.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VpnOptions {
+    /// `physical` / `other-vpn`; None = the core's default (`physical`).
+    pub default_via: Option<String>,
+    /// Destinations inside another VPN's routes leave by that VPN
+    /// (default true).
+    pub follow_routes: bool,
+    /// Networks kept out of the TUN, as `address/prefix`.
+    pub exclude_nets: Vec<String>,
+    /// Names the other VPN's DNS answers.
+    pub internal_domains: Vec<InternalDomain>,
+    /// The other VPN's server names.
+    pub gateway_domains: Vec<String>,
+    /// The other VPN's client programs (`name:<file>` / `path:<file or
+    /// directory>`).
+    pub client_apps: Vec<String>,
+}
+
+/// One of [`VpnOptions::internal_domains`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InternalDomain {
+    /// Lower case, no leading `+.` / `*.`, no dots at the ends.
+    pub suffix: String,
+    /// DNS server addresses; empty = the VPN interface's own.
+    pub servers: Vec<String>,
+    /// The interface to ask through; None = the one the servers route by.
+    pub iface: Option<String>,
+}
+
+/// A domain suffix as the core keeps it; None when nothing is left or it
+/// could not be a name.
+fn clean_domain(s: &str) -> Option<String> {
+    let s = s.trim();
+    let s = s
+        .strip_prefix("+.")
+        .or_else(|| s.strip_prefix("*."))
+        .unwrap_or(s)
+        .trim_matches('.')
+        .to_ascii_lowercase();
+    let ok = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    ok.then_some(s)
+}
+
+/// `address/prefix` (a bare address = that host); None when it is not one.
+fn clean_net(s: &str) -> Option<String> {
+    let s = s.trim();
+    let (addr, prefix) = match s.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (s, None),
+    };
+    let addr: IpAddr = addr.parse().ok()?;
+    let max = if addr.is_ipv4() { 32 } else { 128 };
+    let prefix = match prefix {
+        Some(p) => p.parse::<u8>().ok().filter(|p| *p <= max)?,
+        None => max,
+    };
+    Some(format!("{addr}/{prefix}"))
+}
+
+/// `name:<file>` / `path:<file or directory>`; None for anything else.
+fn clean_client_app(s: &str) -> Option<String> {
+    let s = s.trim();
+    let (kind, value) = s.split_once(':')?;
+    let value = value.trim();
+    (matches!(kind, "name" | "path") && !value.is_empty()).then(|| format!("{kind}:{value}"))
+}
+
+fn list_of<T: PartialEq>(v: Option<&Value>, read: impl Fn(&Value) -> Option<T>) -> Vec<T> {
+    let mut out = Vec::new();
+    for item in v.and_then(Value::as_array).into_iter().flatten() {
+        if let Some(x) = read(item).filter(|x| !out.contains(x)) {
+            out.push(x);
+        }
+    }
+    out
+}
+
+impl VpnOptions {
+    /// Reads `runtime.vpn`; None unless it is an object.
+    pub fn from_json(v: &Value) -> Option<Self> {
+        let o = v.as_object()?;
+        let text = |read: fn(&str) -> Option<String>| move |x: &Value| x.as_str().and_then(read);
+        let internal = |x: &Value| {
+            let (suffix, rest) = match x {
+                Value::String(s) => (s.as_str(), None),
+                Value::Object(m) => (m.get("suffix")?.as_str()?, Some(m)),
+                _ => return None,
+            };
+            Some(InternalDomain {
+                suffix: clean_domain(suffix)?,
+                servers: list_of(rest.and_then(|m| m.get("servers")), |s| {
+                    Some(s.as_str()?.trim().parse::<IpAddr>().ok()?.to_string())
+                }),
+                iface: rest
+                    .and_then(|m| m.get("iface"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|i| !i.is_empty())
+                    .map(str::to_owned),
+            })
+        };
+        let mut internal_domains: Vec<InternalDomain> = Vec::new();
+        for d in list_of(o.get("internalDomains"), internal) {
+            // One entry a suffix: the first wins.
+            if !internal_domains.iter().any(|x| x.suffix == d.suffix) {
+                internal_domains.push(d);
+            }
+        }
+        Some(Self {
+            default_via: str_of(o.get("defaultVia"))
+                .filter(|v| matches!(v.as_str(), "physical" | "other-vpn")),
+            follow_routes: bool_of(o.get("followRoutes"), true),
+            exclude_nets: list_of(o.get("excludeNets"), text(clean_net)),
+            internal_domains,
+            gateway_domains: list_of(o.get("gatewayDomains"), text(clean_domain)),
+            client_apps: list_of(o.get("clientApps"), text(clean_client_app)),
+        })
+    }
 }
 
 impl Default for RuntimeOptions {
@@ -90,6 +269,9 @@ impl Default for RuntimeOptions {
             route_port: None,
             mitm_port: None,
             find_process: false,
+            self_app: None,
+            vpn: None,
+            outbound: None,
         }
     }
 }
@@ -137,6 +319,9 @@ impl RuntimeOptions {
             route_port: int_of(v.get("routePort")),
             mitm_port: int_of(v.get("mitmPort")),
             find_process: bool_of(v.get("findProcess"), d.find_process),
+            self_app: str_of(v.get("selfApp")),
+            vpn: v.get("vpn").and_then(VpnOptions::from_json),
+            outbound: v.get("outbound").and_then(OutboundOptions::from_json),
         }
     }
 }
@@ -267,6 +452,8 @@ impl fmt::Debug for RuntimeOptions {
             .field("route_port", &self.route_port)
             .field("mitm_port", &self.mitm_port)
             .field("find_process", &self.find_process)
+            .field("self_app", &self.self_app)
+            .field("vpn", &self.vpn)
             .finish()
     }
 }

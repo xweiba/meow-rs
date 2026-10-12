@@ -275,7 +275,7 @@ impl TcpDialer for DirectDialer {
             } else {
                 "[::]:0".parse().expect("static")
             };
-            let udp = match meow_common::bind_udp(bind_addr).await {
+            let udp = match meow_common::bind_udp_to(bind_addr, remote).await {
                 Ok(udp) => udp,
                 Err(e) => {
                     // An errno-backed failure (e.g. EMFILE on socket())
@@ -316,7 +316,7 @@ impl TcpDialer for DirectDialer {
         } else {
             "[::]:0".parse().expect("static")
         };
-        let udp = meow_common::bind_udp(bind_addr).await?;
+        let udp = meow_common::bind_udp_to(bind_addr, remote).await?;
         udp.connect(remote).await?;
         Ok(Box::new(udp))
     }

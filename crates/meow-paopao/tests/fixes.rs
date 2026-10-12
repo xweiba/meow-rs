@@ -450,3 +450,268 @@ fn app_rules_route_their_programs() {
     );
     assert_ne!(e["type"], "PROCESS-PATH");
 }
+
+/// Task `10-12-self-exclude`: the app's own connections through the TUN
+/// go direct, after the speed test's inbound (its traffic must reach the
+/// line under test) and before everything a user can write. Without the
+/// TUN, without `selfApp` (phones, an older controller) or with one a rule
+/// line cannot carry, the config is the one before.
+#[test]
+fn own_app_rule_sits_between_speed_test_and_user_rules() {
+    let mut v = input(
+        &json!([vless("US 01", "a")]),
+        &json!({}),
+        &json!({"tun": true, "rules": [
+            {"match": "app", "value": "path:/Applications/PaoPao.app", "target": "proxy"},
+            {"match": "domain", "value": "a.example", "target": "proxy"},
+        ]}),
+    );
+    let before = config_rules(&run(&v));
+    assert!(!before.iter().any(|r| r.contains("meow-tun")));
+
+    v["runtime"]["selfApp"] = json!("path:/Applications/PaoPao.app/");
+    v["runtime"]["route"] = json!({"key": "k", "lan": false});
+    v["runtime"]["routePort"] = json!(3);
+    let out = run(&v);
+    let rules = config_rules(&out);
+    let own = "AND,((IN-NAME,meow-tun),(PROCESS-PATH,/Applications/PaoPao.app)),DIRECT";
+    assert_eq!(rules[0], "IN-NAME,speedtest-in,speedtest");
+    assert_eq!(rules[1], own);
+    let at = |r: &str| rules.iter().position(|x| x == r).expect(r);
+    assert!(rules[2].starts_with("IN-USER,"), "{}", rules[2]);
+    assert!(at(own) < at("IP-CIDR,192.168.0.0/16,DIRECT,no-resolve"));
+    // The user's rule for the same program cannot come first.
+    assert!(at(own) < at("PROCESS-PATH,/Applications/PaoPao.app,proxy"));
+    assert!(at(own) < at("DOMAIN-SUFFIX,a.example,proxy"));
+    assert_eq!(rules.iter().filter(|r| r.contains("meow-tun")).count(), 1);
+    // Not one of the user's own traffic's rules (the rules page).
+    assert!(!out.rules.iter().any(|r| r.contains("meow-tun")));
+    // A question about a site is not through the TUN: the rules decide.
+    let e = meow_paopao::explain_json(
+        &v.to_string(),
+        &json!({"host": "x.test", "processPath": "/Applications/PaoPao.app/Contents/MacOS/PaoPao"})
+            .to_string(),
+    );
+    assert_eq!(e["rule"], "PROCESS-PATH,/Applications/PaoPao.app,proxy");
+
+    // Without the route API the rest is exactly the config before.
+    v["runtime"]
+        .as_object_mut()
+        .expect("runtime")
+        .remove("route");
+    let mut with = config_rules(&run(&v));
+    assert_eq!(with.remove(1), own);
+    assert_eq!(with, before);
+
+    // A file name (Windows, Linux).
+    v["runtime"]["selfApp"] = json!("name:paopao.exe");
+    assert_eq!(
+        config_rules(&run(&v))[1],
+        "AND,((IN-NAME,meow-tun),(PROCESS-NAME,paopao.exe)),DIRECT"
+    );
+    // Nothing a rule line can carry, or no TUN: as before.
+    for bad in [
+        "",
+        "bundle:x",
+        "name:a,b",
+        "path:/x (1)/PaoPao.app",
+        "paopao",
+    ] {
+        v["runtime"]["selfApp"] = json!(bad);
+        assert_eq!(config_rules(&run(&v)), before, "{bad}");
+    }
+    v["runtime"]["selfApp"] = json!("name:paopao");
+    v["settings"]["tun"] = json!(false);
+    assert!(!config_rules(&run(&v))
+        .iter()
+        .any(|r| r.contains("meow-tun")));
+}
+
+/// Task `10-12-vpn-coexist` (K8): `runtime.vpn` only adds keys to the tun
+/// section — the core does the rest at run time, ahead of every rule.
+/// Without it, without the TUN, the config is the one before; entries the
+/// core would refuse to start on are dropped.
+#[test]
+fn vpn_options_only_add_tun_keys() {
+    let mut v = input(
+        &json!([vless("US 01", "a")]),
+        &json!({}),
+        &json!({"tun": true}),
+    );
+    v["runtime"]["ipv6"] = json!(false);
+    let before = run(&v).config;
+    assert_eq!(
+        before["tun"],
+        json!({"enable": true, "auto-route": "global", "auto-detect-interface": true,
+               "dns-hijack": ["any:53"]})
+    );
+
+    // Present but empty: the routes of another VPN are followed.
+    v["runtime"]["vpn"] = json!({});
+    let empty = run(&v).config;
+    assert_eq!(
+        empty["tun"],
+        json!({"enable": true, "auto-route": "global", "auto-detect-interface": true,
+               "dns-hijack": ["any:53"], "follow-system-routes": true})
+    );
+    let rest = |c: &serde_json::Map<String, Value>| {
+        let mut c = c.clone();
+        c.remove("tun");
+        c
+    };
+    assert_eq!(rest(&empty), rest(&before));
+
+    v["runtime"]["vpn"] = json!({
+        "defaultVia": "other-vpn",
+        "followRoutes": false,
+        "excludeNets": ["10.1.0.0/16", " 192.168.9.9 ", "fd00::/8", "10.1.0.0/16",
+                        "10.0.0.0/33", "nonsense", 7],
+        "internalDomains": [
+            {"suffix": "+.Corp.Example.", "servers": ["10.8.0.1", "bad", "10.8.0.1"], "iface": "tun0"},
+            "lab.example",
+            {"suffix": "corp.example", "servers": ["10.9.9.9"]},
+            {"suffix": "a b"},
+            {"servers": ["10.8.0.1"]},
+        ],
+        "gatewayDomains": ["VPN.corp.example", "*.gw.example", "vpn.corp.example", ""],
+        "clientApps": ["name:openconnect", "path:/opt/cisco/", "pkg:x", "name:", "vpnagentd"],
+    });
+    let full = run(&v).config;
+    assert_eq!(
+        full["tun"],
+        json!({
+            "enable": true, "auto-route": "global", "auto-detect-interface": true,
+            "dns-hijack": ["any:53"],
+            "follow-system-routes": false,
+            "default-via": "other-vpn",
+            "route-exclude-address": ["10.1.0.0/16", "192.168.9.9/32", "fd00::/8"],
+            "vpn-domains": [
+                {"suffix": "corp.example", "servers": ["10.8.0.1"], "iface": "tun0"},
+                {"suffix": "lab.example"},
+            ],
+            "vpn-gateway-domains": ["vpn.corp.example", "gw.example"],
+            "vpn-client-apps": ["name:openconnect", "path:/opt/cisco/"],
+        })
+    );
+    assert_eq!(rest(&full), rest(&before));
+
+    // A value the core does not know is left to its default.
+    v["runtime"]["vpn"] = json!({"defaultVia": "auto"});
+    assert_eq!(run(&v).config["tun"], empty["tun"]);
+    // Not an object, or no TUN: as before.
+    v["runtime"]["vpn"] = json!("on");
+    assert_eq!(run(&v).config, before);
+    v["runtime"]["vpn"] = json!({"gatewayDomains": ["vpn.corp.example"]});
+    v["settings"]["tun"] = json!(false);
+    let off = run(&v).config;
+    assert!(off.get("tun").is_none());
+    v["runtime"].as_object_mut().expect("runtime").remove("vpn");
+    assert_eq!(run(&v).config, off);
+}
+
+/// Task `10-12-multi-nic-balance`: `runtime.outbound` chooses the
+/// interfaces outbound connections leave by. One = that interface; two or
+/// more = the core spreads connections over them. Entries that are not
+/// names are dropped, never an error; without it, or without the TUN, the
+/// config is the one before.
+#[test]
+fn outbound_options_choose_the_interfaces() {
+    let mut v = input(
+        &json!([vless("US 01", "a")]),
+        &json!({}),
+        &json!({"tun": true, "outbound_interface": "eth9"}),
+    );
+    v["runtime"]["ipv6"] = json!(false);
+    let before = run(&v).config;
+    let base = json!({"enable": true, "auto-route": "global", "auto-detect-interface": true,
+                      "outbound-interface": "eth9", "dns-hijack": ["any:53"]});
+    assert_eq!(before["tun"], base);
+    let rest = |c: &serde_json::Map<String, Value>| {
+        let mut c = c.clone();
+        c.remove("tun");
+        c
+    };
+
+    // Two or more: balancing; the single-interface key is not written.
+    v["runtime"]["outbound"] = json!({"interfaces": ["en0", "en7"]});
+    let two = run(&v).config;
+    assert_eq!(
+        two["tun"],
+        json!({"enable": true, "auto-route": "global", "auto-detect-interface": true,
+               "outbound-interfaces": ["en0", "en7"], "dns-hijack": ["any:53"]})
+    );
+    assert_eq!(rest(&two), rest(&before));
+
+    // Sticking is the default; only "off" is written.
+    v["runtime"]["outbound"] = json!({"interfaces": ["en0", "en7"], "sticky": true});
+    assert_eq!(run(&v).config["tun"], two["tun"]);
+    v["runtime"]["outbound"] = json!({"interfaces": ["en0", "en7"], "sticky": false});
+    assert_eq!(
+        run(&v).config["tun"],
+        json!({"enable": true, "auto-route": "global", "auto-detect-interface": true,
+               "outbound-interfaces": ["en0", "en7"], "outbound-sticky": false,
+               "dns-hijack": ["any:53"]})
+    );
+
+    // Invalid entries are dropped: not strings, empty, control characters,
+    // repeats; names keep their spaces and non-ASCII letters (Windows).
+    v["runtime"]["outbound"] = json!({
+        "interfaces": [" en0 ", "", 7, null, "en0", "bad\u{0}name", "以太网 2", ["x"], "  "],
+    });
+    assert_eq!(
+        run(&v).config["tun"]["outbound-interfaces"],
+        json!(["en0", "以太网 2"])
+    );
+    // At most eight.
+    let many: Vec<String> = (0..12).map(|i| format!("eth{i}")).collect();
+    v["runtime"]["outbound"] = json!({"interfaces": many});
+    assert_eq!(
+        run(&v).config["tun"]["outbound-interfaces"]
+            .as_array()
+            .map(Vec::len),
+        Some(8)
+    );
+
+    // One left: that interface, in place of the saved one.
+    v["runtime"]["outbound"] = json!({"interfaces": ["en7", "en7", ""], "sticky": false});
+    assert_eq!(
+        run(&v).config["tun"],
+        json!({"enable": true, "auto-route": "global", "auto-detect-interface": true,
+               "outbound-interface": "en7", "dns-hijack": ["any:53"]})
+    );
+
+    // None left, not a list, not an object: as before.
+    for outbound in [
+        json!({"interfaces": []}),
+        json!({"interfaces": ["", 3]}),
+        json!({"interfaces": "en0"}),
+        json!({"sticky": false}),
+        json!(["en0", "en7"]),
+        json!("en0"),
+        Value::Null,
+    ] {
+        v["runtime"]["outbound"] = outbound.clone();
+        assert_eq!(run(&v).config, before, "{outbound}");
+    }
+
+    // Next to `runtime.vpn`: both sets of keys.
+    v["runtime"]["outbound"] = json!({"interfaces": ["en0", "en7"]});
+    v["runtime"]["vpn"] = json!({});
+    assert_eq!(
+        run(&v).config["tun"],
+        json!({"enable": true, "auto-route": "global", "auto-detect-interface": true,
+               "outbound-interfaces": ["en0", "en7"], "dns-hijack": ["any:53"],
+               "follow-system-routes": true})
+    );
+
+    // No TUN: nothing is bound, nothing to spread.
+    v["settings"]["tun"] = json!(false);
+    let off = run(&v).config;
+    assert!(off.get("tun").is_none());
+    v["runtime"]
+        .as_object_mut()
+        .expect("runtime")
+        .remove("outbound");
+    v["runtime"].as_object_mut().expect("runtime").remove("vpn");
+    assert_eq!(run(&v).config, off);
+}

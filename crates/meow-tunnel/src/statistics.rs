@@ -70,6 +70,10 @@ pub struct ConnCounters {
     // Stored in the existing Arc so cancellation adds no setup allocation.
     closed: AtomicBool,
     close_notify: tokio::sync::Notify,
+    /// PaoPao (`tun.outbound-interfaces`): the connection's dial context —
+    /// which interface it left by, and where its bytes are attributed.
+    /// Unset unless balancing is configured.
+    dial: OnceLock<Arc<meow_common::outbound_balance::DialScope>>,
 }
 
 impl ConnCounters {
@@ -89,6 +93,28 @@ impl ConnCounters {
         }
     }
 
+    /// PaoPao: the scope this connection's dial runs in
+    /// (`meow_common::outbound_balance::scoped`), made on first use from
+    /// the connection's destination. `None` while outbound balancing is
+    /// not configured.
+    pub fn dial_scope(
+        &self,
+        metadata: &Metadata,
+    ) -> Option<Arc<meow_common::outbound_balance::DialScope>> {
+        if let Some(scope) = self.dial.get() {
+            return Some(Arc::clone(scope));
+        }
+        let scope =
+            meow_common::outbound_balance::DialScope::for_target(&metadata.host, metadata.dst_ip)?;
+        Some(Arc::clone(self.dial.get_or_init(|| scope)))
+    }
+
+    /// PaoPao: the interface the connection's first socket was bound to,
+    /// when known (see [`Self::dial_scope`]).
+    pub fn interface(&self) -> Option<Arc<str>> {
+        self.dial.get()?.interface()
+    }
+
     pub fn upload_bytes(&self) -> Int {
         self.upload.load(Ordering::Relaxed)
     }
@@ -103,9 +129,16 @@ impl ConnCounters {
 impl Serialize for ConnCounters {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("ConnCounters", 2)?;
+        let interface = self.interface();
+        let mut s =
+            serializer.serialize_struct("ConnCounters", 2 + usize::from(interface.is_some()))?;
         s.serialize_field("upload", &self.upload_bytes())?;
         s.serialize_field("download", &self.download_bytes())?;
+        // PaoPao: only under outbound balancing, so the mihomo shape is
+        // untouched otherwise.
+        if let Some(interface) = &interface {
+            s.serialize_field("interface", &**interface)?;
+        }
         s.end()
     }
 }
@@ -197,12 +230,19 @@ impl Statistics {
     pub fn record_upload(&self, counters: &ConnCounters, n: Int) {
         counters.upload.fetch_add(n, Ordering::Relaxed);
         self.add_upload(n);
+        // PaoPao: the connection's share of its outbound interface.
+        if let Some(scope) = counters.dial.get() {
+            scope.add_upload(u64::try_from(n).unwrap_or(0));
+        }
     }
 
     /// See [`Self::record_upload`].
     pub fn record_download(&self, counters: &ConnCounters, n: Int) {
         counters.download.fetch_add(n, Ordering::Relaxed);
         self.add_download(n);
+        if let Some(scope) = counters.dial.get() {
+            scope.add_download(u64::try_from(n).unwrap_or(0));
+        }
     }
 
     /// One-time (per connection) handle to the live byte counters of a
@@ -439,5 +479,72 @@ impl std::io::Write for TimestampBuffer {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod outbound_interface_tests {
+    use super::*;
+    use meow_common::outbound_balance::{BalanceOptions, Balancer, DialScope};
+
+    /// PaoPao (`tun.outbound-interfaces`): a connection shows the interface
+    /// it left by as a top-level `interface`, its bytes count towards that
+    /// member, and without balancing the mihomo shape is untouched.
+    #[test]
+    fn a_connection_shows_its_interface_and_feeds_its_member() {
+        let stats = Statistics::new();
+        let (id, counters) = stats.track_connection_with_counters(
+            Metadata::default(),
+            "MATCH".into(),
+            "".into(),
+            smallvec::smallvec![Arc::from("DIRECT")],
+        );
+        let json = |stats: &Statistics| serde_json::to_value(stats.active_connections()).unwrap();
+
+        // Balancing is not configured: no scope, no field.
+        assert!(counters.dial_scope(&Metadata::default()).is_none());
+        assert_eq!(counters.interface(), None);
+        let before = json(&stats);
+        assert!(before[0].get("interface").is_none());
+        assert_eq!(before[0]["upload"], 0);
+
+        // The dial's first socket was given member 1.
+        let balancer = Balancer::new(&BalanceOptions {
+            interfaces: vec!["en0".into(), "en7".into()],
+            sticky: true,
+        });
+        let scope = DialScope::new(None);
+        counters.dial.set(Arc::clone(&scope)).unwrap();
+        // Dialled, not bound yet: still unknown.
+        assert!(json(&stats)[0].get("interface").is_none());
+        scope.record(&balancer.names()[1], Some((&balancer, 1)));
+        drop(scope);
+        stats.record_upload(&counters, 10);
+        stats.record_download(&counters, 30);
+
+        let after = json(&stats);
+        assert_eq!(after[0]["interface"], "en7");
+        assert_eq!(after[0]["upload"], 10);
+        assert_eq!(after[0]["download"], 30);
+        assert_eq!(after[0]["chains"], serde_json::json!(["DIRECT"]));
+        // The streaming view serialises the same.
+        assert_eq!(
+            serde_json::to_value(stats.active_connections_view()).unwrap(),
+            after
+        );
+        let snap = balancer.snapshot(std::time::Instant::now());
+        assert_eq!(snap.interfaces[1].connections, 1);
+        assert_eq!(
+            (snap.interfaces[1].upload, snap.interfaces[1].download),
+            (10, 30)
+        );
+        assert_eq!(snap.interfaces[0].download, 0);
+
+        // Closing the connection releases the member.
+        drop(counters);
+        stats.close_connection(id);
+        let snap = balancer.snapshot(std::time::Instant::now());
+        assert_eq!(snap.interfaces[1].connections, 0);
+        assert_eq!(snap.interfaces[1].download, 30);
     }
 }

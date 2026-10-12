@@ -11,6 +11,7 @@ pub mod paopao_hosts;
 pub mod resolver;
 pub mod server;
 pub mod upstream;
+pub mod vpn_dns;
 
 pub use cache::{DnsCache, DnsCacheSnapshotEntry, ReverseSnapshotEntry};
 pub use client::{

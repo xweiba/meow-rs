@@ -1646,7 +1646,7 @@ impl ProxyAdapter for ShadowsocksAdapter {
             } else {
                 "[::]:0".parse().expect("static")
             };
-            let udp = match meow_common::bind_udp(bind_addr).await {
+            let udp = match meow_common::bind_udp_to(bind_addr, remote).await {
                 Ok(udp) => udp,
                 Err(e) => {
                     last_err = MeowError::prefer_errno(

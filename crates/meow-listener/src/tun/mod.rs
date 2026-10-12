@@ -57,11 +57,13 @@
 
 mod device;
 mod dns;
+mod iface_dns;
 #[cfg(target_os = "windows")]
 mod local_dns;
 mod outbound_binding;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod route;
+mod vpn_clients;
 // Phones: the platform VPN owns the device's routes.
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[path = "route_platform.rs"]
@@ -110,13 +112,16 @@ const TUN_FIRST_READ: usize = 256;
 /// completed for the sniffer: one whole TLS record and its header.
 const TUN_SNIFF_MAX: usize = 5 + 16 * 1024;
 
-use route::RouteGuard;
+use route::{RouteFailure, RouteGuard};
 
-pub use outbound_binding::OutboundBinding;
+pub use outbound_binding::{OutboundBinding, OutboundPolicy};
 /// PaoPao: the uplinks holding a default route, best first (what an
 /// auto-detected outbound binding chooses among), for the API.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub use route::{default_interfaces, IfaceKind};
+pub use route::{
+    default_interfaces, interface_addresses, is_container_like, route_kind, route_snapshot,
+    uplink_links, IfaceKind, SystemLinks,
+};
 
 /// Process-global serialization point for lwIP generations (issue #514).
 /// `NetStack::new` must not run while a previous core is still tearing
@@ -221,6 +226,17 @@ pub struct TunListenerConfig {
     /// Physical interface outbound sockets bind to in global scope; `None`
     /// = auto-detect from the default route. Ignored in fake-IP scope.
     pub outbound_interface: Option<String>,
+    /// PaoPao (`tun.default-via`, `tun.follow-system-routes`): how the
+    /// outbound binding behaves next to another VPN. Global scope only.
+    pub outbound_policy: OutboundPolicy,
+    /// PaoPao (`tun.route-exclude-address`): nets cut out of the global
+    /// routes, so traffic to them never enters the device. Global scope
+    /// only.
+    pub route_exclude: Vec<ipnet::IpNet>,
+    /// PaoPao (`tun.vpn-domains`, `tun.vpn-client-apps`): what the user
+    /// said by hand about another VPN — names that are its own, and the
+    /// programs that are its client. Both are passed through untouched.
+    pub vpn_manual: meow_common::route_table::VpnManual,
     /// Answer UDP :53 flows with the in-process DNS resolver.
     pub dns_hijack: bool,
     /// Idle timeout for UDP flows (flow-table eviction).
@@ -340,6 +356,14 @@ struct TunDevice {
     #[allow(dead_code)]
     iface_guard: Option<OutboundBinding>,
     pub(super) device: tun_rs::AsyncDevice,
+    /// PaoPao: marks the device as ours in the route snapshot. Declared
+    /// last: the name is forgotten only after the routes and the device
+    /// are gone, so our own split routes are never taken for another VPN's.
+    #[allow(dead_code)]
+    own_tun: meow_common::route_table::OwnTunGuard,
+    /// PaoPao: keeps the hand-entered VPN entries installed.
+    #[allow(dead_code)]
+    vpn_manual: meow_common::route_table::VpnManualGuard,
 }
 
 pub struct TunListener {
@@ -596,6 +620,12 @@ impl TunListener {
         #[cfg(any(target_os = "android", target_os = "ios"))]
         let if_index = 0u32;
 
+        // PaoPao: from here on the route snapshot knows this device is ours
+        // — its routes are never followed, and it is never taken for
+        // another VPN.
+        let own_tun = meow_common::route_table::register_own_tun(&dev_name);
+        let vpn_manual = meow_common::route_table::install_vpn_manual(cfg.vpn_manual.clone());
+
         // Global route scope (#375): before any routes go in, the
         // outbound-interface binding must be installed so meow's own dials
         // cannot loop back into the device — usually it already is (the
@@ -606,7 +636,10 @@ impl TunListener {
         let iface_guard = if cfg.auto_route && cfg.route_scope == TunRouteScope::Global {
             Some(match preinstalled {
                 Some(binding) => binding,
-                None => OutboundBinding::install(cfg.outbound_interface.as_deref())?,
+                None => OutboundBinding::install(
+                    cfg.outbound_interface.as_deref(),
+                    &cfg.outbound_policy,
+                )?,
             })
         } else {
             drop(preinstalled);
@@ -626,7 +659,10 @@ impl TunListener {
                 // route survives untouched and restore-on-drop is trivial.
                 // The device's own /30 and the fake-IP range (if any) are
                 // inside the /1s already.
-                TunRouteScope::Global => Some(global_route_nets(cfg.inet6_address.is_some())),
+                TunRouteScope::Global => Some(global_route_nets(
+                    cfg.inet6_address.is_some(),
+                    &cfg.route_exclude,
+                )),
                 TunRouteScope::FakeIp => self.tunnel.resolver().fake_ip_v4_net().map(|n| vec![n]),
             }
         } else {
@@ -638,14 +674,27 @@ impl TunListener {
                 Some(nets) => {
                     let t_route = Instant::now();
 
-                    let result =
-                        tokio::task::spawn_blocking(move || RouteGuard::setup(if_index, &nets))
-                            .await;
+                    // PaoPao: a partly routed global device must not
+                    // report success; fake-IP scope keeps tolerating a
+                    // route its own subnet already covers.
+                    let on_failure = match cfg.route_scope {
+                        TunRouteScope::Global => RouteFailure::SplitOrFail,
+                        TunRouteScope::FakeIp => RouteFailure::Skip,
+                    };
+                    let result = tokio::task::spawn_blocking(move || {
+                        RouteGuard::setup(if_index, &nets, on_failure)
+                    })
+                    .await;
 
                     match result {
                         Ok(Ok(g)) => {
                             let route_ms = t_route.elapsed().as_secs_f64() * 1000.0;
                             info!("auto-route installed in {route_ms:.0}ms");
+                            let conflict = g.conflict();
+                            meow_common::route_table::update_outbound_status(|st| {
+                                st.route_conflict = conflict;
+                            });
+                            outbound_binding::poke();
                             Some(g)
                         }
                         Ok(Err(e)) => {
@@ -684,6 +733,8 @@ impl TunListener {
             route_guard,
             iface_guard,
             device,
+            own_tun,
+            vpn_manual,
         });
 
         // Windows: bind the loopback DNS sockets *before* DnsGuard repoints
@@ -971,8 +1022,8 @@ impl TunListener {
 /// than the physical default so it is never touched. IPv6 is included only
 /// when the device carries an IPv6 address — routes into a device that
 /// cannot source IPv6 would blackhole that traffic.
-fn global_route_nets(ipv6: bool) -> Vec<ipnet::IpNet> {
-    global_route_nets_for(ipv6, cfg!(target_os = "macos"))
+fn global_route_nets(ipv6: bool, exclude: &[ipnet::IpNet]) -> Vec<ipnet::IpNet> {
+    global_route_nets_for(ipv6, cfg!(target_os = "macos"), exclude)
 }
 
 /// Pure selection behind [`global_route_nets`], split out so both shapes
@@ -999,7 +1050,15 @@ fn global_route_nets(ipv6: bool) -> Vec<ipnet::IpNet> {
 /// skipped `::/8` holds the unspecified/loopback addresses and the
 /// IPv4-mapped and NAT64 (`64:ff9b::/96`) ranges, which therefore bypass
 /// the device on macOS.
-fn global_route_nets_for(ipv6: bool, zero_key_shadows_default: bool) -> Vec<ipnet::IpNet> {
+///
+/// PaoPao (`tun.route-exclude-address`): every net in `exclude` is cut out
+/// of the result, leaving the fewest CIDRs that cover the rest. Cutting
+/// only ever narrows a route, so the macOS form still has no all-zero key.
+fn global_route_nets_for(
+    ipv6: bool,
+    zero_key_shadows_default: bool,
+    exclude: &[ipnet::IpNet],
+) -> Vec<ipnet::IpNet> {
     const V4: &[&str] = &["0.0.0.0/1", "128.0.0.0/1"];
     const V6: &[&str] = &["::/1", "8000::/1"];
     const V4_NO_ZERO_KEY: &[&str] = &[
@@ -1022,7 +1081,8 @@ fn global_route_nets_for(ipv6: bool, zero_key_shadows_default: bool) -> Vec<ipne
     };
     v4.iter()
         .chain(v6.iter().filter(|_| ipv6))
-        .map(|net| net.parse().expect("static CIDR parses"))
+        .map(|net| net.parse::<ipnet::IpNet>().expect("static CIDR parses"))
+        .flat_map(|net| meow_common::route_table::subtract_nets(net, exclude))
         .collect()
 }
 
@@ -1300,15 +1360,15 @@ mod tests {
     #[test]
     fn global_routes_cover_ipv6_only_for_a_dual_stack_device() {
         let nets = |ipv6| -> Vec<String> {
-            global_route_nets_for(ipv6, false)
+            global_route_nets_for(ipv6, false, &[])
                 .iter()
                 .map(ToString::to_string)
                 .collect()
         };
         // The platform's own set is one of the two shapes.
         assert_eq!(
-            global_route_nets(true),
-            global_route_nets_for(true, cfg!(target_os = "macos"))
+            global_route_nets(true, &[]),
+            global_route_nets_for(true, cfg!(target_os = "macos"), &[])
         );
         assert_eq!(nets(false), ["0.0.0.0/1", "128.0.0.0/1"]);
         assert_eq!(nets(true), ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"]);
@@ -1320,17 +1380,89 @@ mod tests {
         }
     }
 
+    /// PaoPao (`tun.route-exclude-address`): the excluded nets are cut out
+    /// of the split defaults — nothing inside them is routed into the
+    /// device, everything else still is, by exactly one route — in both
+    /// shapes, and the macOS shape still never uses the all-zero key.
+    #[test]
+    fn excluded_nets_are_cut_out_of_the_global_routes() {
+        let exclude: Vec<ipnet::IpNet> = ["10.0.0.0/8", "192.168.0.0/16", "fd00::/8"]
+            .iter()
+            .map(|n| n.parse().unwrap())
+            .collect();
+        for zero_key in [false, true] {
+            let nets = global_route_nets_for(true, zero_key, &exclude);
+            let covering = |ip: &str| {
+                let ip: std::net::IpAddr = ip.parse().unwrap();
+                nets.iter().filter(|n| n.contains(&ip)).count()
+            };
+            for ip in ["10.0.0.0", "10.255.255.255", "192.168.1.1", "fd12::1"] {
+                assert_eq!(covering(ip), 0, "{ip} must stay out (zero_key {zero_key})");
+            }
+            for ip in [
+                "9.255.255.255",
+                "11.0.0.0",
+                "1.1.1.1",
+                "192.167.255.255",
+                "192.169.0.0",
+                "172.16.0.1",
+                "fc00::1",
+                "fe00::1",
+                "2001:db8::1",
+            ] {
+                assert_eq!(
+                    covering(ip),
+                    1,
+                    "{ip} must be routed once (zero_key {zero_key})"
+                );
+            }
+            if zero_key {
+                assert!(nets.iter().all(|n| !n.network().is_unspecified()));
+                assert_eq!(covering("0.1.2.3"), 0);
+            }
+            // No two routes overlap.
+            for (i, a) in nets.iter().enumerate() {
+                for b in &nets[i + 1..] {
+                    assert!(!a.contains(b) && !b.contains(a), "{a} overlaps {b}");
+                }
+            }
+        }
+        // Without IPv6 on the device an IPv6 exclusion changes nothing.
+        assert_eq!(
+            global_route_nets_for(false, false, &exclude[2..]),
+            global_route_nets_for(false, false, &[])
+        );
+        // The Linux / Windows shape, spelled out for one net.
+        let nets: Vec<String> = global_route_nets_for(false, false, &exclude[..1])
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            nets,
+            [
+                "0.0.0.0/5",
+                "8.0.0.0/7",
+                "11.0.0.0/8",
+                "12.0.0.0/6",
+                "16.0.0.0/4",
+                "32.0.0.0/3",
+                "64.0.0.0/2",
+                "128.0.0.0/1"
+            ]
+        );
+    }
+
     /// macOS (#375): a route keyed on the all-zero address shadows the
     /// physical default in the scoped lookup an `IP_BOUND_IF` socket gets,
     /// so the set must cover everything from the second `/8` up without
     /// ever using that key.
     #[test]
     fn macos_global_routes_never_use_the_all_zero_destination() {
-        let nets = global_route_nets_for(true, true);
+        let nets = global_route_nets_for(true, true, &[]);
         assert!(nets.iter().all(|n| !n.network().is_unspecified()));
         assert_eq!(nets.iter().filter(|n| n.addr().is_ipv4()).count(), 8);
         assert_eq!(nets.iter().filter(|n| n.addr().is_ipv6()).count(), 8);
-        assert_eq!(global_route_nets_for(false, true).len(), 8);
+        assert_eq!(global_route_nets_for(false, true, &[]).len(), 8);
 
         let covering = |ip: &str| {
             let ip: std::net::IpAddr = ip.parse().unwrap();

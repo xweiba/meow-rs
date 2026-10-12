@@ -27,6 +27,9 @@ use tracing::{debug, warn};
 pub(super) struct DnsGuard {
     #[cfg(target_os = "windows")]
     backup: String,
+    /// The adapters whose DNS we replaced — the only ones put back.
+    #[cfg(target_os = "windows")]
+    changed: Vec<String>,
     #[cfg(target_os = "macos")]
     backup: Vec<(String, Vec<IpAddr>)>,
     #[cfg(target_os = "linux")]
@@ -47,12 +50,17 @@ impl DnsGuard {
             let _ = dns_addr;
             match windows::backup() {
                 Ok(backup) => {
-                    if let Err(e) = windows::set_all() {
+                    // Whatever was changed is kept even when a step failed:
+                    // it still has to be put back on exit.
+                    let (changed, failed) = windows::set_all();
+                    if let Some(e) = failed {
                         warn!("tun dns-guard: failed to set DNS: {e}");
                     }
                     windows::clear_dns_cache();
-                    debug!("tun dns-guard: DNS set to 127.0.0.1 / ::1 (loopback)");
-                    Some(Self { backup })
+                    debug!("tun dns-guard: DNS set to 127.0.0.1 / ::1 (loopback) on {changed:?}");
+                    // PaoPao: only what was changed is restored.
+                    let backup = winscript::filter_backup(&backup, &changed);
+                    Some(Self { backup, changed })
                 }
                 Err(e) => {
                     warn!("tun dns-guard: failed to back up DNS settings: {e}");
@@ -103,6 +111,13 @@ impl DnsGuard {
     }
 }
 
+/// PaoPao: the system's `resolv.conf` without our rewrite (Linux), for the
+/// per-interface DNS reader.
+#[cfg(target_os = "linux")]
+pub(super) fn original_resolv_conf() -> Option<String> {
+    linux::original()
+}
+
 // Restore runs synchronously in Drop — deliberately. `Tunnel::stop_tun`
 // awaits the aborted task, so a config-reload disable→enable cannot start a
 // new backup until this restore has finished; offloading to another thread
@@ -114,11 +129,12 @@ impl Drop for DnsGuard {
     fn drop(&mut self) {
         #[cfg(target_os = "windows")]
         {
-            // Safety net: reset all adapters to DHCP first, so no
-            // 127.0.0.1 or ::1 leftovers survive even if an adapter
-            // wasn't captured in the backup.
-            if let Err(e) = windows::reset_all_dns() {
-                warn!("tun dns-guard: failed to reset all DNS to DHCP: {e}");
+            // Safety net: reset the adapters we changed to DHCP first, so
+            // no 127.0.0.1 or ::1 leftovers survive even if an adapter
+            // wasn't captured in the backup. PaoPao: only those — another
+            // VPN's adapter keeps the DNS its client gave it.
+            if let Err(e) = windows::reset_dns(&self.changed) {
+                warn!("tun dns-guard: failed to reset DNS to DHCP: {e}");
             }
 
             let backup_len = self.backup.len();
@@ -248,7 +264,13 @@ mod windows {
     /// `Set-DnsClientServerAddress` auto-detects the address family from
     /// the IP format, so `127.0.0.1` only touches IPv4 and `::1` only
     /// touches IPv6.
-    pub(super) fn set_all() -> std::io::Result<()> {
+    ///
+    /// PaoPao: physical adapters only. A virtual adapter's DNS belongs to
+    /// whoever created it (another VPN's client pushed it there) and is
+    /// left alone. Returns the aliases that were changed — also when a
+    /// step failed (the first error comes with them), so the caller can
+    /// still put those adapters back.
+    pub(super) fn set_all() -> (Vec<String>, Option<std::io::Error>) {
         // Clean up any leftover firewall rule from the previous approach.
         let _ = Command::new("powershell")
             .args([
@@ -260,29 +282,38 @@ mod windows {
             ])
             .output();
 
-        // Step 1: set IPv4 DNS to 127.0.0.1 on all adapters that have DNS.
-        set_dns_on_all("127.0.0.1", "IPv4")?;
-
-        // Step 2: set IPv6 DNS to ::1 on all adapters that have DNS.
-        set_dns_on_all("::1", "IPv6")?;
-
-        Ok(())
-    }
-
-    fn set_dns_on_all(addr: &str, family: &str) -> std::io::Result<()> {
-        let cmd = format!(
-            r#"Get-DnsClientServerAddress -AddressFamily {family} -ErrorAction SilentlyContinue | Where-Object {{$_.ServerAddresses.Count -gt 0}} | ForEach-Object {{ Set-DnsClientServerAddress -InterfaceAlias $_.InterfaceAlias -ServerAddresses ('{addr}') -ErrorAction SilentlyContinue }}"#
-        );
-        let output = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &cmd])
-            .output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            if !stderr.is_empty() {
-                return Err(std::io::Error::other(stderr));
+        // Set IPv4 DNS to 127.0.0.1, then IPv6 DNS to ::1, on physical
+        // adapters that have DNS.
+        let mut changed: Vec<String> = Vec::new();
+        let mut failed: Option<std::io::Error> = None;
+        for (addr, family) in [("127.0.0.1", "IPv4"), ("::1", "IPv6")] {
+            let (aliases, error) = set_dns_on_all(addr, family);
+            for alias in aliases {
+                if !changed.contains(&alias) {
+                    changed.push(alias);
+                }
+            }
+            if failed.is_none() {
+                failed = error;
             }
         }
-        Ok(())
+
+        (changed, failed)
+    }
+
+    /// The aliases the script reported as changed, and its error if it
+    /// failed (it may have changed some adapters before failing).
+    fn set_dns_on_all(addr: &str, family: &str) -> (Vec<String>, Option<std::io::Error>) {
+        let cmd = super::winscript::build_set_script(addr, family);
+        let output = match Command::new("powershell")
+            .args(["-NoProfile", "-Command", &cmd])
+            .output()
+        {
+            Ok(output) => output,
+            Err(e) => return (Vec::new(), Some(e)),
+        };
+        let aliases = super::winscript::parse_aliases(&String::from_utf8_lossy(&output.stdout));
+        (aliases, check_ps_output(&output).err())
     }
 
     /// Flush the Windows DNS client cache so stale entries don't
@@ -297,15 +328,18 @@ mod windows {
             .output();
     }
 
-    /// Reset all adapters to DHCP-obtained DNS for both IPv4 and IPv6, in a
-    /// single PowerShell invocation.
+    /// Reset the given adapters to DHCP-obtained DNS for both IPv4 and
+    /// IPv6, in a single PowerShell invocation.
     ///
     /// Used as a safety net in `DnsGuard::drop()` to clear any leftover
     /// loopback DNS entries before restoring from the backup.
-    pub(super) fn reset_all_dns() -> std::io::Result<()> {
-        const SCRIPT: &str = r#"foreach ($fam in 'IPv4','IPv6') { Get-DnsClientServerAddress -AddressFamily $fam -ErrorAction SilentlyContinue | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_.InterfaceAlias -ResetServerAddresses -ErrorAction SilentlyContinue } }"#;
+    pub(super) fn reset_dns(aliases: &[String]) -> std::io::Result<()> {
+        let script = super::winscript::build_reset_script(aliases);
+        if script.is_empty() {
+            return Ok(());
+        }
         let output = Command::new("powershell")
-            .args(["-NoProfile", "-Command", SCRIPT])
+            .args(["-NoProfile", "-Command", &script])
             .output()?;
         check_ps_output(&output)
     }
@@ -457,6 +491,108 @@ mod windows {
                     "adapter line must be 'InterfaceAlias|servers': {line:?}"
                 );
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PaoPao: the pure parts of the Windows backend — compiled for tests on
+// every host so the scripts and the "only what we changed" bookkeeping are
+// checked without a Windows machine.
+// ---------------------------------------------------------------------------
+
+#[cfg(any(target_os = "windows", test))]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod winscript {
+    const IPV6_SEPARATOR: &str = "---IPV6---";
+
+    fn quote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "''"))
+    }
+
+    /// Point the DNS of every *physical* adapter that has servers of
+    /// `family` at `addr`, printing the alias of each adapter changed.
+    pub(super) fn build_set_script(addr: &str, family: &str) -> String {
+        format!(
+            r#"$phys = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | ForEach-Object {{ $_.ifIndex }}); Get-DnsClientServerAddress -AddressFamily {family} -ErrorAction SilentlyContinue | Where-Object {{ $_.ServerAddresses.Count -gt 0 -and $phys -contains $_.InterfaceIndex }} | ForEach-Object {{ Set-DnsClientServerAddress -InterfaceAlias $_.InterfaceAlias -ServerAddresses ('{addr}') -ErrorAction SilentlyContinue; $_.InterfaceAlias }}"#
+        )
+    }
+
+    /// One alias per output line.
+    pub(super) fn parse_aliases(stdout: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for line in stdout.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            if !out.iter().any(|a| a == line) {
+                out.push(line.to_string());
+            }
+        }
+        out
+    }
+
+    /// Reset exactly `aliases` to DHCP-obtained DNS (both families — the
+    /// reset is per adapter). Empty for an empty list.
+    pub(super) fn build_reset_script(aliases: &[String]) -> String {
+        if aliases.is_empty() {
+            return String::new();
+        }
+        let list: Vec<String> = aliases.iter().map(|a| quote(a)).collect();
+        format!(
+            "foreach ($a in @({})) {{ Set-DnsClientServerAddress -InterfaceAlias $a -ResetServerAddresses -ErrorAction SilentlyContinue }}",
+            list.join(",")
+        )
+    }
+
+    /// Keep only the backup lines (`InterfaceAlias|servers`, two sections)
+    /// of adapters in `changed`.
+    pub(super) fn filter_backup(backup: &str, changed: &[String]) -> String {
+        backup
+            .lines()
+            .filter(|line| {
+                let line = line.trim();
+                line == IPV6_SEPARATOR
+                    || line
+                        .split_once('|')
+                        .is_some_and(|(alias, _)| changed.iter().any(|c| c == alias.trim()))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn only_physical_adapters_are_pointed_at_us() {
+            let script = build_set_script("127.0.0.1", "IPv4");
+            assert!(script.contains("Get-NetAdapter -Physical"));
+            assert!(script.contains("$phys -contains $_.InterfaceIndex"));
+            assert!(script.contains("-AddressFamily IPv4"));
+            assert!(script.contains("('127.0.0.1')"));
+            assert_eq!(
+                parse_aliases("Ethernet\r\n\r\nWi-Fi\r\nEthernet\r\n"),
+                ["Ethernet", "Wi-Fi"]
+            );
+        }
+
+        #[test]
+        fn only_changed_adapters_are_reset_and_restored() {
+            let changed = vec!["Ethernet".to_string(), "It's Wi-Fi".to_string()];
+            assert_eq!(
+                build_reset_script(&changed),
+                "foreach ($a in @('Ethernet','It''s Wi-Fi')) { Set-DnsClientServerAddress \
+                 -InterfaceAlias $a -ResetServerAddresses -ErrorAction SilentlyContinue }"
+            );
+            assert_eq!(build_reset_script(&[]), "");
+
+            let backup = format!(
+                "Ethernet|8.8.8.8\nCisco AnyConnect|10.8.0.1\n{IPV6_SEPARATOR}\n\
+                 Cisco AnyConnect|fd00::53\nEthernet|2400:3200::1"
+            );
+            assert_eq!(
+                filter_backup(&backup, &changed),
+                format!("Ethernet|8.8.8.8\n{IPV6_SEPARATOR}\nEthernet|2400:3200::1")
+            );
         }
     }
 }
@@ -887,14 +1023,63 @@ mod linux {
             current
         };
 
-        let new_content = format!("{MARKER}\nnameserver {dns_addr}\n");
+        let new_content = generated(&String::from_utf8_lossy(&content), dns_addr);
         fs::write(&path, new_content.as_bytes())?;
         Ok(ResolvConfBackup { path, content })
+    }
+
+    /// What we put in `/etc/resolv.conf`: our nameserver, and — PaoPao —
+    /// the `search` / `domain` lines the original had, so short names
+    /// (another VPN's search domains) keep expanding.
+    pub(super) fn generated(original: &str, dns_addr: IpAddr) -> String {
+        let mut out = format!("{MARKER}\n");
+        for line in crate::tun::iface_dns::resolv_conf_search_lines(original) {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str("nameserver ");
+        out.push_str(&dns_addr.to_string());
+        out.push('\n');
+        out
+    }
+
+    /// The `resolv.conf` the system has apart from our rewrite: the file
+    /// itself, or the sidecar while ours is in place.
+    pub(super) fn original() -> Option<String> {
+        let current = fs::read("/etc/resolv.conf").ok()?;
+        let bytes = if current.starts_with(MARKER.as_bytes()) {
+            fs::read(SIDECAR).ok()?
+        } else {
+            current
+        };
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     pub(super) fn restore(backup: &ResolvConfBackup) -> io::Result<()> {
         fs::write(&backup.path, &backup.content)?;
         let _ = fs::remove_file(SIDECAR);
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_search_line_survives_our_rewrite() {
+            let original = "# Generated by NetworkManager\nsearch corp.example.com lan\n\
+                            nameserver 10.8.0.1\nnameserver 192.168.1.1\n";
+            let ours = generated(original, "198.18.0.1".parse().unwrap());
+            assert_eq!(
+                ours,
+                format!("{MARKER}\nsearch corp.example.com lan\nnameserver 198.18.0.1\n")
+            );
+            assert!(ours.starts_with(MARKER), "still recognised as ours");
+            // Nothing to keep: exactly the old content.
+            assert_eq!(
+                generated("nameserver 1.1.1.1\n", "198.18.0.1".parse().unwrap()),
+                format!("{MARKER}\nnameserver 198.18.0.1\n")
+            );
+        }
     }
 }

@@ -205,7 +205,9 @@ async fn connect_addr(
     // and the Android `protect()` hook before the first QUIC Initial leaves —
     // otherwise the datagrams follow the TUN's split default routes back
     // into the device and loop (issue #695).
-    let socket = meow_common::bind_udp(bind_addr).await.map_err(Error::Io)?;
+    let socket = meow_common::bind_udp_to(bind_addr, server_addr)
+        .await
+        .map_err(Error::Io)?;
     let local = socket.local_addr().map_err(Error::Io)?;
 
     let mut config = super::tls::build_quiche_config(cfg)?;

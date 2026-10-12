@@ -319,6 +319,14 @@ pub struct RawTun {
     /// mode (loop avoidance, #375). Auto-detected from the default route
     /// when omitted. Ignored outside global mode.
     pub outbound_interface: Option<String>,
+    /// PaoPao: two or more physical interfaces to spread outbound
+    /// connections over, per connection (DIRECT and dials to proxy
+    /// servers). Entries that are not usable names are dropped; with one
+    /// left it reads as `outbound-interface`. Global mode only.
+    pub outbound_interfaces: Option<serde_yaml::Value>,
+    /// PaoPao: with `outbound-interfaces`, the same destination keeps its
+    /// interface. Default true.
+    pub outbound_sticky: Option<bool>,
     /// DNS hijack targets. meow-rs v1 hijacks all UDP :53 flows entering
     /// the device whenever this list is non-empty; entries with a port
     /// other than 53 warn and are ignored.
@@ -334,6 +342,31 @@ pub struct RawTun {
     /// platform VPN (Android `VpnService`, iOS packet tunnel) instead of
     /// creating a device; the platform owns its addresses and routes.
     pub file_descriptor: Option<i32>,
+    /// mihomo `route-exclude-address`: CIDRs (a list, or one string) cut
+    /// out of the `auto-route: global` routes, so traffic to them never
+    /// enters the device. Ignored outside global mode.
+    pub route_exclude_address: Option<serde_yaml::Value>,
+    /// PaoPao: which interface takes what only a default route covers when
+    /// another VPN holds the default route — `physical` (default) or
+    /// `other-vpn`. Global mode only.
+    pub default_via: Option<String>,
+    /// PaoPao: bind each outbound socket by the system routing table, and
+    /// send what another VPN routes straight to it (before every rule).
+    /// Default false. Global mode only.
+    pub follow_system_routes: Option<bool>,
+    /// PaoPao: names that belong to another VPN, entered by hand — a list
+    /// of suffix strings or `{suffix, servers?, iface?}` maps. Queries for
+    /// them are passed through to that VPN's DNS. Global mode only.
+    pub vpn_domains: Option<serde_yaml::Value>,
+    /// PaoPao: another VPN's client programs, entered by hand
+    /// (`name:<file>` / `path:<file or directory>`): their connections
+    /// through the device go direct by the physical interface, before
+    /// every rule. Global mode only.
+    pub vpn_client_apps: Option<Vec<String>>,
+    /// PaoPao: another VPN's server names, entered by hand: answered with
+    /// real addresses (never a fake one) and dialled direct by the physical
+    /// interface, before every rule. Global mode only.
+    pub vpn_gateway_domains: Option<Vec<String>>,
     // Upstream-only fields accepted for forward-compat; warn and ignore.
     pub stack: Option<serde_yaml::Value>,
     pub strict_route: Option<serde_yaml::Value>,
@@ -342,7 +375,6 @@ pub struct RawTun {
     pub endpoint_independent_nat: Option<serde_yaml::Value>,
     pub mtu_v6: Option<serde_yaml::Value>,
     pub route_address: Option<serde_yaml::Value>,
-    pub route_exclude_address: Option<serde_yaml::Value>,
     pub include_uid: Option<serde_yaml::Value>,
     pub exclude_uid: Option<serde_yaml::Value>,
 }

@@ -22,7 +22,9 @@ use std::collections::HashSet;
 use indexmap::IndexSet;
 use serde_json::{Map, Value};
 
-use crate::model::settings::{GroupEdit, ProxyMode, ProxySettings, RuleTarget, SshChain};
+use crate::model::settings::{
+    AppMatcher, GroupEdit, ProxyMode, ProxySettings, RuleTarget, SshChain,
+};
 use crate::plan::group_tree::BADGE_SUBSCRIPTION;
 use crate::plan::{
     final_policy, outbound_tags, AutoStrategy, GroupTree, ImportedSplit, Policy, RoutePolicy,
@@ -41,18 +43,20 @@ pub use groups::{clash_auto_group, clash_group};
 /// `rules:` list of `buildClashConfig`):
 ///
 /// 1. the speed test's inbound to its selector;
-/// 2. the route API's users (`IN-USER`) to their policies;
-/// 3. private and loopback ranges direct;
-/// 4. the user's rules (a target that no longer exists: REJECT);
-/// 5. the rewrite modules' rules;
-/// 6. smart mode only: STUN over the proxy, the built-in service groups
+/// 2. the app's own connections through the TUN direct ([`own_app_rule`]);
+/// 3. the route API's users (`IN-USER`) to their policies;
+/// 4. private and loopback ranges direct;
+/// 5. the user's rules (a target that no longer exists: REJECT);
+/// 6. the rewrite modules' rules;
+/// 7. smart mode only: STUN over the proxy, the built-in service groups
 ///    (QUIC refused first, sites left out by the user excluded), the
 ///    subscriptions' rules to those groups, the subscriptions' rules to
 ///    their own groups, then — unless the subscriptions' groups are used
 ///    exactly as written — local names direct and the basic split;
-/// 7. `MATCH`, the catch-all.
-pub const RULE_ORDER: [&str; 7] = [
+/// 8. `MATCH`, the catch-all.
+pub const RULE_ORDER: [&str; 8] = [
     "speedtest-in",
+    "own-app",
     "in-user",
     "private",
     "user",
@@ -63,6 +67,23 @@ pub const RULE_ORDER: [&str; 7] = [
 
 /// The speed test's inbound (Dart `OutboundTags.speedTestIn`).
 pub const SPEED_TEST_IN: &str = "speedtest-in";
+
+/// How [`own_app_rule`] starts: through the TUN, whose inbound the core
+/// names `meow-tun` (meow-common `TUN_INBOUND_NAME`).
+const OWN_APP_PREFIX: &str = "AND,((IN-NAME,meow-tun),";
+
+/// The app's own connections that came in through the TUN go direct
+/// (`self_app`: `RuntimeOptions::self_app`); through a local port — the
+/// app asking for the proxy — they follow the rules like any other. None
+/// when `self_app` is not an app matcher a rule line can carry.
+pub fn own_app_rule(self_app: &str) -> Option<String> {
+    let app = AppMatcher::parse(self_app)?.condition();
+    // A name with brackets would break the logic rule's grouping.
+    if app.contains(['(', ')']) {
+        return None;
+    }
+    Some(format!("{OWN_APP_PREFIX}({app})),DIRECT"))
+}
 
 /// STUN / TURN ports (RFC 8489 3478 and 5349 for TLS; Google's
 /// 19302-19309).
@@ -227,11 +248,13 @@ impl<'a> Plan<'a> {
     }
 
     /// The rule lines in [`RULE_ORDER`]. `speed_test`: the speed test's
-    /// inbound exists; `route`: the route API's policies when it is on;
-    /// `module_rules`: what the modules add.
+    /// inbound exists; `own_app`: the app's own rule ([`own_app_rule`]);
+    /// `route`: the route API's policies when it is on; `module_rules`:
+    /// what the modules add.
     fn rules(
         &self,
         speed_test: bool,
+        own_app: Option<String>,
         route: Option<&[RoutePolicy]>,
         module_rules: &[String],
     ) -> Vec<String> {
@@ -244,6 +267,7 @@ impl<'a> Plan<'a> {
                 outbound_tags::SPEED_TEST
             ));
         }
+        out.extend(own_app);
         // `rule` (no target) is left to the rules.
         for p in route
             .unwrap_or_default()
@@ -418,7 +442,12 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
     if s.tun {
         c.insert(
             "tun".into(),
-            sections::tun(rt.ipv6, s.outbound_interface.as_deref()),
+            sections::tun(
+                rt.ipv6,
+                s.outbound_interface.as_deref(),
+                rt.vpn.as_ref(),
+                rt.outbound.as_ref(),
+            ),
         );
     }
     let mut listeners: Vec<Value> = Vec::new();
@@ -471,7 +500,13 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
     c.insert("proxy-groups".into(), groups.into());
 
     let route_policies = route.map(|_| input.route_policies);
-    let rules = plan.rules(speed_test.is_some(), route_policies, &mods.rules);
+    // Only the TUN brings the app's own connections in.
+    let own_app = rt
+        .self_app
+        .as_deref()
+        .filter(|_| s.tun)
+        .and_then(own_app_rule);
+    let rules = plan.rules(speed_test.is_some(), own_app, route_policies, &mods.rules);
     c.insert("rules".into(), rules.into());
     ClashConfig {
         config: c,
@@ -481,7 +516,8 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
 
 /// The rules the core tries for the user's own traffic, in order (Dart:
 /// `ProxyController.effectiveRules`): `config`'s own `rules:` without the
-/// speed test's (`IN-NAME`) and the route API's (`IN-USER`). One source
+/// speed test's (`IN-NAME`), the app's own ([`own_app_rule`]) and the
+/// route API's (`IN-USER`). One source
 /// with the config (B28): Dart built them apart with no MITM port, so the
 /// rules page and the conflict check missed the modules' MITM rules.
 pub fn effective_rules(config: &Map<String, Value>) -> Vec<String> {
@@ -492,6 +528,7 @@ pub fn effective_rules(config: &Map<String, Value>) -> Vec<String> {
         .flatten()
         .filter_map(Value::as_str)
         .filter(|r| !r.starts_with("IN-USER,") && !r.starts_with("IN-NAME,"))
+        .filter(|r| !r.starts_with(OWN_APP_PREFIX))
         .map(str::to_owned)
         .collect()
 }

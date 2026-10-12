@@ -29,6 +29,10 @@ pub struct ProcessInfo {
     pub name: String,
     pub path: String,
     pub uid: Option<u32>,
+    /// The owning process id — `Some` on Linux / macOS / Windows, where the
+    /// scan finds the process itself; `None` on Android (the owner is an
+    /// app, known by uid and package only).
+    pub pid: Option<u32>,
 }
 
 /// Look up the process that owns the socket bound to `local_addr`. `local_addr`
@@ -174,11 +178,12 @@ mod platform {
             .find(|(addr, _, _)| addr_matches(*addr, local.ip()))
             .map(|(_, inode, uid)| (*inode, *uid))?;
         trace!(inode, uid, "process_lookup: matched /proc/net entry");
-        let (_pid, name, exe) = find_pid_by_inode_cached(inode)?;
+        let (pid, name, exe) = find_pid_by_inode_cached(inode)?;
         Some(ProcessInfo {
             name,
             path: exe,
             uid: Some(uid),
+            pid: Some(pid),
         })
     }
 
@@ -413,7 +418,12 @@ mod platform {
                         None
                     }
                 };
-                return Some(ProcessInfo { name, path, uid });
+                return Some(ProcessInfo {
+                    name,
+                    path,
+                    uid,
+                    pid: Some(pid as u32),
+                });
             }
         }
         None
@@ -570,6 +580,7 @@ mod platform {
             name,
             path,
             uid: None,
+            pid: Some(pid),
         })
     }
 
@@ -829,6 +840,11 @@ mod tests {
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
             .expect("current_exe should be readable in tests");
         assert_eq!(info.name, expected, "process name must not be truncated");
+        assert_eq!(
+            info.pid,
+            Some(std::process::id()),
+            "pid must be this process"
+        );
     }
 
     #[test]
@@ -838,6 +854,7 @@ mod tests {
         let info = find_process(Network::Udp, addr)
             .expect("process lookup should locate the current test process for UDP");
         assert!(!info.name.is_empty());
+        assert_eq!(info.pid, Some(std::process::id()));
     }
 
     #[test]
@@ -895,6 +912,7 @@ mod tests {
             assert_eq!(s.name, a.name);
             assert_eq!(s.path, a.path);
             assert_eq!(s.uid, a.uid);
+            assert_eq!(s.pid, a.pid);
         }
     }
 

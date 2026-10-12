@@ -158,9 +158,15 @@ pub(super) mod flow {
         // flow (issue #695): its socket may predate the new outbound binding.
         let mut flush = inner.udp_flush_watch();
         let conn: Arc<dyn meow_common::ProxyPacketConn> = Arc::from(
-            with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata))
-                .await
-                .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?,
+            meow_common::outbound_balance::scoped(
+                meow_common::outbound_balance::DialScope::for_target(
+                    &metadata.host,
+                    metadata.dst_ip,
+                ),
+                with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata)),
+            )
+            .await
+            .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?,
         );
         // `_route` exists to pin the route-table generation across the
         // dial only — a long-lived flow must not keep its dial-time

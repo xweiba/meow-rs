@@ -417,6 +417,13 @@ mod tests {
             Yes
         );
         assert_eq!(check("OR,((GEOSITE,x),(DOMAIN,b.example)),y", &c), Unknown);
+        // The app's own rule: only through the TUN, which a question
+        // about a site never is — its program or not.
+        let own = "AND,((IN-NAME,meow-tun),(PROCESS-PATH,/opt/paopao)),DIRECT";
+        assert_eq!(check(own, &c), No);
+        let mut app = site("api.example.com");
+        app.process_path = Some("/opt/paopao/paopao".into());
+        assert_eq!(check(own, &app), No);
         assert_eq!(check("AND,(broken),y", &c), Unknown);
         assert_eq!(check("NOT,((DOMAIN,a),(DOMAIN,b)),y", &c), Unknown);
     }

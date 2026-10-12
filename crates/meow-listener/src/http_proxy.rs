@@ -266,7 +266,11 @@ async fn handle_http_inner(
 
         _guard
             .run_until_closed(async {
-                let dial = with_dial_timeout(proxy.name(), proxy.dial_tcp(&metadata)).await;
+                let dial = meow_common::outbound_balance::scoped(
+                    _guard.counters().dial_scope(&metadata),
+                    with_dial_timeout(proxy.name(), proxy.dial_tcp(&metadata)),
+                )
+                .await;
                 drop(route.take());
                 match dial {
                     Ok(mut remote) => {

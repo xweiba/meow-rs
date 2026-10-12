@@ -326,18 +326,141 @@ pub async fn connect_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
 /// (`SO_BINDTODEVICE` / `IP_BOUND_IF` / `IP_UNICAST_IF`) before `connect()`.
 /// Uses `tokio::net::TcpSocket` for the async connect so connection errors
 /// surface here, not on first I/O.
+///
+/// PaoPao (`tun.outbound-interfaces`): when the socket was given a
+/// balancer member, the member learns how the dial went, and a failure
+/// that says the member's line is down (no route, no such device) is
+/// retried on the next member — then on the default interface — before
+/// the caller sees an error.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) async fn connect_tcp_iface_bound(addr: SocketAddr) -> io::Result<TcpStream> {
+    use crate::outbound_balance::DialOutcome;
+
     let domain = if addr.is_ipv4() {
         socket2::Domain::IPV4
     } else {
         socket2::Domain::IPV6
     };
-    let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
-    crate::outbound_iface::apply_outbound_interface(&socket, domain)?;
-    socket.set_nonblocking(true)?;
-    let tokio_socket = tokio::net::TcpSocket::from_std_stream(socket.into());
-    tokio_socket.connect(addr).await
+    let mut tried = 0u32;
+    loop {
+        let socket =
+            socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+        // A member is recorded as the connection's interface only once
+        // the dial through it is settled: one given up for the next member
+        // must not keep the connection (its in-flight count, its bytes).
+        let member = crate::outbound_iface::bind_outbound(
+            &socket,
+            domain,
+            Some(addr.ip()),
+            &mut tried,
+            false,
+        )?;
+        socket.set_nonblocking(true)?;
+        let tokio_socket = tokio::net::TcpSocket::from_std_stream(socket.into());
+        let Some((balancer, member)) = member else {
+            return tokio_socket.connect(addr).await;
+        };
+        let mut dial = MemberDial::new(&balancer, member);
+        match tokio_socket.connect(addr).await {
+            Ok(stream) => {
+                dial.finish(DialOutcome::Connected(dial.started.elapsed()));
+                crate::outbound_iface::record_member(&balancer, member);
+                return Ok(stream);
+            }
+            Err(e) => {
+                let verdict = member_verdict(&e);
+                if let Some(outcome) = verdict.outcome {
+                    dial.finish(outcome);
+                } else {
+                    dial.reported = true;
+                }
+                if !verdict.line_down {
+                    crate::outbound_iface::record_member(&balancer, member);
+                    return Err(e);
+                }
+                tracing::debug!(
+                    "outbound balance: dial to {addr} failed on '{}' ({e}); trying another \
+                     interface",
+                    balancer.names()[member]
+                );
+            }
+        }
+    }
+}
+
+/// One dial through a balancer member. Dropped unfinished (the caller's
+/// dial timeout fired) after [`ABANDON_AFTER`](crate::outbound_balance::ABANDON_AFTER)
+/// it counts as a failure of the member.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+struct MemberDial {
+    balancer: std::sync::Arc<crate::outbound_balance::Balancer>,
+    member: usize,
+    started: std::time::Instant,
+    reported: bool,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+impl MemberDial {
+    fn new(balancer: &std::sync::Arc<crate::outbound_balance::Balancer>, member: usize) -> Self {
+        Self {
+            balancer: std::sync::Arc::clone(balancer),
+            member,
+            started: std::time::Instant::now(),
+            reported: false,
+        }
+    }
+
+    fn finish(&mut self, outcome: crate::outbound_balance::DialOutcome) {
+        self.reported = true;
+        self.balancer
+            .report(self.member, outcome, std::time::Instant::now());
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+impl Drop for MemberDial {
+    fn drop(&mut self) {
+        if !self.reported && self.started.elapsed() >= crate::outbound_balance::ABANDON_AFTER {
+            self.finish(crate::outbound_balance::DialOutcome::Failed);
+        }
+    }
+}
+
+/// What a failed connect says about the balancer member it went through.
+#[cfg(any(test, target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct MemberVerdict {
+    /// What the member is told; `None` = nothing (not about the line).
+    pub outcome: Option<crate::outbound_balance::DialOutcome>,
+    /// The member's line is down: worth another interface right away.
+    pub line_down: bool,
+}
+
+/// - refused / reset: the far end answered, the line works;
+/// - no route to the network or host, address not available, no such
+///   device, network down: the line is down — retry elsewhere;
+/// - timed out: a failure, but the caller has waited long enough;
+/// - anything else (out of descriptors, permission …): not the line's
+///   doing.
+#[cfg(any(test, target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub(crate) fn member_verdict(e: &io::Error) -> MemberVerdict {
+    use crate::outbound_balance::DialOutcome;
+    use io::ErrorKind as K;
+
+    #[cfg(unix)]
+    let no_device = matches!(e.raw_os_error(), Some(libc::ENODEV | libc::ENXIO));
+    #[cfg(not(unix))]
+    let no_device = false;
+    let (outcome, line_down) = match e.kind() {
+        K::ConnectionRefused | K::ConnectionReset => (Some(DialOutcome::Alive), false),
+        K::NetworkUnreachable | K::HostUnreachable | K::AddrNotAvailable | K::NetworkDown => {
+            (Some(DialOutcome::Failed), true)
+        }
+        _ if no_device => (Some(DialOutcome::Failed), true),
+        K::TimedOut => (Some(DialOutcome::Failed), false),
+        _ => (None, false),
+    };
+    MemberVerdict { outcome, line_down }
 }
 
 /// Single resolution chokepoint shared by [`connect_tcp_host`],
@@ -491,7 +614,26 @@ pub async fn resolve_host_all(host: &str, port: u16) -> io::Result<Vec<SocketAdd
 /// Bind an outbound UDP socket. On Android, applies the installed
 /// `SocketProtector` (if any) to the socket fd before `bind()`. On every
 /// other target this is equivalent to [`UdpSocket::bind`].
+///
+/// A socket that talks to one known peer should use [`bind_udp_to`], so it
+/// can follow the system route to that peer.
 pub async fn bind_udp<A: ToSocketAddrs>(local: A) -> io::Result<UdpSocket> {
+    bind_udp_inner(local, None).await
+}
+
+/// PaoPao: [`bind_udp`] for a socket whose datagrams go to `peer` (a proxy
+/// server, a DNS upstream, a DIRECT destination). Under
+/// `tun.follow-system-routes` the socket is bound to the interface the
+/// system routes `peer` through (another VPN's tunnel for its prefixes)
+/// instead of always the default one.
+pub async fn bind_udp_to<A: ToSocketAddrs>(local: A, peer: SocketAddr) -> io::Result<UdpSocket> {
+    bind_udp_inner(local, Some(peer.ip())).await
+}
+
+async fn bind_udp_inner<A: ToSocketAddrs>(
+    local: A,
+    peer: Option<std::net::IpAddr>,
+) -> io::Result<UdpSocket> {
     #[cfg(any(target_os = "android", all(test, unix)))]
     {
         if let Some(p) = android::socket_protector() {
@@ -516,18 +658,23 @@ pub async fn bind_udp<A: ToSocketAddrs>(local: A) -> io::Result<UdpSocket> {
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "bind_udp: no address resolved")
                 })?;
-            return bind_udp_iface_bound(resolved);
+            return bind_udp_iface_bound(resolved, peer);
         }
     }
+    let _ = peer;
     UdpSocket::bind(local).await
 }
 
 /// Bind a UDP socket to the installed outbound interface
-/// (`SO_BINDTODEVICE` / `IP_BOUND_IF` / `IP_UNICAST_IF`), then to `local`.
+/// (`SO_BINDTODEVICE` / `IP_BOUND_IF` / `IP_UNICAST_IF`) — the one `peer`
+/// is routed through, when known — then to `local`.
 /// A socket pinned to a loopback `local` address is left unbound where the
 /// platform's binding would break it (see `outbound_iface::binds_peer`).
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-pub(crate) fn bind_udp_iface_bound(local: SocketAddr) -> io::Result<UdpSocket> {
+pub(crate) fn bind_udp_iface_bound(
+    local: SocketAddr,
+    peer: Option<std::net::IpAddr>,
+) -> io::Result<UdpSocket> {
     let domain = if local.is_ipv4() {
         socket2::Domain::IPV4
     } else {
@@ -535,11 +682,55 @@ pub(crate) fn bind_udp_iface_bound(local: SocketAddr) -> io::Result<UdpSocket> {
     };
     let socket = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
     if crate::outbound_iface::binds_peer(local.ip()) {
-        crate::outbound_iface::apply_outbound_interface(&socket, domain)?;
+        crate::outbound_iface::apply_outbound_interface_for(&socket, domain, peer)?;
     }
     socket.bind(&local.into())?;
     socket.set_nonblocking(true)?;
     UdpSocket::from_std(socket.into())
+}
+
+#[cfg(test)]
+mod member_verdict_tests {
+    use super::member_verdict;
+    use crate::outbound_balance::DialOutcome;
+    use std::io::{Error, ErrorKind};
+
+    /// What a failed connect tells the balancer member it went through.
+    #[test]
+    fn connect_errors_are_told_apart() {
+        let verdict = |kind: ErrorKind| {
+            let v = member_verdict(&Error::from(kind));
+            (v.outcome, v.line_down)
+        };
+        // The far end answered: the line works.
+        assert_eq!(
+            verdict(ErrorKind::ConnectionRefused),
+            (Some(DialOutcome::Alive), false)
+        );
+        // The line is down: fail the member and try another at once.
+        for kind in [
+            ErrorKind::NetworkUnreachable,
+            ErrorKind::HostUnreachable,
+            ErrorKind::AddrNotAvailable,
+            ErrorKind::NetworkDown,
+        ] {
+            assert_eq!(verdict(kind), (Some(DialOutcome::Failed), true), "{kind:?}");
+        }
+        // Slow: a failure, but not retried (the caller waited already).
+        assert_eq!(
+            verdict(ErrorKind::TimedOut),
+            (Some(DialOutcome::Failed), false)
+        );
+        // Not the line's doing.
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::OutOfMemory] {
+            assert_eq!(verdict(kind), (None, false), "{kind:?}");
+        }
+        #[cfg(unix)]
+        {
+            let v = member_verdict(&Error::from_raw_os_error(libc::ENODEV));
+            assert_eq!((v.outcome, v.line_down), (Some(DialOutcome::Failed), true));
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

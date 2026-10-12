@@ -392,6 +392,21 @@ pub(crate) enum AddressLookupResult {
     Failed,
 }
 
+/// PaoPao: one family of another VPN's name, asked at that VPN's DNS.
+async fn vpn_family_result(
+    host: &str,
+    rtype: RecordType,
+    target: &meow_common::route_table::VpnDns,
+) -> AddressLookupResult {
+    use crate::vpn_dns::FamilyAnswer;
+    match crate::vpn_dns::lookup_family(host, rtype, target).await {
+        FamilyAnswer::Addrs(addrs, ttl) => AddressLookupResult::Answer(addrs[0], ttl),
+        FamilyAnswer::NoData => AddressLookupResult::NoData,
+        FamilyAnswer::NxDomain => AddressLookupResult::NxDomain,
+        FamilyAnswer::Failed => AddressLookupResult::Failed,
+    }
+}
+
 /// Outcome of the synchronous, upstream-free portion of a family lookup
 /// (`lookup_ipv4_local` / `lookup_ipv6_local`).
 pub(crate) enum LocalLookup<'a> {
@@ -1113,6 +1128,13 @@ impl Resolver {
     /// `is_local_resource_error` intact instead of decaying into a
     /// "host unresolvable" member-health failure (#682).
     pub async fn resolve_ips(&self, host: &str) -> io::Result<Option<Vec<IpAddr>>> {
+        // PaoPao: another VPN's name is asked at that VPN's DNS, ahead of
+        // hosts and every nameserver setting.
+        if let Some(target) = crate::vpn_dns::target_for(host) {
+            return Ok(crate::vpn_dns::resolve(host, self.ipv6, &target)
+                .await?
+                .and_then(|ips| self.filter_enabled_ips(&ips)));
+        }
         if let Some(ip) = self.paopao_enabled_address(host) {
             return Ok(Some(vec![ip]));
         }
@@ -1352,6 +1374,9 @@ impl Resolver {
     }
 
     pub(crate) async fn lookup_ipv4_result(&self, host: &str) -> AddressLookupResult {
+        if let Some(target) = crate::vpn_dns::target_for(host) {
+            return vpn_family_result(host, RecordType::A, &target).await;
+        }
         let target = match self.lookup_ipv4_local(host) {
             LocalLookup::Decided(r) => return r,
             LocalLookup::Upstream(name) => name,
@@ -1429,6 +1454,9 @@ impl Resolver {
     }
 
     pub(crate) async fn lookup_ipv6_result(&self, host: &str) -> AddressLookupResult {
+        if let Some(target) = crate::vpn_dns::target_for(host) {
+            return vpn_family_result(host, RecordType::AAAA, &target).await;
+        }
         let target = match self.lookup_ipv6_local(host) {
             LocalLookup::Decided(r) => return r,
             LocalLookup::Upstream(name) => name,
@@ -1451,6 +1479,16 @@ impl Resolver {
             FamilyCacheHit::NxDomain => Some(AddressLookupResult::NxDomain),
             FamilyCacheHit::Miss => None,
         }
+    }
+
+    /// PaoPao: one family of `host` as the upstreams answer it — no hosts
+    /// entry, no fake IP (another VPN's client program asked).
+    pub(crate) async fn lookup_real_family(
+        &self,
+        host: &str,
+        record_type: RecordType,
+    ) -> AddressLookupResult {
+        self.lookup_real_with_ttl(host, record_type).await
     }
 
     /// Cache-then-upstream address lookup carrying the answer TTL. A cache hit
@@ -1916,6 +1954,12 @@ impl Resolver {
     /// and sniffing.
     pub fn fake_ip_active_for(&self, host: &str) -> bool {
         if self.mode != DnsMode::FakeIp {
+            return false;
+        }
+        // Another VPN's names are never faked.
+        if crate::vpn_dns::target_for(host).is_some()
+            || meow_common::route_table::is_vpn_gateway_domain(host)
+        {
             return false;
         }
         // Explicit hosts-trie / `paopao-hosts:` mappings are never

@@ -31,7 +31,7 @@ pub mod pool;
 pub mod rules;
 
 pub use api::{build, build_json, explain, explain_json, parse_json, BuildOutput, Explanation};
-pub use emit::{build_clash_config, effective_rules, ClashConfig, EmitInput};
+pub use emit::{build_clash_config, effective_rules, own_app_rule, ClashConfig, EmitInput};
 pub use ingest::{
     parse_share_link, parse_share_links, parse_subscription, usage_from_names, ParseError,
 };
@@ -42,8 +42,8 @@ pub use model::subscription::{SubGroup, SubRules, Subscription};
 pub use model::usage::Usage;
 pub use plan::{
     build_tree, imported_split, offered_route_policies, route_catalog, tree_for, AutoStrategy,
-    BuildInput, GroupKind, GroupSpec, GroupTree, ImportedGroup, ImportedSplit, RoutePolicy,
-    RuntimeOptions,
+    BuildInput, GroupKind, GroupSpec, GroupTree, ImportedGroup, ImportedSplit, OutboundOptions,
+    RoutePolicy, RuntimeOptions, VpnOptions,
 };
 pub use pool::{
     build_pool, clash_proxy_for, NodeGroup, Pool, PoolInput, PoolNode, PoolSource, Region,

@@ -338,6 +338,258 @@ async fn t14_outbound_interface_lands_and_empty_is_none() {
     assert_eq!(cfg.tun.outbound_interface, None);
 }
 
+// ─── T14a (PaoPao): outbound balancing keys ──────────────────────────────
+
+#[tokio::test]
+async fn t14a_outbound_interfaces_need_two_usable_names() {
+    use meow_config::{global_route_balance, global_route_outbound_interface, parse_raw_yaml};
+    const HEAD: &str = "tun:\n  enable: true\n  auto-route: global\n";
+
+    // Absent: off, sticky reads true.
+    let cfg = load_config_from_str(HEAD).await.expect("config must load");
+    assert!(cfg.tun.outbound_interfaces.is_empty());
+    assert!(cfg.tun.outbound_sticky);
+    assert_eq!(cfg.tun.outbound_interface, None);
+
+    // Two or more: balancing; invalid entries are dropped, not an error.
+    let yaml = format!(
+        "{HEAD}  outbound-interfaces:\n    - ' en0 '\n    - ''\n    - 7\n    - en0\n    \
+         - [x]\n    - 以太网 2\n    - \"bad\\tname\"\n  outbound-sticky: false\n"
+    );
+    let cfg = load_config_from_str(&yaml).await.expect("config must load");
+    assert_eq!(cfg.tun.outbound_interfaces, ["en0", "以太网 2"]);
+    assert!(!cfg.tun.outbound_sticky);
+    assert_eq!(
+        cfg.tun.outbound_interface, None,
+        "the default stays automatic"
+    );
+    let raw = parse_raw_yaml(&yaml).unwrap();
+    let pre = global_route_balance(raw.tun.as_ref()).expect("balancing");
+    assert_eq!(pre.interfaces, cfg.tun.outbound_interfaces);
+    assert!(!pre.sticky);
+    assert_eq!(
+        global_route_outbound_interface(raw.tun.as_ref()),
+        Some(None)
+    );
+
+    // Sticky by default; an explicit default interface is kept beside it.
+    let yaml =
+        format!("{HEAD}  outbound-interface: eth0\n  outbound-interfaces: [eth0, eth1, eth2]\n");
+    let cfg = load_config_from_str(&yaml).await.expect("config must load");
+    assert_eq!(cfg.tun.outbound_interfaces, ["eth0", "eth1", "eth2"]);
+    assert!(cfg.tun.outbound_sticky);
+    assert_eq!(cfg.tun.outbound_interface.as_deref(), Some("eth0"));
+
+    // One usable name: the same as `outbound-interface`, no balancing —
+    // unless that key is set itself.
+    for list in ["[eth1]", "[eth1, eth1, '']", "eth1"] {
+        let yaml = format!("{HEAD}  outbound-interfaces: {list}\n  outbound-sticky: false\n");
+        let cfg = load_config_from_str(&yaml).await.expect("config must load");
+        assert!(cfg.tun.outbound_interfaces.is_empty(), "{list}");
+        assert!(cfg.tun.outbound_sticky, "{list}: normalised while off");
+        assert_eq!(
+            cfg.tun.outbound_interface.as_deref(),
+            Some("eth1"),
+            "{list}"
+        );
+        let raw = parse_raw_yaml(&yaml).unwrap();
+        assert!(global_route_balance(raw.tun.as_ref()).is_none());
+        assert_eq!(
+            global_route_outbound_interface(raw.tun.as_ref()),
+            Some(Some("eth1".to_string()))
+        );
+    }
+    let yaml = format!("{HEAD}  outbound-interface: eth0\n  outbound-interfaces: [eth1]\n");
+    let cfg = load_config_from_str(&yaml).await.expect("config must load");
+    assert_eq!(cfg.tun.outbound_interface.as_deref(), Some("eth0"));
+
+    // Nothing usable, or not a list: off.
+    for list in ["[]", "['', 3]", "{a: b}", "~"] {
+        let yaml = format!("{HEAD}  outbound-interfaces: {list}\n");
+        let cfg = load_config_from_str(&yaml).await.expect("config must load");
+        assert!(cfg.tun.outbound_interfaces.is_empty(), "{list}");
+        assert_eq!(cfg.tun.outbound_interface, None, "{list}");
+    }
+
+    // Outside global mode both keys are ignored (and do not make two
+    // otherwise equal sections differ: no listener restart).
+    let fake_ip = "tun:\n  enable: true\n  outbound-interfaces: [eth0, eth1]\n  \
+                   outbound-sticky: false\n";
+    let cfg = load_config_from_str(fake_ip)
+        .await
+        .expect("config must load");
+    let plain = load_config_from_str("tun:\n  enable: true\n")
+        .await
+        .expect("config must load");
+    assert!(cfg.tun.outbound_interfaces.is_empty());
+    assert_eq!(cfg.tun, plain.tun);
+}
+
+// ─── T14b (PaoPao): coexistence keys ──────────────────────────────────────
+
+#[tokio::test]
+async fn t14b_vpn_coexistence_keys_land_in_global_mode_only() {
+    use meow_common::route_table::DefaultVia;
+
+    // Absent: the defaults, i.e. the behaviour before the keys existed.
+    let cfg = load_config_from_str("tun:\n  enable: true\n  auto-route: global\n")
+        .await
+        .expect("config must load");
+    assert_eq!(cfg.tun.default_via, DefaultVia::Physical);
+    assert!(!cfg.tun.follow_system_routes);
+    assert!(cfg.tun.route_exclude_address.is_empty());
+
+    let yaml = "tun:\n  enable: true\n  auto-route: global\n  default-via: other-vpn\n  \
+                follow-system-routes: true\n  route-exclude-address:\n    - 10.1.2.3/8\n    \
+                - 192.168.50.7\n    - fd00::/8\n    - 10.0.0.0/8\n";
+    let cfg = load_config_from_str(yaml).await.expect("config must load");
+    assert_eq!(cfg.tun.default_via, DefaultVia::OtherVpn);
+    assert!(cfg.tun.follow_system_routes);
+    let nets: Vec<String> = cfg
+        .tun
+        .route_exclude_address
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    // Host bits dropped, a bare address is a host route, duplicates folded.
+    assert_eq!(nets, ["10.0.0.0/8", "192.168.50.7/32", "fd00::/8"]);
+
+    // One string instead of a list.
+    let yaml =
+        "tun:\n  enable: true\n  auto-route: global\n  route-exclude-address: 172.16.0.0/12\n";
+    let cfg = load_config_from_str(yaml).await.expect("config must load");
+    assert_eq!(cfg.tun.route_exclude_address.len(), 1);
+
+    // Outside global mode they do nothing and must not reach the restart
+    // diff.
+    let plain = load_config_from_str("tun:\n  enable: true\n")
+        .await
+        .expect("config must load")
+        .tun;
+    let ignored = load_config_from_str(
+        "tun:\n  enable: true\n  default-via: other-vpn\n  follow-system-routes: true\n  \
+         route-exclude-address:\n    - 10.0.0.0/8\n",
+    )
+    .await
+    .expect("config must load")
+    .tun;
+    assert_eq!(plain, ignored);
+
+    // Hand-entered VPN names and client programs.
+    let yaml = "tun:\n  enable: true\n  auto-route: global\n  vpn-domains:\n    \
+                - '+.Corp.Example'\n    - suffix: lab.example\n      servers: [10.8.0.1, '10.8.0.1', 'fd00::53']\n      \
+                iface: tun0\n    - corp.example\n  vpn-client-apps:\n    - name:openconnect\n    \
+                - ' path:/opt/cisco '\n    - name:openconnect\n";
+    let tun = load_config_from_str(yaml)
+        .await
+        .expect("config must load")
+        .tun;
+    assert_eq!(tun.vpn_domains.len(), 2);
+    assert_eq!(tun.vpn_domains[0].suffix, "corp.example");
+    assert!(tun.vpn_domains[0].servers.is_empty());
+    assert_eq!(tun.vpn_domains[1].suffix, "lab.example");
+    assert_eq!(tun.vpn_domains[1].servers.len(), 2);
+    assert_eq!(tun.vpn_domains[1].iface.as_deref(), Some("tun0"));
+    assert_eq!(tun.vpn_client_apps, ["name:openconnect", "path:/opt/cisco"]);
+    let gw = load_config_from_str(
+        "tun:\n  enable: true\n  auto-route: global\n  vpn-gateway-domains:\n    \
+         - '+.VPN.Corp.Example'\n    - vpn.corp.example\n    - gw.example.\n",
+    )
+    .await
+    .expect("config must load")
+    .tun;
+    assert_eq!(gw.vpn_gateway_domains, ["vpn.corp.example", "gw.example"]);
+    let bad = "tun:\n  enable: true\n  auto-route: global\n  vpn-domains:\n    \
+               - suffix: x.example\n      servers: [not-an-ip]\n";
+    assert!(load_config_from_str(bad).await.is_err());
+    let ignored = load_config_from_str(
+        "tun:\n  enable: true\n  vpn-domains: [corp.example]\n  vpn-client-apps: [name:x]\n  \
+         vpn-gateway-domains: [gw.example]\n",
+    )
+    .await
+    .expect("config must load")
+    .tun;
+    assert_eq!(plain, ignored);
+
+    // The raw-document gate the binary uses before the build agrees.
+    let raw = meow_config::parse_raw_yaml(yaml).unwrap();
+    assert_eq!(
+        meow_config::global_route_binding_policy(raw.tun.as_ref()),
+        (DefaultVia::Physical, false)
+    );
+    let raw = meow_config::parse_raw_yaml(
+        "tun:\n  enable: true\n  auto-route: global\n  default-via: other-vpn\n  \
+         follow-system-routes: true\n",
+    )
+    .unwrap();
+    assert_eq!(
+        meow_config::global_route_binding_policy(raw.tun.as_ref()),
+        (DefaultVia::OtherVpn, true)
+    );
+    assert_eq!(
+        meow_config::global_route_binding_policy(None),
+        (DefaultVia::Physical, false)
+    );
+
+    // Bad values are hard errors naming the field.
+    let err =
+        expect_load_err("tun:\n  enable: true\n  auto-route: global\n  default-via: auto\n").await;
+    assert!(err.contains("default-via") && err.contains("auto"), "{err}");
+    let err = expect_load_err(
+        "tun:\n  enable: true\n  auto-route: global\n  route-exclude-address:\n    - 10.0.0.0/40\n",
+    )
+    .await;
+    assert!(
+        err.contains("route-exclude-address") && err.contains("10.0.0.0/40"),
+        "{err}"
+    );
+}
+
+/// `route-exclude-address` is bounded: dozens of entries load, a list that
+/// would become thousands of routes is refused (each single address costs
+/// one route per prefix bit), and outside global mode the list is not
+/// used, so it is not counted either.
+#[tokio::test]
+async fn t14c_route_exclude_address_is_bounded() {
+    let list = |n: usize| -> String {
+        (0..n)
+            .map(|i| format!("    - 10.{}.{}.1/32\n", i / 250, i % 250))
+            .collect()
+    };
+    let global = |n: usize| {
+        format!(
+            "tun:\n  enable: true\n  auto-route: global\n  route-exclude-address:\n{}",
+            list(n)
+        )
+    };
+    let cfg = load_config_from_str(&global(40)).await.unwrap();
+    assert_eq!(cfg.tun.route_exclude_address.len(), 40);
+
+    let err = expect_load_err(&global(2000)).await;
+    assert!(
+        err.contains("route-exclude-address") && err.contains("at most"),
+        "{err}"
+    );
+
+    let fake_ip = format!(
+        "tun:\n  enable: true\n  route-exclude-address:\n{}",
+        list(2000)
+    );
+    let cfg = load_config_from_str(&fake_ip).await.unwrap();
+    assert!(cfg.tun.route_exclude_address.is_empty());
+
+    // A server that is not an address is a hard error too.
+    let err = expect_load_err(
+        "tun:\n  enable: true\n  auto-route: global\n  vpn-domains:\n    \
+         - suffix: corp.example\n      servers: [not-an-ip]\n",
+    )
+    .await;
+    assert!(
+        err.contains("vpn-domains") && err.contains("not-an-ip"),
+        "{err}"
+    );
+}
+
 // ─── T15: global max-connections applies to TUN ───────────────────────────
 
 #[tokio::test]

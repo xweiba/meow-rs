@@ -63,6 +63,8 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
+use crate::outbound_balance::Balancer;
+
 /// One live owner of the binding.
 struct Owner {
     id: u64,
@@ -70,6 +72,12 @@ struct Owner {
     /// OS interface index, resolved when the owner installed. What the
     /// index-keyed platforms bind to; Linux binds by name.
     index: u32,
+    /// PaoPao (`tun.follow-system-routes`): sockets follow the system
+    /// route snapshot per destination instead of always binding `iface`.
+    follow: bool,
+    /// PaoPao (`tun.outbound-interfaces`): what would take `iface` is
+    /// spread over these members instead (see [`crate::outbound_balance`]).
+    balance: Option<Arc<Balancer>>,
 }
 
 /// The socket option the binding uses on this platform, for log lines.
@@ -107,6 +115,24 @@ impl OutboundIfaceGuard {
     /// (see [`outbound_interface`]).
     pub fn interface(&self) -> &str {
         &self.iface
+    }
+
+    /// PaoPao (`tun.follow-system-routes`): whether sockets dialled under
+    /// this owner follow the system route snapshot per destination (see
+    /// [`interface_for`]). Off until set.
+    pub fn set_follow_routes(&mut self, follow: bool) {
+        if let Some(o) = OWNERS.write().iter_mut().find(|o| o.id == self.id) {
+            o.follow = follow;
+        }
+    }
+
+    /// PaoPao (`tun.outbound-interfaces`): sockets dialled under this
+    /// owner that would take its interface are spread over `balancer`'s
+    /// members; `None` turns that off.
+    pub fn set_balance(&mut self, balancer: Option<Arc<Balancer>>) {
+        if let Some(o) = OWNERS.write().iter_mut().find(|o| o.id == self.id) {
+            o.balance = balancer;
+        }
     }
 
     /// PaoPao: this owner now binds to `name` instead (the network changed:
@@ -296,6 +322,8 @@ fn push_owner(iface: Arc<str>, index: u32) -> OutboundIfaceGuard {
         id,
         iface: Arc::clone(&iface),
         index,
+        follow: false,
+        balance: None,
     });
     drop(owners);
     match superseded {
@@ -337,6 +365,69 @@ fn is_loopback(ip: IpAddr) -> bool {
     }
 }
 
+/// PaoPao: the balancer of the binding in effect
+/// (`tun.outbound-interfaces`), if it has one.
+pub fn balancer() -> Option<Arc<Balancer>> {
+    OWNERS.read().last().and_then(|o| o.balance.clone())
+}
+
+/// PaoPao: the OS index of interface `name`; `None` when there is no such
+/// interface (or the platform has no per-socket binding).
+pub fn interface_exists(name: &str) -> Option<u32> {
+    if name.is_empty() || name.contains('\0') {
+        return None;
+    }
+    interface_index(name).ok().flatten()
+}
+
+/// PaoPao: whether the binding in effect follows the system route snapshot
+/// (`tun.follow-system-routes`). `false` when nothing is bound.
+pub fn follows_system_routes() -> bool {
+    OWNERS.read().last().is_some_and(|o| o.follow)
+}
+
+/// PaoPao: the interface a socket talking to `dest` binds to — name and OS
+/// index — or `None` when nothing is bound.
+///
+/// With `tun.follow-system-routes` the system route snapshot
+/// ([`crate::route_table`]) is asked first: a destination inside a specific
+/// route of some interface (another VPN's pushed prefix, a second NIC's
+/// subnet, a container bridge) leaves by that interface, with the index the
+/// snapshot read (so a re-created interface is followed). Everything else —
+/// and every destination when the key is off — takes the default interface
+/// (the newest live owner's).
+pub fn interface_for(dest: Option<IpAddr>) -> Option<(Arc<str>, u32)> {
+    let (name, index, follow) = OWNERS
+        .read()
+        .last()
+        .map(|o| (Arc::clone(&o.iface), o.index, o.follow))?;
+    if follow {
+        // Never our own TUN, even when the snapshot was read before the
+        // device was known to be ours: that would be the loop the binding
+        // exists to prevent.
+        if let Some(hit) = dest
+            .and_then(|ip| crate::route_table::route_table().lookup(ip))
+            .filter(|hit| !crate::route_table::is_own_tun(&hit.iface))
+        {
+            return Some((hit.iface, hit.index));
+        }
+    }
+    Some((name, index))
+}
+
+/// PaoPao: the route that makes `dest` another VPN's — a specific route on
+/// a virtual interface — when `tun.follow-system-routes` is on. What the
+/// tunnel's `OtherRoute` decision asks.
+pub fn other_vpn_route(dest: IpAddr) -> Option<crate::route_table::RouteHit> {
+    if !follows_system_routes() {
+        return None;
+    }
+    crate::route_table::route_table()
+        .lookup(dest)
+        .filter(|hit| hit.kind == crate::route_table::RouteIfaceKind::OtherVpn)
+        .filter(|hit| !crate::route_table::is_own_tun(&hit.iface))
+}
+
 /// Bind `socket` — created in `domain` — to the installed interface, if one
 /// is installed. No-op when none is. Callers must invoke this **before**
 /// `connect()`/`bind()` so the very first packet already takes the physical
@@ -346,14 +437,146 @@ pub fn apply_outbound_interface(
     socket: &socket2::Socket,
     domain: socket2::Domain,
 ) -> io::Result<()> {
-    let Some((name, index)) = OWNERS
+    apply_outbound_interface_for(socket, domain, None)
+}
+
+/// PaoPao: [`apply_outbound_interface`] for a socket that will talk to
+/// `dest`: the interface is chosen by `bind_outbound`.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub fn apply_outbound_interface_for(
+    socket: &socket2::Socket,
+    domain: socket2::Domain,
+    dest: Option<IpAddr>,
+) -> io::Result<()> {
+    bind_outbound(socket, domain, dest, &mut 0, true).map(drop)
+}
+
+/// PaoPao: whether a socket to `dest` that no specific route claimed is
+/// spread over the balancer's members: a public destination, while the
+/// default interface is not another VPN's (`tun.default-via: other-vpn`
+/// with that VPN holding the default route sends everything to it).
+pub fn balance_applies(dest: IpAddr, status: &crate::route_table::OutboundStatus) -> bool {
+    crate::outbound_balance::is_balanced_dest(dest)
+        && !(status.default_via == crate::route_table::DefaultVia::OtherVpn
+            && status.full_tunnel.is_some())
+}
+
+/// PaoPao: the balancer member a socket was bound to, so the dial can
+/// report how it went.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub(crate) type BoundMember = Option<(Arc<Balancer>, usize)>;
+
+/// PaoPao: bind `socket` for a peer at `dest`, in this order:
+///
+/// 1. a destination the system has a specific route for (another VPN's
+///    prefix, a NIC's subnet) is never spread: it takes the interface of
+///    that route when `tun.follow-system-routes` is on, else the default
+///    one, as before;
+/// 2. a member of `tun.outbound-interfaces`, when configured and
+///    [`balance_applies`], unless the current
+///    [`DialScope`](crate::outbound_balance::DialScope) is
+///    [`unbalanced`](crate::outbound_balance::DialScope::unbalanced):
+///    chosen by the balancer with the scope's key, skipping the members in
+///    `tried` (the one chosen is added to it); a member that cannot be
+///    bound counts as failed and the next one is taken;
+/// 3. the default interface.
+///
+/// No-op when nothing is installed. The owner in effect is read once (one
+/// shared lock); with neither key set nothing else is looked at. The
+/// interface is recorded in the current dial scope — a member only when
+/// `record_member` (a caller that may still move the dial to another
+/// member records it itself, with [`record_member`], once the dial is
+/// settled). Returns the member bound, if it was one.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub(crate) fn bind_outbound(
+    socket: &socket2::Socket,
+    domain: socket2::Domain,
+    dest: Option<IpAddr>,
+    tried: &mut u32,
+    record_member: bool,
+) -> io::Result<BoundMember> {
+    use crate::outbound_balance::{sticky_key, DialOutcome, DialScope};
+
+    let Some((default_name, default_index, follow, balancer)) = OWNERS
         .read()
         .last()
-        .map(|o| (Arc::clone(&o.iface), o.index))
+        .map(|o| (Arc::clone(&o.iface), o.index, o.follow, o.balance.clone()))
     else {
-        return Ok(());
+        return Ok(None);
     };
-    bind_socket(socket, domain, &name, index)
+    if !follow && balancer.is_none() {
+        // Neither key: the default interface, nothing else to decide.
+        bind_socket(socket, domain, &default_name, default_index)?;
+        return Ok(None);
+    }
+    let scope = DialScope::current();
+    let note = |name: &Arc<str>, member: Option<(&Arc<Balancer>, usize)>| {
+        if let Some(scope) = &scope {
+            scope.record(name, member);
+        }
+    };
+    // Never our own TUN, even when the snapshot was read before the device
+    // was known to be ours (see `interface_for`).
+    let routed = dest
+        .and_then(|ip| crate::route_table::route_table().lookup(ip))
+        .filter(|hit| !crate::route_table::is_own_tun(&hit.iface));
+    if let Some(hit) = routed {
+        if follow && hit.iface != default_name {
+            match bind_socket(socket, domain, &hit.iface, hit.index) {
+                Ok(()) => {
+                    note(&hit.iface, None);
+                    return Ok(None);
+                }
+                Err(e) => tracing::debug!(
+                    "outbound interface: could not bind to routed interface '{}' ({e}); \
+                     using '{default_name}'",
+                    hit.iface
+                ),
+            }
+        }
+    } else if let (Some(balancer), Some(ip)) = (&balancer, dest.map(|ip| ip.to_canonical())) {
+        let pinned = scope.as_ref().is_some_and(|s| s.default_only());
+        if !pinned && balance_applies(ip, &crate::route_table::outbound_status()) {
+            let key = scope
+                .as_ref()
+                .and_then(|s| s.key())
+                .or_else(|| sticky_key("", Some(ip)));
+            let prefer = scope.as_ref().and_then(|s| s.member_of(balancer));
+            let now = std::time::Instant::now();
+            // The family of the address the packets carry: a mapped IPv4
+            // destination on a dual-stack socket needs an IPv4 route.
+            while let Some(pick) = balancer.pick(ip.is_ipv4(), key, prefer, *tried, now) {
+                *tried |= 1 << pick.member;
+                match bind_socket(socket, domain, &pick.name, pick.index) {
+                    Ok(()) => {
+                        if record_member {
+                            note(&pick.name, Some((balancer, pick.member)));
+                        }
+                        return Ok(Some((Arc::clone(balancer), pick.member)));
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            "outbound balance: could not bind to '{}' ({e}); trying another",
+                            pick.name
+                        );
+                        balancer.report(pick.member, DialOutcome::Failed, now);
+                    }
+                }
+            }
+        }
+    }
+    bind_socket(socket, domain, &default_name, default_index)?;
+    note(&default_name, None);
+    Ok(None)
+}
+
+/// PaoPao: record `member` as the interface of the connection dialling on
+/// this task (see [`bind_outbound`]'s `record_member`).
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub(crate) fn record_member(balancer: &Arc<Balancer>, member: usize) {
+    if let Some(scope) = crate::outbound_balance::DialScope::current() {
+        scope.record(&balancer.names()[member], Some((balancer, member)));
+    }
 }
 
 /// PaoPao: binds one socket to interface `name` (a per-outbound
@@ -371,7 +594,13 @@ pub fn bind_socket_to_interface(
             format!("interface '{name}' does not exist"),
         )
     })?;
-    bind_socket(socket, domain, name, index)
+    bind_socket(socket, domain, name, index)?;
+    // PaoPao: a connection pinned to an interface (a per-rule one, another
+    // VPN's client on the physical uplink) shows it too.
+    if let Some(scope) = crate::outbound_balance::DialScope::current() {
+        scope.record(&Arc::from(name), None);
+    }
+    Ok(())
 }
 
 /// TCP dial with the socket bound to interface `name` before `connect()`.
@@ -528,6 +757,7 @@ mod pure_tests {
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
+    use super::balancer as balancer_in_effect;
     use super::*;
 
     /// The loopback interface: the only one every host is guaranteed to
@@ -667,6 +897,9 @@ mod tests {
         drop(a);
         assert!(outbound_interface().is_none());
 
+        follow_system_routes_per_destination();
+        balanced_sockets_take_members_and_passthrough_does_not();
+
         // PaoPao: rebinding in place. A missing interface changes nothing;
         // the same one is a no-op (no hook: nothing to close); the owner
         // keeps its place among the others.
@@ -687,6 +920,478 @@ mod tests {
         drop(a);
         assert!(outbound_interface().is_none());
         *REBIND_HOOK.write() = None;
+    }
+
+    /// PaoPao: with `tun.follow-system-routes` a destination inside a
+    /// specific route of another interface binds to that interface; the
+    /// default one takes everything else, and everything when the key is
+    /// off. Called from the one registry test.
+    fn follow_system_routes_per_destination() {
+        use crate::route_table::{
+            clear_route_table, publish_route_table, RawRoute, RouteIfaceKind, RouteTable,
+        };
+        let route = |net: &str, iface: &str| RawRoute {
+            net: net.parse().unwrap(),
+            iface: iface.into(),
+            index: 99,
+            gateway: None,
+            metric: 0,
+            table: None,
+            scoped: false,
+        };
+        publish_route_table(RouteTable::build(
+            [
+                route("198.51.100.0/24", "zz-vpn0"),
+                route("203.0.113.0/24", "zz-eth9"),
+            ],
+            |_| false,
+            |name| {
+                if name == "zz-vpn0" {
+                    RouteIfaceKind::OtherVpn
+                } else {
+                    RouteIfaceKind::Physical
+                }
+            },
+        ));
+        let vpn_dest: IpAddr = "198.51.100.7".parse().unwrap();
+        let nic_dest: IpAddr = "203.0.113.7".parse().unwrap();
+        let elsewhere: IpAddr = "192.0.2.1".parse().unwrap();
+        let name = |dest| interface_for(dest).map(|(n, i)| (n.to_string(), i));
+
+        // Nothing bound: nothing to follow.
+        assert_eq!(name(Some(vpn_dest)), None);
+        assert!(other_vpn_route(vpn_dest).is_none());
+
+        // Bound, key off: always the default interface.
+        let mut a = lo();
+        let lo_index = interface_index(LO).unwrap().unwrap();
+        assert!(!follows_system_routes());
+        assert_eq!(name(Some(vpn_dest)), Some((LO.to_string(), lo_index)));
+        assert!(other_vpn_route(vpn_dest).is_none());
+
+        // Key on: the routed interface with the snapshot's index.
+        a.set_follow_routes(true);
+        assert!(follows_system_routes());
+        assert_eq!(name(Some(vpn_dest)), Some(("zz-vpn0".to_string(), 99)));
+        assert_eq!(name(Some(nic_dest)), Some(("zz-eth9".to_string(), 99)));
+        assert_eq!(name(Some(elsewhere)), Some((LO.to_string(), lo_index)));
+        assert_eq!(name(None), Some((LO.to_string(), lo_index)));
+        // Only a virtual interface's route makes a destination "the other
+        // VPN's".
+        assert_eq!(&*other_vpn_route(vpn_dest).unwrap().iface, "zz-vpn0");
+        assert!(other_vpn_route(nic_dest).is_none());
+        assert!(other_vpn_route(elsewhere).is_none());
+        // The device turned out to be ours after the snapshot was read:
+        // never followed, never "another VPN's".
+        let ours = crate::route_table::register_own_tun("zz-vpn0");
+        assert_eq!(name(Some(vpn_dest)), Some((LO.to_string(), lo_index)));
+        assert!(other_vpn_route(vpn_dest).is_none());
+        drop(ours);
+        assert_eq!(name(Some(vpn_dest)), Some(("zz-vpn0".to_string(), 99)));
+
+        // The routed interface does not exist (it vanished since the
+        // snapshot): the socket falls back to the default one.
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )
+        .unwrap();
+        apply_outbound_interface_for(&socket, socket2::Domain::IPV4, Some(vpn_dest))
+            .expect("falls back to the default interface");
+        assert_bound_to_loopback(&socket, socket2::Domain::IPV4);
+
+        // A newer owner without the key supersedes it.
+        let b = lo();
+        assert!(!follows_system_routes());
+        assert_eq!(name(Some(vpn_dest)), Some((LO.to_string(), lo_index)));
+        drop(b);
+        assert!(follows_system_routes());
+        drop(a);
+        clear_route_table();
+    }
+
+    /// PaoPao (`tun.outbound-interfaces`): a socket to a public address
+    /// takes a balancer member; one to a private address, one a specific
+    /// route claims (another VPN's prefix) and one pinned to an interface
+    /// do not. A member that cannot be bound is skipped within the same
+    /// dial. Called from the one registry test.
+    fn balanced_sockets_take_members_and_passthrough_does_not() {
+        use crate::outbound_balance::{
+            scoped, BalanceOptions, Balancer, DialScope, Link, LinkKind, LinkSource, MemberState,
+        };
+        use crate::route_table::{
+            clear_route_table, publish_route_table, RawRoute, RouteIfaceKind, RouteTable,
+        };
+
+        /// Both members hold a default route as far as the balancer knows;
+        /// only loopback really exists.
+        struct Links;
+        impl LinkSource for Links {
+            fn links(&self) -> Vec<Link> {
+                [LO, "zz-gone9"]
+                    .into_iter()
+                    .map(|name| Link {
+                        name: name.into(),
+                        index: interface_index(name).unwrap().unwrap_or(999),
+                        kind: LinkKind::Physical,
+                        v4: true,
+                        v6: true,
+                        strict_rp_filter: false,
+                    })
+                    .collect()
+            }
+            fn kind_of(&self, _name: &str) -> Option<LinkKind> {
+                None
+            }
+        }
+        let udp = || {
+            socket2::Socket::new(
+                socket2::Domain::IPV4,
+                socket2::Type::DGRAM,
+                Some(socket2::Protocol::UDP),
+            )
+            .unwrap()
+        };
+        let public: IpAddr = "93.184.216.34".parse().unwrap();
+        let private: IpAddr = "192.168.77.9".parse().unwrap();
+        let vpn_dest: IpAddr = "198.51.100.7".parse().unwrap();
+
+        let balancer = Balancer::new(&BalanceOptions {
+            interfaces: vec![LO.into(), "zz-gone9".into()],
+            sticky: false,
+        });
+        balancer.refresh(&Links);
+        let assigned = |b: &Balancer| -> Vec<u64> {
+            b.snapshot(std::time::Instant::now())
+                .interfaces
+                .iter()
+                .map(|m| m.assigned)
+                .collect()
+        };
+
+        // Nothing bound: no balancer in effect, no scope made.
+        assert!(balancer_in_effect().is_none());
+        assert!(DialScope::for_target("example.com", None).is_none());
+
+        let mut a = lo();
+        a.set_follow_routes(true);
+        a.set_balance(Some(Arc::clone(&balancer)));
+        assert!(Arc::ptr_eq(&balancer_in_effect().unwrap(), &balancer));
+        assert!(DialScope::for_target("example.com", None).is_some());
+
+        // A public destination: a member. The first choice is loopback.
+        let socket = udp();
+        let mut tried = 0;
+        let member = bind_outbound(
+            &socket,
+            socket2::Domain::IPV4,
+            Some(public),
+            &mut tried,
+            true,
+        )
+        .unwrap();
+        assert_eq!(member.map(|(_, m)| m), Some(0));
+        assert_eq!(tried, 0b01);
+        assert_bound_to_loopback(&socket, socket2::Domain::IPV4);
+        assert_eq!(assigned(&balancer), [1, 0]);
+
+        // The next one's turn is the member that does not exist: binding
+        // fails, it is counted as failed, and the socket takes the other
+        // member — the caller sees no error.
+        let socket = udp();
+        let mut tried = 0;
+        let member = bind_outbound(
+            &socket,
+            socket2::Domain::IPV4,
+            Some(public),
+            &mut tried,
+            true,
+        )
+        .unwrap();
+        assert_eq!(member.map(|(_, m)| m), Some(0));
+        assert_eq!(tried, 0b11);
+        assert_bound_to_loopback(&socket, socket2::Domain::IPV4);
+        let snap = balancer.snapshot(std::time::Instant::now());
+        assert_eq!(snap.interfaces[1].failures, 1);
+        assert_eq!(snap.interfaces[1].state, MemberState::Up);
+
+        // Every member tried: the default interface.
+        let socket = udp();
+        let mut tried = 0b11;
+        let member = bind_outbound(
+            &socket,
+            socket2::Domain::IPV4,
+            Some(public),
+            &mut tried,
+            true,
+        )
+        .unwrap();
+        assert!(member.is_none());
+        assert_bound_to_loopback(&socket, socket2::Domain::IPV4);
+
+        // Not spread: a private destination, and a socket with no peer.
+        let before = assigned(&balancer);
+        for dest in [Some(private), None] {
+            let socket = udp();
+            let member = bind_outbound(&socket, socket2::Domain::IPV4, dest, &mut 0, true).unwrap();
+            assert!(member.is_none(), "{dest:?}");
+            assert_bound_to_loopback(&socket, socket2::Domain::IPV4);
+        }
+        assert_eq!(assigned(&balancer), before);
+
+        // Not spread: a destination another VPN has a route for goes to
+        // that VPN's interface (here it does not exist, so the default one
+        // takes it) — the balancer is not asked either way.
+        publish_route_table(RouteTable::build(
+            [RawRoute {
+                net: "198.51.100.0/24".parse().unwrap(),
+                iface: "zz-vpn0".into(),
+                index: 99,
+                gateway: None,
+                metric: 0,
+                table: None,
+                scoped: false,
+            }],
+            |_| false,
+            |_| RouteIfaceKind::OtherVpn,
+        ));
+        assert_eq!(
+            interface_for(Some(vpn_dest)).map(|(n, _)| n.to_string()),
+            Some("zz-vpn0".to_string())
+        );
+        let socket = udp();
+        let member =
+            bind_outbound(&socket, socket2::Domain::IPV4, Some(vpn_dest), &mut 0, true).unwrap();
+        assert!(member.is_none());
+        assert_bound_to_loopback(&socket, socket2::Domain::IPV4);
+        assert_eq!(assigned(&balancer), before);
+        clear_route_table();
+
+        // Not spread: everything while another VPN is the default
+        // interface (`default-via: other-vpn`, full tunnel up).
+        let mut status = crate::route_table::OutboundStatus::default();
+        assert!(balance_applies(public, &status));
+        assert!(!balance_applies(private, &status));
+        status.full_tunnel = Some((Arc::from("zz-vpn0"), std::time::SystemTime::now()));
+        assert!(balance_applies(public, &status), "default-via: physical");
+        status.default_via = crate::route_table::DefaultVia::OtherVpn;
+        assert!(!balance_applies(public, &status));
+
+        // Inside a connection's dial scope the interface is recorded and
+        // the connection counted in flight on its member; a socket pinned
+        // to an interface (a per-rule one, another VPN's client on the
+        // physical uplink) is recorded but never a member's.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let scope = DialScope::for_target("www.example.com", None).unwrap();
+            scoped(Some(Arc::clone(&scope)), async {
+                let socket = udp();
+                bind_outbound(&socket, socket2::Domain::IPV4, Some(public), &mut 0, true).unwrap();
+                // The connection's next socket stays on its member.
+                let socket = udp();
+                let member =
+                    bind_outbound(&socket, socket2::Domain::IPV4, Some(public), &mut 0, true)
+                        .unwrap();
+                assert_eq!(member.map(|(_, m)| m), Some(0));
+            })
+            .await;
+            assert_eq!(scope.interface().as_deref(), Some(LO));
+            assert_eq!(scope.member_of(&balancer), Some(0));
+            let snap = balancer.snapshot(std::time::Instant::now());
+            assert_eq!(snap.interfaces[0].connections, 1);
+            drop(scope);
+            let snap = balancer.snapshot(std::time::Instant::now());
+            assert_eq!(snap.interfaces[0].connections, 0);
+
+            let before = assigned(&balancer);
+            let pinned = DialScope::for_target("vpn.corp.example", None).unwrap();
+            scoped(Some(Arc::clone(&pinned)), async {
+                let socket = udp();
+                bind_socket_to_interface(&socket, socket2::Domain::IPV4, LO).unwrap();
+            })
+            .await;
+            assert_eq!(pinned.interface().as_deref(), Some(LO));
+            assert_eq!(pinned.member_of(&balancer), None);
+            assert_eq!(assigned(&balancer), before);
+        });
+
+        // Not spread: a destination the system has a specific route for,
+        // also while the routes are not followed (`follow-system-routes`
+        // off) — another VPN's prefix, a second NIC's static route: the
+        // default interface, as without balancing. (A route on the default
+        // interface itself is the same branch; loopback routes are not
+        // kept in the snapshot, so it cannot be shown here.)
+        let route_on = |net: &str, iface: &str, kind: RouteIfaceKind| {
+            publish_route_table(RouteTable::build(
+                [RawRoute {
+                    net: net.parse().unwrap(),
+                    iface: iface.into(),
+                    index: 99,
+                    gateway: None,
+                    metric: 0,
+                    table: None,
+                    scoped: false,
+                }],
+                |_| false,
+                move |_| kind,
+            ));
+        };
+        let before = assigned(&balancer);
+        a.set_follow_routes(false);
+        for (net, iface, kind, dest) in [
+            (
+                "198.51.100.0/24",
+                "zz-vpn0",
+                RouteIfaceKind::OtherVpn,
+                vpn_dest,
+            ),
+            (
+                "203.0.113.0/24",
+                "zz-eth9",
+                RouteIfaceKind::Physical,
+                "203.0.113.7".parse().unwrap(),
+            ),
+        ] {
+            route_on(net, iface, kind);
+            let socket = udp();
+            let member =
+                bind_outbound(&socket, socket2::Domain::IPV4, Some(dest), &mut 0, true).unwrap();
+            assert!(member.is_none(), "{net}");
+            assert_bound_to_loopback(&socket, socket2::Domain::IPV4);
+        }
+        a.set_follow_routes(true);
+        clear_route_table();
+        assert_eq!(assigned(&balancer), before);
+
+        rt.block_on(async {
+            // Not spread: what runs in an unbalanced scope (DNS upstream
+            // queries), and it leaves the asking connection's scope alone.
+            let before = assigned(&balancer);
+            let conn = DialScope::for_target("www.example.org", None).unwrap();
+            scoped(Some(Arc::clone(&conn)), async {
+                let dns = DialScope::unbalanced().expect("balancing is configured");
+                assert!(dns.default_only());
+                scoped(Some(dns), async {
+                    let socket = udp();
+                    let member =
+                        bind_outbound(&socket, socket2::Domain::IPV4, Some(public), &mut 0, true)
+                            .unwrap();
+                    assert!(member.is_none());
+                    assert_bound_to_loopback(&socket, socket2::Domain::IPV4);
+                })
+                .await;
+            })
+            .await;
+            assert_eq!(conn.interface(), None);
+            assert_eq!(assigned(&balancer), before);
+
+            // A dial that leaves a member for the next one (its line is
+            // down: a loopback-bound IPv6 socket has no route to the
+            // documentation prefix — nothing leaves the host) does not keep
+            // the connection on the member it gave up: no in-flight count
+            // is left behind. (IPv6, because Linux takes an IPv4
+            // destination without a route on the bound device for on-link
+            // and waits. On a host without IPv6 the dial fails before any
+            // member is asked, which satisfies the same assertions.)
+            let outside: std::net::SocketAddr = "[2001:db8::1]:9".parse().unwrap();
+            let conn = DialScope::for_target("retry.example", None).unwrap();
+            let failures_before =
+                balancer.snapshot(std::time::Instant::now()).interfaces[0].failures;
+            let dial = scoped(
+                Some(Arc::clone(&conn)),
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    crate::socket_protect::connect_tcp_iface_bound(outside),
+                ),
+            )
+            .await
+            .expect("no route: fails at once");
+            assert!(dial.is_err());
+            assert_eq!(conn.member_of(&balancer), None);
+            let snap = balancer.snapshot(std::time::Instant::now());
+            assert_eq!(snap.interfaces[0].connections, 0);
+            assert_eq!(snap.interfaces[1].connections, 0);
+            if snap.interfaces[0].failures > failures_before {
+                // The member was tried and given up: the connection ended
+                // on the default interface.
+                assert_eq!(conn.interface().as_deref(), Some(LO));
+            }
+        });
+
+        // A mapped IPv4 destination on an IPv6 socket needs a member with
+        // an IPv4 default route, not one with only an IPv6 one.
+        struct SplitFamilies;
+        impl LinkSource for SplitFamilies {
+            fn links(&self) -> Vec<Link> {
+                [(LO, true), ("zz-gone9", false)]
+                    .into_iter()
+                    .map(|(name, v4)| Link {
+                        name: name.into(),
+                        index: interface_index(name).unwrap().unwrap_or(999),
+                        kind: LinkKind::Physical,
+                        v4,
+                        v6: !v4,
+                        strict_rp_filter: false,
+                    })
+                    .collect()
+            }
+            fn kind_of(&self, _name: &str) -> Option<LinkKind> {
+                None
+            }
+        }
+        let split = Balancer::new(&BalanceOptions {
+            interfaces: vec![LO.into(), "zz-gone9".into()],
+            sticky: false,
+        });
+        split.refresh(&SplitFamilies);
+        a.set_balance(Some(Arc::clone(&split)));
+        let mapped: IpAddr = "::ffff:93.184.216.34".parse().unwrap();
+        for _ in 0..3 {
+            let socket = socket2::Socket::new(
+                socket2::Domain::IPV6,
+                socket2::Type::DGRAM,
+                Some(socket2::Protocol::UDP),
+            )
+            .unwrap();
+            let member =
+                bind_outbound(&socket, socket2::Domain::IPV6, Some(mapped), &mut 0, true).unwrap();
+            assert_eq!(member.map(|(_, m)| m), Some(0));
+        }
+        assert_eq!(assigned(&split), [3, 0]);
+        // No member has a route for the family: the default interface.
+        struct NoLinks;
+        impl LinkSource for NoLinks {
+            fn links(&self) -> Vec<Link> {
+                Vec::new()
+            }
+            fn kind_of(&self, _name: &str) -> Option<LinkKind> {
+                None
+            }
+        }
+        split.refresh(&NoLinks);
+        let socket = udp();
+        let member =
+            bind_outbound(&socket, socket2::Domain::IPV4, Some(public), &mut 0, true).unwrap();
+        assert!(member.is_none());
+        assert_bound_to_loopback(&socket, socket2::Domain::IPV4);
+        a.set_balance(Some(Arc::clone(&balancer)));
+
+        // A newer owner without members turns it off; leaving restores it.
+        let b = lo();
+        assert!(balancer_in_effect().is_none());
+        let socket = udp();
+        let member =
+            bind_outbound(&socket, socket2::Domain::IPV4, Some(public), &mut 0, true).unwrap();
+        assert!(member.is_none());
+        drop(b);
+        assert!(balancer_in_effect().is_some());
+        a.set_balance(None);
+        assert!(balancer_in_effect().is_none());
+        drop(a);
     }
 
     /// The dial chokepoints behind `connect_tcp` / `bind_udp`, driven with
@@ -714,7 +1419,7 @@ mod tests {
             // UDP: a wildcard socket is bound and carries a datagram.
             let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let wildcard: SocketAddr = "0.0.0.0:0".parse().unwrap();
-            let socket = bind_udp_iface_bound(wildcard).expect("wildcard bind");
+            let socket = bind_udp_iface_bound(wildcard, None).expect("wildcard bind");
             assert_bound_to_loopback(&SockRef::from(&socket), Domain::IPV4);
             socket
                 .send_to(b"ping", receiver.local_addr().unwrap())
@@ -725,7 +1430,7 @@ mod tests {
             assert_eq!(&buf[..n], b"ping");
 
             let wildcard6: SocketAddr = "[::]:0".parse().unwrap();
-            let socket6 = bind_udp_iface_bound(wildcard6).expect("v6 wildcard bind");
+            let socket6 = bind_udp_iface_bound(wildcard6, None).expect("v6 wildcard bind");
             assert_bound_to_loopback(&SockRef::from(&socket6), Domain::IPV6);
 
             // The scope is enforced by the kernel, not just recorded: a
@@ -743,7 +1448,7 @@ mod tests {
 
                 // A UDP socket pinned to a loopback address is exempt.
                 let pinned: SocketAddr = "127.0.0.1:0".parse().unwrap();
-                let socket = bind_udp_iface_bound(pinned).expect("loopback bind");
+                let socket = bind_udp_iface_bound(pinned, None).expect("loopback bind");
                 assert_eq!(SockRef::from(&socket).device_index_v4().unwrap(), None);
                 assert!(!binds_peer(pinned.ip()) && binds_peer(outside.ip()));
             }

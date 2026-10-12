@@ -792,7 +792,9 @@ impl ProxyAdapter for Socks5Adapter {
         } else {
             "[::]:0".parse().expect("static")
         };
-        let socket = meow_common::bind_udp(bind).await.map_err(MeowError::Io)?;
+        let socket = meow_common::bind_udp_to(bind, relay_addr)
+            .await
+            .map_err(MeowError::Io)?;
         socket.connect(relay_addr).await.map_err(MeowError::Io)?;
 
         Ok(Box::new(Socks5UdpConn {

@@ -273,7 +273,12 @@ pub async fn handle_udp(
     // Bounded like mihomo's `C.DefaultUDPTimeout`. An unbounded dial here is
     // worse than on TCP: the key is still unclaimed (see below), so every
     // datagram of the flow starts its own stalled dial.
-    match with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata)).await {
+    match meow_common::outbound_balance::scoped(
+        meow_common::outbound_balance::DialScope::for_target(&metadata.host, metadata.dst_ip),
+        with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata)),
+    )
+    .await
+    {
         Ok(conn) if flush.is_flushed() => {
             debug!(
                 "UDP {} -> {}: sessions flushed during the dial; dropping datagram",

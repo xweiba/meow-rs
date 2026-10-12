@@ -386,7 +386,13 @@ pub async fn route_inbound_tcp<C>(
     // this task, its inbound socket and its stats entry forever.
     guard
         .run_until_closed(async {
-            let dial = with_dial_timeout(proxy.name(), proxy.dial_tcp(&metadata)).await;
+            // PaoPao: the dial's sockets pick their interface by this
+            // connection's destination and record it for the API.
+            let dial = meow_common::outbound_balance::scoped(
+                guard.counters().dial_scope(&metadata),
+                with_dial_timeout(proxy.name(), proxy.dial_tcp(&metadata)),
+            )
+            .await;
             // All chained front hops resolved during the dial — release the
             // generation pin before entering the relay loop.
             drop(route.take());

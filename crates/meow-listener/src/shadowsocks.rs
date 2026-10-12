@@ -1160,7 +1160,12 @@ async fn run_ss_udp_flow<S>(
             metadata.remote_address(),
             proxy.name()
         );
-        match with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata)).await {
+        match meow_common::outbound_balance::scoped(
+            meow_common::outbound_balance::DialScope::for_target(&metadata.host, metadata.dst_ip),
+            with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata)),
+        )
+        .await
+        {
             Ok(conn) => Arc::from(conn),
             Err(e) => {
                 debug!(

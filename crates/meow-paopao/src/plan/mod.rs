@@ -31,7 +31,10 @@ use crate::pool::{endpoint, region_of, NodeGroup, Pool};
 /// The built-in policies are static data, kept in the model (S11).
 pub use crate::model::{outbound_tags, policies};
 pub use group_tree::{build_group_tree, GroupKind, GroupSpec, GroupTree, TreeInput};
-pub use input::{AutoStrategy, BuildInput, RouteAccess, RuntimeOptions};
+pub use input::{
+    AutoStrategy, BuildInput, InternalDomain, OutboundOptions, RouteAccess, RuntimeOptions,
+    VpnOptions,
+};
 pub use policies::{final_policy, policy_by_tag, Policy, POLICIES};
 pub use route::{offered_route_policies, route_catalog, RoutePolicy};
 pub use sub_rules::{

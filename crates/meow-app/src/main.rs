@@ -1694,7 +1694,7 @@ async fn run(
             let mut listener = TunListener::new(
                 tunnel.clone(),
                 tun_config_to_listener_config(&config.tun),
-                "meow-tun".to_string(),
+                meow_common::TUN_INBOUND_NAME.to_string(),
             )
             .with_readiness_signal(ready_tx)
             .with_sniffer(Arc::clone(&sniffer_runtime));

@@ -4,6 +4,7 @@
 //! plus the built-in web dashboard.
 
 pub mod log_stream;
+mod network;
 pub mod routes;
 pub mod ui;
 
@@ -59,6 +60,22 @@ pub fn tun_config_to_listener_config(
             meow_config::TunRouteMode::Global => meow_listener::TunRouteScope::Global,
         },
         outbound_interface: tun.outbound_interface.clone(),
+        outbound_policy: meow_listener::OutboundPolicy {
+            default_via: tun.default_via,
+            follow_routes: tun.follow_system_routes,
+            balance: (tun.outbound_interfaces.len() >= 2).then(|| {
+                meow_common::outbound_balance::BalanceOptions {
+                    interfaces: tun.outbound_interfaces.clone(),
+                    sticky: tun.outbound_sticky,
+                }
+            }),
+        },
+        route_exclude: tun.route_exclude_address.clone(),
+        vpn_manual: meow_common::route_table::VpnManual {
+            domains: tun.vpn_domains.clone(),
+            client_apps: tun.vpn_client_apps.clone(),
+            gateway_domains: tun.vpn_gateway_domains.clone(),
+        },
         dns_hijack: tun.dns_hijack,
         udp_timeout: tun.udp_timeout,
         max_connections: tun.max_connections,
@@ -157,7 +174,13 @@ pub fn preinstall_global_route_binding(raw: &RawConfig) -> PreinstalledBinding {
         return PreinstalledBinding::default();
     };
     let previous = meow_common::outbound_interface();
-    match meow_listener::OutboundBinding::install(iface.as_deref()) {
+    let (default_via, follow_routes) = meow_config::global_route_binding_policy(raw.tun.as_ref());
+    let policy = meow_listener::OutboundPolicy {
+        default_via,
+        follow_routes,
+        balance: meow_config::global_route_balance(raw.tun.as_ref()),
+    };
+    match meow_listener::OutboundBinding::install(iface.as_deref(), &policy) {
         Ok(binding) => PreinstalledBinding {
             interface_changed: previous.as_deref() != Some(binding.interface().as_str()),
             binding: Some(binding),

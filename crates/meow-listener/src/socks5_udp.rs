@@ -520,9 +520,15 @@ async fn run_session(
         );
 
         let conn: Arc<dyn meow_common::ProxyPacketConn> = Arc::from(
-            with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata))
-                .await
-                .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?,
+            meow_common::outbound_balance::scoped(
+                meow_common::outbound_balance::DialScope::for_target(
+                    &metadata.host,
+                    metadata.dst_ip,
+                ),
+                with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata)),
+            )
+            .await
+            .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?,
         );
         Ok((conn, dst_addr))
     }

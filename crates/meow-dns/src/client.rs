@@ -107,9 +107,12 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Linux `SO_MARK`, …) before returning the socket so DNS traffic bypasses
 /// the local VPN tunnel.
 pub trait SocketFactory: Send + Sync + 'static {
-    /// Bind an unconnected UDP socket. Implementations typically bind to
-    /// `0.0.0.0:0`.
-    fn bind_udp(&self) -> BoxFuture<'_, io::Result<UdpSocket>>;
+    /// Bind an unconnected UDP socket for a query to `peer`.
+    /// Implementations typically bind to `0.0.0.0:0`; `peer` lets them
+    /// pick the interface it is routed through (PaoPao
+    /// `tun.follow-system-routes`: another VPN's DNS server is reached
+    /// through that VPN).
+    fn bind_udp(&self, peer: SocketAddr) -> BoxFuture<'_, io::Result<UdpSocket>>;
 
     /// Open an outbound TCP connection to `addr`.
     fn connect_tcp(&self, addr: SocketAddr) -> BoxFuture<'_, io::Result<TcpStream>>;
@@ -121,12 +124,12 @@ pub trait SocketFactory: Send + Sync + 'static {
 struct DefaultSocketFactory;
 
 impl SocketFactory for DefaultSocketFactory {
-    fn bind_udp(&self) -> BoxFuture<'_, io::Result<UdpSocket>> {
-        Box::pin(async {
+    fn bind_udp(&self, peer: SocketAddr) -> BoxFuture<'_, io::Result<UdpSocket>> {
+        Box::pin(async move {
             // Bind to v4 unspecified; this is fine because we always
             // `connect()` the socket before sending, and connect() will
             // re-resolve the local address family.
-            meow_common::bind_udp(SocketAddr::from(([0u8; 4], 0))).await
+            meow_common::bind_udp_to(SocketAddr::from(([0u8; 4], 0)), peer).await
         })
     }
 
@@ -849,7 +852,25 @@ impl DnsClient {
         Ok(response)
     }
 
+    /// PaoPao (`tun.outbound-interfaces`): an upstream query is never
+    /// spread over the balancer's members — it leaves by the default
+    /// interface (or the one the system routes the server through), as
+    /// without balancing — and its sockets stay out of the dial scope of
+    /// a connection that resolves inside its own dial. One shared lock
+    /// read when balancing is not configured.
     async fn exchange(
+        &self,
+        wire: &[u8],
+        expected: &ExpectedResponse,
+    ) -> Result<Message, ClientError> {
+        meow_common::outbound_balance::scoped(
+            meow_common::outbound_balance::DialScope::unbalanced(),
+            self.exchange_unscoped(wire, expected),
+        )
+        .await
+    }
+
+    async fn exchange_unscoped(
         &self,
         wire: &[u8],
         expected: &ExpectedResponse,
@@ -1228,7 +1249,7 @@ async fn udp_exchange(
         };
         UdpSocket::bind(local).await?
     } else {
-        factory().bind_udp().await?
+        factory().bind_udp(addr).await?
     };
     sock.connect(addr).await?;
     sock.send(wire).await?;
