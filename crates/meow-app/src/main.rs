@@ -1618,6 +1618,14 @@ async fn run(
         }
     }
 
+    // PaoPao 签到助手: tasks, the serial runner and the daily schedule live
+    // in the core, so they run without the app (server, OpenWrt). Its
+    // files are under `<home>/checkin`, created on first use; without any
+    // task the schedule's look at the clock is all it costs.
+    let checkin =
+        meow_api::checkin::open_engine(&tunnel, meow_common::resolved_home_dir().join("checkin"));
+    let _checkin_tasks = checkin.start();
+
     // Start REST API if configured. Runs after the listener bind phase so the
     // `GET /listeners` snapshot reports OS-assigned ports for `port: 0`
     // (ephemeral) listeners rather than the configured `0`.
@@ -1668,7 +1676,8 @@ async fn run(
             Arc::clone(&dns_server_handle),
             config.provider_dialer_registry.clone(),
         )
-        .with_config_commits(config_commits.clone());
+        .with_config_commits(config_commits.clone())
+        .with_checkin(Arc::clone(&checkin));
         // Bind eagerly like the DNS listener and the `listeners:` entries:
         // an `external-controller` failure is a hard startup error, not a
         // detached task that dies one log line deep (issue #641).

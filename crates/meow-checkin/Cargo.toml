@@ -1,0 +1,48 @@
+[package]
+name = "meow-checkin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "PaoPao 签到助手 engine: tasks, rules, request replay, serial runner and daily schedule (no UI)."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+meow-common = { workspace = true }
+# Only the `tls` layer: HTTPS replay goes through the same BoringSSL stack
+# as every other fetch of the core.
+meow-transport = { workspace = true, features = ["tls"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+url = "2"
+httparse = "1"
+# Same exact pin as meow-proxy (one copy of the public-suffix list).
+psl = "=2.1.232"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(not(unix))'.dependencies]
+time = { workspace = true, features = ["local-offset"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }
+time = { workspace = true, features = ["macros"] }
+# The local HTTPS site of tests/https.rs. Already in the workspace (the
+# loopback TLS servers of meow-transport's tests); not linked into any binary.
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rcgen = "0.13"
+
+[lints]
+workspace = true

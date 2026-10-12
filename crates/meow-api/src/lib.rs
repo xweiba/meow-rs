@@ -3,6 +3,7 @@
 //! Runtime control of proxies, rules, connections, config, traffic, and DNS,
 //! plus the built-in web dashboard.
 
+pub mod checkin;
 pub mod log_stream;
 mod network;
 pub mod routes;
@@ -306,6 +307,9 @@ pub struct ApiServer {
     /// Bumped after every committed config change; see
     /// [`Self::with_config_commits`].
     config_commits: routes::ConfigCommits,
+    /// PaoPao 签到助手; its routes exist only when set
+    /// ([`Self::with_checkin`]).
+    checkin: Option<Arc<meow_checkin::Engine>>,
 }
 
 impl ApiServer {
@@ -349,7 +353,16 @@ impl ApiServer {
             dns_server,
             provider_dialer_registry,
             config_commits: routes::ConfigCommits::default(),
+            checkin: None,
         }
+    }
+
+    /// Serve 签到助手 (`/checkin…`) over `engine`. The embedder opens and
+    /// starts the engine ([`checkin::open_engine`]); it runs with or
+    /// without this server.
+    pub fn with_checkin(mut self, engine: Arc<meow_checkin::Engine>) -> Self {
+        self.checkin = Some(engine);
+        self
     }
 
     /// Share `commits` with the embedder: the server bumps it after every
@@ -403,7 +416,7 @@ impl ApiServer {
             }
         });
 
-        let app = routes::create_router(state);
+        let app = routes::create_router_with_checkin(state, self.checkin.clone());
 
         let bound = listener.local_addr().unwrap_or(self.listen_addr);
         info!("REST API listening on {bound}");

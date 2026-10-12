@@ -222,6 +222,15 @@ async fn require_auth_ws(
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
+    create_router_with_checkin(state, None)
+}
+
+/// [`create_router`] plus, when `checkin` is given, the 签到助手 routes
+/// (`/checkin…`) behind the same auth.
+pub fn create_router_with_checkin(
+    state: Arc<AppState>,
+    checkin: Option<Arc<meow_checkin::Engine>>,
+) -> Router {
     // WS routes — accept header or ?token= query param for browser dashboard compat.
     // REST API routes gated behind the Bearer middleware (header-only).
     let api = Router::new()
@@ -314,11 +323,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             get(get_rule_provider).put(refresh_rule_provider),
         )
         // Listeners (read-only list)
-        .route("/listeners", get(get_listeners))
-        .route_layer(middleware::from_fn_with_state(
-            Arc::clone(&state),
-            require_auth_ws,
-        ));
+        .route("/listeners", get(get_listeners));
+    let api = match checkin {
+        Some(engine) => api.merge(crate::checkin::router(engine)),
+        None => api,
+    };
+    let api = api.route_layer(middleware::from_fn_with_state(
+        Arc::clone(&state),
+        require_auth_ws,
+    ));
 
     // Web UI is intentionally unauthenticated so dashboards can load and then
     // present a token prompt; this matches upstream mihomo behaviour.

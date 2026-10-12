@@ -30,6 +30,7 @@ pub mod network;
 pub mod outbound_balance;
 pub mod outbound_iface;
 pub mod process_lookup;
+pub mod public_only;
 // Android: the host app tells which app owns a VPN connection.
 #[cfg(any(target_os = "android", test))]
 pub mod app_owner;

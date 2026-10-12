@@ -11,6 +11,7 @@ members = [
     "crates/meow-proxy",
     "crates/meow-tunnel",
     "crates/meow-listener",
+    "crates/meow-checkin",
     "crates/meow-api",
     "crates/meow-config",
     "crates/meow-app",
@@ -271,4 +272,5 @@ meow-proxy = { path = "crates/meow-proxy", version = "0.22.0", default-features 
 meow-tunnel = { path = "crates/meow-tunnel", version = "0.22.0" }
 meow-listener = { path = "crates/meow-listener", version = "0.22.0", default-features = false }
 meow-api = { path = "crates/meow-api", version = "0.22.0" }
+meow-checkin = { path = "crates/meow-checkin", version = "0.22.0" }
 meow-config = { path = "crates/meow-config", version = "0.22.0", default-features = false }

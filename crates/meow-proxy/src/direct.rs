@@ -394,7 +394,23 @@ impl ProxyAdapter for DirectAdapter {
     }
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
-        let dests = self.resolve_targets(metadata).await?;
+        let mut dests = self.resolve_targets(metadata).await?;
+        // PaoPao 签到助手 replays requests from rules it does not trust:
+        // whatever the name resolved to, those never reach this machine
+        // or a private network. Checked on the addresses about to be
+        // dialled, so a name cannot change its answer in between.
+        if metadata.in_name == meow_common::public_only::PUBLIC_ONLY_INBOUND {
+            dests.retain(|d| !meow_common::public_only::is_non_public_ip(d.ip()));
+            if dests.is_empty() {
+                return Err(MeowError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "direct: {} is not a public address; refused for this inbound",
+                        metadata.remote_address()
+                    ),
+                )));
+            }
+        }
         let mut last_err = None;
 
         for dest in dests {
@@ -654,6 +670,46 @@ mod tests {
             host: host.into(),
             dst_port: port,
             ..Default::default()
+        }
+    }
+
+    /// PaoPao 签到助手: a connection of the public-only inbound is not
+    /// dialled to this machine or a private network, whether the address
+    /// came as a literal or out of a lookup; any other inbound is.
+    #[tokio::test]
+    async fn the_public_only_inbound_never_dials_a_private_address() {
+        use meow_common::public_only::{PRIVATE_ALLOWED_INBOUND, PUBLIC_ONLY_INBOUND};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let adapter = DirectAdapter::new();
+        // `localhost` goes through the lookup (no resolver injected: the
+        // system's); the literal forms are folded.
+        for host in ["127.0.0.1", "localhost", "[::ffff:127.0.0.1]"] {
+            let mut metadata = tcp_metadata(host, port);
+            metadata.in_name = PUBLIC_ONLY_INBOUND.into();
+            let err = adapter.dial_tcp(&metadata).await.err().expect(host);
+            assert!(
+                matches!(&err, MeowError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+                "{host}: {err}"
+            );
+        }
+        let mut metadata = Metadata {
+            dst_ip: Some("192.168.1.1".parse().unwrap()),
+            dst_port: 80,
+            ..Default::default()
+        };
+        metadata.in_name = PUBLIC_ONLY_INBOUND.into();
+        assert!(adapter.dial_tcp(&metadata).await.is_err());
+        // Nothing reached the listener.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+        for name in [PRIVATE_ALLOWED_INBOUND, "mixed"] {
+            let mut metadata = tcp_metadata("127.0.0.1", port);
+            metadata.in_name = name.into();
+            assert!(adapter.dial_tcp(&metadata).await.is_ok(), "{name}");
         }
     }
 
