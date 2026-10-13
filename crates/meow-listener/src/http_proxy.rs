@@ -137,11 +137,13 @@ async fn handle_http_inner(
             Some((username, password)) if auth.credentials.verify(&username, &password) => {
                 Some(username)
             }
+            // Credentials nobody set, from an address that needs none: as
+            // if it had sent none (the same as the SOCKS5 side).
+            _ if auth.should_skip(&src_addr.ip()) => None,
             Some((username, _)) => {
                 stream.write_all(PROXY_AUTH_REQUIRED).await?;
                 return Err(format!("HTTP auth failed for user {username:?}").into());
             }
-            None if auth.should_skip(&src_addr.ip()) => None,
             None => {
                 stream.write_all(PROXY_AUTH_REQUIRED).await?;
                 return Err("proxy authentication required".into());

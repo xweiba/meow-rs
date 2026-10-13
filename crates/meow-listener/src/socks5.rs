@@ -141,12 +141,21 @@ async fn handle_socks5_inner(
                 return Err("invalid SOCKS5 password encoding".into());
             };
 
-            if !auth.credentials.verify(username, password) {
+            if auth.credentials.verify(username, password) {
+                stream.write_all(&[0x01, 0x00]).await?;
+                Some(username.to_string())
+            } else if skipped {
+                // An address that needs no credentials is not turned away
+                // for sending ones nobody set: Java's SOCKS client offers
+                // username/password with the system's user name and an
+                // empty password whenever a proxy is configured. It goes on
+                // as if it had sent none.
+                stream.write_all(&[0x01, 0x00]).await?;
+                None
+            } else {
                 stream.write_all(&[0x01, 0x01]).await?;
                 return Err(format!("SOCKS5 auth failed for user {username:?}").into());
             }
-            stream.write_all(&[0x01, 0x00]).await?;
-            Some(username.to_string())
         } else {
             if !methods.contains(&NO_AUTH) {
                 stream

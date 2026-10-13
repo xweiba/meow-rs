@@ -230,3 +230,74 @@ async fn socks5_rejects_invalid_utf8_auth_credentials() {
         .expect("handle_socks5 task did not finish in time")
         .expect("handle_socks5 task panicked");
 }
+
+/// Java's SOCKS client, whenever a proxy is set (the system's included),
+/// offers username/password and sends the system's user name with an empty
+/// password. From an address that needs no credentials that is let through
+/// as an anonymous client; from any other it is refused.
+async fn unset_credentials_reply(peer: &str) -> ([u8; 2], Option<Vec<u8>>) {
+    let echo_addr = spawn_echo_server().await;
+    let (server_stream, mut client_stream) = loopback_pair().await;
+    let tunnel = direct_tunnel();
+    let server_addr: SocketAddr = peer.parse().unwrap();
+    let mut credentials = HashMap::new();
+    credentials.insert("auto".to_string(), "secret".to_string());
+    let auth = AuthConfig::new(
+        Arc::new(Credentials::new(credentials)),
+        vec!["127.0.0.0/8".parse().unwrap()],
+    );
+    let handle = tokio::spawn(async move {
+        meow_listener::socks5::handle_socks5(
+            &tunnel,
+            server_stream,
+            server_addr,
+            None,
+            Some(&auth),
+            "test",
+            0,
+        )
+        .await;
+    });
+
+    client_stream
+        .write_all(&[0x05, 0x02, 0x00, 0x02])
+        .await
+        .unwrap();
+    let mut method_reply = [0u8; 2];
+    client_stream.read_exact(&mut method_reply).await.unwrap();
+    assert_eq!(method_reply, [0x05, 0x02]);
+    client_stream
+        .write_all(&[0x01, 0x03, b'm', b'a', b'c', 0x00])
+        .await
+        .unwrap();
+    let mut auth_reply = [0u8; 2];
+    client_stream.read_exact(&mut auth_reply).await.unwrap();
+    if auth_reply != [0x01, 0x00] {
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        return (auth_reply, None);
+    }
+    // Skip the greeting of the helper's request: the methods are settled.
+    client_stream
+        .write_all(&socks5_connect_ipv4(echo_addr)[3..])
+        .await
+        .unwrap();
+    let mut reply = [0u8; 10];
+    client_stream.read_exact(&mut reply).await.unwrap();
+    handle.abort();
+    (auth_reply, Some(reply.to_vec()))
+}
+
+#[tokio::test]
+async fn socks5_lets_an_exempt_address_through_with_credentials_nobody_set() {
+    let (auth_reply, connect_reply) = unset_credentials_reply("127.0.0.1:50000").await;
+    assert_eq!(auth_reply, [0x01, 0x00]);
+    let reply = connect_reply.unwrap();
+    assert_eq!(&reply[..2], [0x05, 0x00], "CONNECT succeeds: {reply:?}");
+}
+
+#[tokio::test]
+async fn socks5_refuses_credentials_nobody_set_from_other_addresses() {
+    let (auth_reply, connect_reply) = unset_credentials_reply("192.0.2.10:50000").await;
+    assert_eq!(auth_reply, [0x01, 0x01]);
+    assert!(connect_reply.is_none());
+}
