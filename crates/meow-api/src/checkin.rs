@@ -26,7 +26,7 @@ use axum::{
     Router,
 };
 use meow_checkin::clicks::ClickSubscription;
-use meow_checkin::http::{refused_private, BoxStream, Connector};
+use meow_checkin::http::{refused_private, unknown_policy, BoxStream, Connector};
 use meow_checkin::{Access, CheckinError, Engine, EngineConfig, ErrorKind, SystemClock};
 use meow_common::public_only::{PRIVATE_ALLOWED_INBOUND, PUBLIC_ONLY_INBOUND};
 use meow_common::{ConnType, MeowError, Metadata, Network};
@@ -45,7 +45,10 @@ const KEEP_ALIVE: Duration = Duration::from_secs(10);
 
 /// Requests of 签到助手 leave through the core like any connection made
 /// from inside it: `proxy` goes through the rules and lines (and shows in
-/// the connection list), `direct` goes out through `DIRECT`.
+/// the connection list), `direct` goes out through `DIRECT`. A `proxy`
+/// task that names a proxy or group goes through that one whatever the
+/// rules and the mode say (the connection's special proxy); a name that
+/// is not there is refused, not handed to the rules.
 ///
 /// Unless private addresses are allowed, the connection carries the
 /// inbound name [`PUBLIC_ONLY_INBOUND`]: `DIRECT` then refuses to dial an
@@ -68,6 +71,7 @@ impl Connector for TunnelConnector {
     async fn connect(
         &self,
         access: Access,
+        policy: Option<&str>,
         host: &str,
         port: u16,
         allow_private: bool,
@@ -108,8 +112,17 @@ impl Connector for TunnelConnector {
                 Ok(Box::new(conn))
             }
             Access::Proxy => {
+                let mut metadata = metadata;
+                if let Some(policy) = policy {
+                    // Said here, in words the run can show: past this
+                    // point a refusal is only a closed stream.
+                    if !self.tunnel.inner().has_proxy(policy) {
+                        return Err(unknown_policy());
+                    }
+                    metadata.special_proxy = SmolStr::from(policy);
+                }
                 // The same path a listener hands a connection to: rule
-                // match, tracking, dial, relay. A failed dial closes our
+                // match (or the named proxy), tracking, dial, relay. A failed dial closes our
                 // end.
                 let (ours, mut theirs) = tokio::io::duplex(64 * 1024);
                 let inner = Arc::clone(self.tunnel.inner());

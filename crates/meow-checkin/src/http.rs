@@ -21,7 +21,11 @@ use url::Url;
 
 pub type BoxStream = Box<dyn meow_transport::Stream>;
 
-/// Dials `host:port` the way `access` says.
+/// Dials `host:port` the way `access` says. With `policy` (only ever
+/// given with [`Access::Proxy`]) the connection goes out through the proxy
+/// or group of that name instead of what the rules would choose; a name
+/// the connector does not know is answered with [`unknown_policy`], never
+/// by falling back to the rules.
 ///
 /// Unless `allow_private`, the connector must not reach this machine or a
 /// private network: it checks the address it actually dials (a public
@@ -33,10 +37,33 @@ pub trait Connector: Send + Sync {
     async fn connect(
         &self,
         access: Access,
+        policy: Option<&str>,
         host: &str,
         port: u16,
         allow_private: bool,
     ) -> io::Result<BoxStream>;
+}
+
+/// Marks [`unknown_policy`] among a connector's errors.
+#[derive(Debug)]
+struct UnknownPolicy;
+
+impl std::fmt::Display for UnknownPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("checkin: no proxy or group of that name")
+    }
+}
+
+impl std::error::Error for UnknownPolicy {}
+
+/// The error a [`Connector`] answers when the proxy or group a task names
+/// does not exist (any more).
+pub fn unknown_policy() -> io::Error {
+    io::Error::new(io::ErrorKind::NotFound, UnknownPolicy)
+}
+
+fn is_unknown_policy(e: &io::Error) -> bool {
+    matches!(e.get_ref(), Some(inner) if inner.is::<UnknownPolicy>())
 }
 
 /// The error a [`Connector`] answers for an address it may not dial.
@@ -58,6 +85,7 @@ impl Connector for SystemConnector {
     async fn connect(
         &self,
         _access: Access,
+        _policy: Option<&str>,
         host: &str,
         port: u16,
         allow_private: bool,
@@ -90,6 +118,8 @@ impl Connector for SystemConnector {
 pub struct Dial<'a> {
     pub connector: &'a dyn Connector,
     pub access: Access,
+    /// See [`Connector`].
+    pub policy: Option<&'a str>,
     /// See [`Connector`].
     pub allow_private: bool,
     /// Trust anchors (DER) on top of the built-in ones.
@@ -191,6 +221,8 @@ pub enum HttpError {
     Protocol(String),
     /// The address is on this machine or a private network.
     Private,
+    /// The proxy or group the task names does not exist; its name.
+    Policy(String),
 }
 
 impl HttpError {
@@ -202,6 +234,9 @@ impl HttpError {
             Self::Timeout => "网站太久没有回应。".to_string(),
             Self::Protocol(_) => "网站的回应读不懂。".to_string(),
             Self::Private => PRIVATE_SENTENCE.to_string(),
+            Self::Policy(name) => {
+                format!("指定的代理策略「{name}」已不存在，请重新选择。")
+            }
         }
     }
 }
@@ -273,11 +308,13 @@ pub async fn send(dial: &Dial<'_>, req: &Request, limits: &Limits) -> Result<Res
     let connect = async {
         let conn = dial
             .connector
-            .connect(dial.access, &host, port, dial.allow_private)
+            .connect(dial.access, dial.policy, &host, port, dial.allow_private)
             .await
             .map_err(|e| {
                 if e.kind() == io::ErrorKind::PermissionDenied {
                     HttpError::Private
+                } else if is_unknown_policy(&e) {
+                    HttpError::Policy(dial.policy.unwrap_or_default().to_string())
                 } else {
                     HttpError::Connect(e.to_string())
                 }

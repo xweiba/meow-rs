@@ -34,6 +34,11 @@ pub struct Task {
     pub home: String,
     #[serde(default)]
     pub access: Access,
+    /// The proxy or group every request of the task goes out through,
+    /// whatever the rules say. `None`: the rules decide. Only read while
+    /// `access` is [`Access::Proxy`] ([`Task::policy`]).
+    #[serde(default, rename = "policy")]
+    pub proxy_policy: Option<String>,
     /// Local time of the daily run, minutes after midnight.
     pub minute_of_day: u16,
     #[serde(default)]
@@ -47,6 +52,15 @@ pub struct Task {
 }
 
 impl Task {
+    /// The proxy or group the task's requests are sent through; `None`
+    /// for a direct task and for one that follows the rules.
+    pub fn policy(&self) -> Option<&str> {
+        match self.access {
+            Access::Direct => None,
+            Access::Proxy => self.proxy_policy.as_deref(),
+        }
+    }
+
     pub fn variable(&self, name: &str) -> Option<&VariableDef> {
         self.variables.iter().find(|v| v.name == name)
     }
@@ -214,6 +228,8 @@ pub struct TaskView {
     pub name: String,
     pub home: String,
     pub access: Access,
+    /// As stored: kept while `access` is `direct`, where it is not used.
+    pub policy: Option<String>,
     pub minute_of_day: u16,
     pub enabled: bool,
     pub subscription_id: Option<String>,
@@ -296,6 +312,8 @@ pub struct ClickRequest {
     pub id: String,
     pub task_id: String,
     pub access: Access,
+    /// The proxy or group the task's requests use ([`Task::policy`]).
+    pub policy: Option<String>,
     pub timeout_ms: u64,
     pub steps: Vec<Step>,
 }

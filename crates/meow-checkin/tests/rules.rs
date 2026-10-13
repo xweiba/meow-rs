@@ -93,6 +93,9 @@ fn export_holds_no_value_and_reads_back() {
     let dir = tempfile::tempdir().unwrap();
     let e = engine(dir.path());
     let imported = e.import_rule(&sample().to_string(), true).unwrap();
+    // The line the task uses is this user's own: not part of the rule.
+    e.update_task(&imported.id, &json!({"policy": "香港 01"}), true)
+        .unwrap();
     e.save_variable(
         &imported.id,
         "uid",
@@ -198,6 +201,12 @@ fn import_creates_a_task_that_is_off_and_has_no_value() {
     rule["enabled"] = json!(true);
     rule["id"] = json!("t-evil");
     rule["subscription_id"] = json!("sub");
+    // Nor does it choose which of this core's lines the task uses.
+    rule["policy"] = json!("REJECT");
+    assert!(check(&rule)
+        .warnings
+        .iter()
+        .all(|w| w.code != "unknown_field"));
     rule["variables"][0]["value"] = json!("sid=planted");
     rule["variables"][0]["has_value"] = json!(true);
     rule["variables"][1]["value"] = json!("planted");
@@ -207,6 +216,7 @@ fn import_creates_a_task_that_is_off_and_has_no_value() {
     assert_eq!(task["enabled"], false);
     assert_ne!(task["id"], "t-evil");
     assert_eq!(task["subscription_id"], Value::Null);
+    assert_eq!(task["policy"], Value::Null);
     assert_ne!(task["steps"][0]["id"], "s-evil");
     assert!(!task["steps"][0]["id"].as_str().unwrap().is_empty());
     for v in task["variables"].as_array().unwrap() {

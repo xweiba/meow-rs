@@ -735,6 +735,190 @@ async fn a_proxy_task_goes_through_the_rules_like_any_connection() {
     assert!(after > before, "download total {before} -> {after}");
 }
 
+/// A proxy task with one request step at `site`, through the API.
+async fn proxy_task(r: &Rig, addr: SocketAddr) -> String {
+    let home = format!("http://{addr}/user");
+    let id = r.new_task(&home).await;
+    r.ok(
+        Method::PATCH,
+        &format!("/checkin/tasks/{id}"),
+        Some(json!({"access": "proxy"})),
+    )
+    .await;
+    r.ok(
+        Method::PUT,
+        &format!("/checkin/tasks/{id}/steps"),
+        Some(
+            json!({"steps": [{"id": "", "kind": "api", "name": "签到", "method": "GET",
+            "url": format!("http://{addr}/user/checkin"), "page": home}]}),
+        ),
+    )
+    .await;
+    id
+}
+
+/// Runs the task once more and answers that run: the one on record once
+/// nothing is queued or running any more. Each run must differ from the
+/// one before it (trigger or outcome), which is how the two are told
+/// apart.
+async fn run_again(r: &Rig, id: &str, trial: bool) -> Value {
+    let before = r.ok(Method::GET, "/checkin", None).await["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|run| run["task_id"] == id)
+        .cloned();
+    r.ok(
+        Method::POST,
+        &format!("/checkin/tasks/{id}/run"),
+        Some(json!({"trial": trial})),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snap = r.ok(Method::GET, "/checkin", None).await;
+            if snap["running_task_id"].is_null()
+                && snap["queued_task_ids"].as_array().unwrap().is_empty()
+            {
+                let run = finished_run(r, id).await;
+                if Some(&run) != before.as_ref() {
+                    return run;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the next run did not finish")
+}
+
+#[tokio::test]
+async fn a_task_with_a_policy_goes_through_it_whatever_the_rules_say() {
+    // Every rule says REJECT.
+    let r = rig_with(None, &["MATCH,REJECT"]);
+    let _tasks = r.engine.start();
+    let (addr, seen) = site().await;
+    let id = proxy_task(&r, addr).await;
+
+    // By the rules: refused, nothing arrives.
+    let run = run_again(&r, &id, true).await;
+    assert_eq!(run["steps"][0]["status"], "failed", "{run}");
+    assert!(seen.lock().is_empty());
+
+    // Through the policy it names: out, and through the relay.
+    let task = r
+        .ok(
+            Method::PATCH,
+            &format!("/checkin/tasks/{id}"),
+            Some(json!({"policy": "DIRECT"})),
+        )
+        .await;
+    assert_eq!(task["policy"], "DIRECT");
+    assert_eq!(
+        r.ok(Method::GET, "/checkin", None).await["tasks"][0]["policy"],
+        "DIRECT"
+    );
+    let before = r.state.tunnel.statistics().snapshot().1;
+    let run = run_again(&r, &id, false).await;
+    assert_eq!(run["steps"][0]["status"], "ok", "{run}");
+    assert_eq!(seen.lock().len(), 1);
+    assert!(r.state.tunnel.statistics().snapshot().1 > before);
+
+    // Cleared: the rules again.
+    let task = r
+        .ok(
+            Method::PATCH,
+            &format!("/checkin/tasks/{id}"),
+            Some(json!({"policy": null})),
+        )
+        .await;
+    assert_eq!(task["policy"], Value::Null);
+    let run = run_again(&r, &id, true).await;
+    assert_eq!(run["steps"][0]["status"], "failed", "{run}");
+    assert_eq!(seen.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn a_policy_wins_over_the_rules_in_both_directions() {
+    // The rules would let it out; the policy the task names refuses.
+    let r = rig_with(None, &["MATCH,DIRECT"]);
+    let _tasks = r.engine.start();
+    let (addr, seen) = site().await;
+    let id = proxy_task(&r, addr).await;
+    r.ok(
+        Method::PATCH,
+        &format!("/checkin/tasks/{id}"),
+        Some(json!({"policy": "REJECT"})),
+    )
+    .await;
+    let run = run_again(&r, &id, true).await;
+    assert_eq!(run["steps"][0]["status"], "failed", "{run}");
+    assert!(seen.lock().is_empty());
+
+    // A direct task does not use the name it keeps.
+    let task = r
+        .ok(
+            Method::PATCH,
+            &format!("/checkin/tasks/{id}"),
+            Some(json!({"access": "direct"})),
+        )
+        .await;
+    assert_eq!(task["policy"], "REJECT");
+    let run = run_again(&r, &id, false).await;
+    assert_eq!(run["steps"][0]["status"], "ok", "{run}");
+    assert_eq!(seen.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn a_policy_that_does_not_exist_fails_the_run_in_words() {
+    // The rules would let it out: it must not fall back to them.
+    let r = rig_with(None, &["MATCH,DIRECT"]);
+    let _tasks = r.engine.start();
+    let (addr, seen) = site().await;
+    let id = proxy_task(&r, addr).await;
+    r.ok(
+        Method::PATCH,
+        &format!("/checkin/tasks/{id}"),
+        Some(json!({"policy": "已删除的节点"})),
+    )
+    .await;
+    let run = run_again(&r, &id, false).await;
+    assert_eq!(run["steps"][0]["status"], "failed", "{run}");
+    assert_eq!(
+        run["steps"][0]["summary"],
+        "指定的代理策略「已删除的节点」已不存在，请重新选择。"
+    );
+    assert!(seen.lock().is_empty());
+
+    // The connector says so itself, before anything is dialled.
+    use meow_checkin::Connector as _;
+    let connector = TunnelConnector::new(r.state.tunnel.clone());
+    let refused = connector
+        .connect(
+            meow_checkin::Access::Proxy,
+            Some("已删除的节点"),
+            "127.0.0.1",
+            addr.port(),
+            true,
+        )
+        .await;
+    assert_eq!(
+        refused.err().map(|e| e.kind()),
+        Some(std::io::ErrorKind::NotFound)
+    );
+    assert!(seen.lock().is_empty());
+
+    let (status, body) = r
+        .call(
+            Method::PATCH,
+            &format!("/checkin/tasks/{id}"),
+            Some(json!({"policy": 7})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "「policy」的内容格式不对。");
+}
+
 /// Reads NDJSON lines off a streaming response, skipping keep-alives.
 struct Lines {
     body: axum::body::BodyDataStream,
@@ -1151,7 +1335,7 @@ async fn the_connector_refuses_a_private_address_itself() {
     let connector = TunnelConnector::new(r.state.tunnel.clone());
     for access in [meow_checkin::Access::Direct, meow_checkin::Access::Proxy] {
         let refused = connector
-            .connect(access, "127.0.0.1", addr.port(), false)
+            .connect(access, None, "127.0.0.1", addr.port(), false)
             .await;
         assert_eq!(
             refused.err().map(|e| e.kind()),
@@ -1161,7 +1345,13 @@ async fn the_connector_refuses_a_private_address_itself() {
     }
     // Allowed on request: the same dial goes through.
     let mut stream = connector
-        .connect(meow_checkin::Access::Direct, "127.0.0.1", addr.port(), true)
+        .connect(
+            meow_checkin::Access::Direct,
+            None,
+            "127.0.0.1",
+            addr.port(),
+            true,
+        )
         .await
         .unwrap();
     stream

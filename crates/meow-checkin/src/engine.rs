@@ -180,6 +180,7 @@ fn view(task: &Task, secrets: &Secrets, reveal_manual: bool) -> TaskView {
         name: task.name.clone(),
         home: task.home.clone(),
         access: task.access,
+        policy: task.proxy_policy.clone(),
         minute_of_day: task.minute_of_day,
         enabled: task.enabled,
         subscription_id: task.subscription_id.clone(),
@@ -411,6 +412,7 @@ impl Engine {
             name: Reader::name(obj)?.filter(|n| !n.is_empty()).unwrap_or(host),
             home,
             access: Reader::access(obj)?.unwrap_or_default(),
+            proxy_policy: Reader::policy(obj)?.flatten(),
             minute_of_day: Reader::minute_of_day(obj)?.unwrap_or(DEFAULT_MINUTE),
             enabled: Reader::enabled(obj)?.unwrap_or(false),
             subscription_id: Reader::subscription_id(obj)?.flatten(),
@@ -435,6 +437,7 @@ impl Engine {
             Some(_) => Some(Reader::home(obj)?),
         };
         let access = Reader::access(obj)?;
+        let policy = Reader::policy(obj)?;
         let minute = Reader::minute_of_day(obj)?;
         let enabled = Reader::enabled(obj)?;
         let subscription = Reader::subscription_id(obj)?;
@@ -466,6 +469,9 @@ impl Engine {
         }
         if let Some(access) = access {
             task.access = access;
+        }
+        if let Some(policy) = policy {
+            task.proxy_policy = policy;
         }
         if let Some(minute) = minute {
             task.minute_of_day = minute;
@@ -775,6 +781,8 @@ impl Engine {
             name: parsed.name,
             home: parsed.home,
             access: parsed.access,
+            // Names of this core's own lines: a rule carries none.
+            proxy_policy: None,
             minute_of_day: parsed.minute_of_day,
             // The user looks at it, logs in, and switches it on.
             enabled: false,
@@ -1111,6 +1119,7 @@ impl Engine {
         let out = Outbound {
             connector: self.connector.as_ref(),
             access: task.access,
+            policy: task.policy(),
             limits: &self.config.limits,
             markers: &self.markers,
             allow_private: self.allow_private,
@@ -1131,6 +1140,7 @@ impl Engine {
             id: format!("c{}", self.click_seq.fetch_add(1, Ordering::Relaxed) + 1),
             task_id: task.id.clone(),
             access: task.access,
+            policy: task.policy().map(str::to_string),
             timeout_ms: self.config.click_timeout_ms,
             steps: vec![Step::Click(step.clone())],
         };

@@ -230,6 +230,10 @@ async fn read_request(sock: &mut tokio::net::TcpStream) -> Option<Seen> {
 pub struct LocalConnector {
     addr: SocketAddr,
     pub dialed: Mutex<Vec<(Access, String, u16)>>,
+    /// The policy of every dial, in the order of `dialed`.
+    pub policies: Mutex<Vec<Option<String>>>,
+    /// Names answered with [`meow_checkin::http::unknown_policy`].
+    pub unknown: Mutex<Vec<String>>,
 }
 
 impl LocalConnector {
@@ -237,6 +241,8 @@ impl LocalConnector {
         Arc::new(Self {
             addr,
             dialed: Mutex::new(Vec::new()),
+            policies: Mutex::new(Vec::new()),
+            unknown: Mutex::new(Vec::new()),
         })
     }
 
@@ -255,11 +261,16 @@ impl Connector for LocalConnector {
     async fn connect(
         &self,
         access: Access,
+        policy: Option<&str>,
         host: &str,
         port: u16,
         _allow_private: bool,
     ) -> io::Result<BoxStream> {
         self.dialed.lock().push((access, host.to_string(), port));
+        self.policies.lock().push(policy.map(str::to_string));
+        if policy.is_some_and(|p| self.unknown.lock().iter().any(|u| u == p)) {
+            return Err(meow_checkin::http::unknown_policy());
+        }
         Ok(Box::new(tokio::net::TcpStream::connect(self.addr).await?))
     }
 }

@@ -120,13 +120,14 @@ pub struct Reader {
 
 /// Fields of the app's own objects that are not part of a rule: dropped
 /// without a word.
-const PERSONAL_FIELDS: [&str; 7] = [
+const PERSONAL_FIELDS: [&str; 8] = [
     "id",
     "value",
     "has_value",
     "updated_at",
     "enabled",
     "subscription_id",
+    "policy",
     "masked",
 ];
 
@@ -220,6 +221,21 @@ impl Reader {
                 Ok(Some(Some(s.clone())))
             }
             Some(_) => Err(wrong("subscription_id")),
+        }
+    }
+
+    /// `Some(None)`: present and null or empty, which is "the rules
+    /// decide". The name is not checked against the core's proxies here:
+    /// they change with every config, and a run says so when it is gone.
+    pub fn policy(obj: &Map<String, Value>) -> Result<Option<Option<String>>> {
+        match obj.get("policy") {
+            None => Ok(None),
+            Some(Value::Null) => Ok(Some(None)),
+            Some(Value::String(s)) if s.is_empty() => Ok(Some(None)),
+            Some(Value::String(s)) if s.len() <= KEY_MAX && !s.chars().any(char::is_control) => {
+                Ok(Some(Some(s.clone())))
+            }
+            Some(_) => Err(wrong("policy")),
         }
     }
 

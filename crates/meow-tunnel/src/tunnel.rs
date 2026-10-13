@@ -638,6 +638,9 @@ impl TunnelInner {
         if let Some((target, _)) = self.paopao_lan_direct(metadata) {
             return Some(target);
         }
+        if let Some(special) = self.special_proxy_target(metadata) {
+            return special;
+        }
         let mode = *self.mode.read();
         match mode {
             TunnelMode::Direct => Some(ResolvedTarget {
@@ -712,6 +715,9 @@ impl TunnelInner {
             // DIRECT dial connects to the pinned address either way.
             metadata.dst_ip = Some(ip);
             return Some(target);
+        }
+        if let Some(special) = self.special_proxy_target(metadata) {
+            return special;
         }
         let mode = *self.mode.read();
         if mode != TunnelMode::Rule {
@@ -857,6 +863,48 @@ impl TunnelInner {
             },
             ip,
         ))
+    }
+
+    /// The connection names its own proxy or group
+    /// (`Metadata::special_proxy`, upstream `resolveMetadata`'s
+    /// `SpecialProxy` arm): that one is used whatever the mode and the
+    /// rules say. Checked after the own-traffic, other-VPN and
+    /// paopao-hosts LAN decisions, which are not rules.
+    ///
+    /// `None`: no proxy is named, route as usual. `Some(None)`: the named
+    /// one is not in the registry — the connection is refused, never
+    /// handed to the rules instead.
+    fn special_proxy_target(&self, metadata: &Metadata) -> Option<Option<ResolvedTarget>> {
+        let name = metadata.special_proxy.as_str();
+        if name.is_empty() {
+            return None;
+        }
+        let route = self.route();
+        let adapter: Arc<dyn ProxyAdapter> = match route.proxies.get(name).cloned() {
+            Some(p) => p as Arc<dyn ProxyAdapter>,
+            // As in `materialize_rule_match`: DIRECT needs no registry entry.
+            None if name == "DIRECT" => Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>,
+            None => {
+                warn!(
+                    "{} {}: special proxy '{name}' is not in the registry; refusing",
+                    metadata.conn_type,
+                    metadata.remote_address()
+                );
+                return Some(None);
+            }
+        };
+        Some(Some(ResolvedTarget {
+            adapter,
+            rule_name: SmolStr::new_static("SpecialProxy"),
+            rule_payload: metadata.special_proxy.clone(),
+            route,
+        }))
+    }
+
+    /// Whether `name` is a proxy or group a connection may name as its
+    /// special proxy right now.
+    pub fn has_proxy(&self, name: &str) -> bool {
+        name == "DIRECT" || self.route().proxies.contains_key(name)
     }
 
     /// Registry probe for the match engines — upstream `match()`'s three

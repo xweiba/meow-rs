@@ -174,6 +174,7 @@ mod tests {
             id: id.into(),
             task_id: "t1".into(),
             access: Access::Direct,
+            policy: None,
             timeout_ms: 20_000,
             steps: vec![Step::Click(ClickStep {
                 id: "s2".into(),

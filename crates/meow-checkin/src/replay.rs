@@ -391,6 +391,8 @@ fn redact(summary: String, variables: Variables<'_>) -> String {
 pub struct Outbound<'a> {
     pub connector: &'a dyn Connector,
     pub access: Access,
+    /// See [`Connector`].
+    pub policy: Option<&'a str>,
     pub limits: &'a Limits,
     pub markers: &'a Markers,
     /// Requests may go to this machine and private networks.
@@ -432,6 +434,7 @@ pub async fn replay(
     let dial = Dial {
         connector: out.connector,
         access: out.access,
+        policy: out.policy,
         allow_private: out.allow_private,
         extra_roots: out.extra_roots,
     };

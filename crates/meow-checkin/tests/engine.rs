@@ -122,6 +122,129 @@ async fn the_access_mode_reaches_the_connector() {
 }
 
 #[tokio::test]
+async fn the_policy_reaches_the_connector_on_every_step() {
+    let r = rig(|_| Reply::json(200, "{}")).await;
+    let id = add_task(
+        &r.engine,
+        "a",
+        HOME,
+        json!([
+            api_step("登录", "http://main.example.com/a", HOME),
+            api_step("签到", "http://other.example.com/b", HOME),
+        ]),
+    );
+    let (rig, task_id) = (&r, &id);
+    let run = |trial| async move {
+        rig.connector.policies.lock().clear();
+        rig.engine.run_task(task_id, trial).unwrap();
+        rig.engine.run_pending().await;
+        rig.connector.policies.lock().clone()
+    };
+    let task = r
+        .engine
+        .update_task(
+            &id,
+            &json!({"access": "proxy", "policy": "region:US"}),
+            false,
+        )
+        .unwrap();
+    assert_eq!(task.policy.as_deref(), Some("region:US"));
+    let named = Some("region:US".to_string());
+    assert_eq!(run(true).await, [named.clone(), named.clone()]);
+
+    // A direct task keeps the name and does not use it.
+    let task = r
+        .engine
+        .update_task(&id, &json!({"access": "direct"}), false)
+        .unwrap();
+    assert_eq!(task.policy.as_deref(), Some("region:US"));
+    assert_eq!(run(true).await, [None, None]);
+    assert_eq!(r.connector.dialed.lock().last().unwrap().0, Access::Direct);
+
+    // A change that does not mention it leaves it.
+    let task = r
+        .engine
+        .update_task(&id, &json!({"access": "proxy", "minute_of_day": 1}), false)
+        .unwrap();
+    assert_eq!(task.policy.as_deref(), Some("region:US"));
+    assert_eq!(run(true).await, [named.clone(), named]);
+
+    // Cleared, by null or by an empty name: the rules decide, as before.
+    for (set, cleared) in [("auto", json!(null)), ("proxy", json!(""))] {
+        r.engine
+            .update_task(&id, &json!({"policy": set}), false)
+            .unwrap();
+        let task = r
+            .engine
+            .update_task(&id, &json!({"policy": cleared}), false)
+            .unwrap();
+        assert_eq!(task.policy, None);
+        assert_eq!(serde_json::to_value(&task).unwrap()["policy"], Value::Null);
+    }
+    assert_eq!(run(true).await, [None, None]);
+    assert_eq!(r.connector.dialed.lock().last().unwrap().0, Access::Proxy);
+}
+
+#[tokio::test]
+async fn a_policy_that_is_gone_fails_the_step_in_words() {
+    let r = rig(|_| Reply::json(200, "{}")).await;
+    let id = add_task(
+        &r.engine,
+        "a",
+        HOME,
+        json!([api_step("签到", "http://main.example.com/x", HOME)]),
+    );
+    r.engine
+        .update_task(&id, &json!({"access": "proxy", "policy": "香港 01"}), false)
+        .unwrap();
+    r.connector.unknown.lock().push("香港 01".to_string());
+    r.engine.run_task(&id, false).unwrap();
+    r.engine.run_pending().await;
+    let run = run_of(&r.engine.snapshot(false), &id);
+    assert_eq!(statuses(&run), [StepStatus::Failed]);
+    assert_eq!(run.steps[0].http_status, None);
+    assert_eq!(
+        run.steps[0].summary,
+        "指定的代理策略「香港 01」已不存在，请重新选择。"
+    );
+    // Asked for by name once, and nothing was sent any other way.
+    assert_eq!(
+        r.connector.policies.lock().clone(),
+        [Some("香港 01".to_string())]
+    );
+    assert!(r.server.seen().is_empty());
+}
+
+#[tokio::test]
+async fn a_policy_is_a_name_or_nothing() {
+    let r = rig(|_| Reply::json(200, "{}")).await;
+    let made = r
+        .engine
+        .create_task(
+            &json!({"home": HOME, "access": "proxy", "policy": "auto"}),
+            false,
+        )
+        .unwrap();
+    assert_eq!(made.policy.as_deref(), Some("auto"));
+    for bad in [
+        json!(1),
+        json!(["auto"]),
+        json!("a\nb"),
+        json!("x".repeat(300)),
+    ] {
+        let refused = r
+            .engine
+            .update_task(&made.id, &json!({"policy": bad}), false)
+            .unwrap_err();
+        assert_eq!(refused.kind, ErrorKind::Invalid, "{bad}");
+    }
+    assert_eq!(
+        r.engine.snapshot(false).tasks[0].policy.as_deref(),
+        Some("auto")
+    );
+}
+
+#[tokio::test]
 async fn a_pushed_value_with_a_line_break_is_never_sent() {
     let r = rig(|_| Reply::json(200, "{}")).await;
     let id = add_task(
@@ -557,6 +680,9 @@ async fn an_attached_app_performs_click_steps_and_the_core_judges() {
     let _ = app.await;
 
     // What the app was sent.
+    r.engine
+        .update_task(&id, &json!({"policy": "auto"}), false)
+        .unwrap();
     let mut sub = r.engine.clicks().subscribe();
     r.engine.run_task(&id, true).unwrap();
     let engine = Arc::clone(&r.engine);
@@ -564,6 +690,7 @@ async fn an_attached_app_performs_click_steps_and_the_core_judges() {
     let request = serde_json::to_value(sub.next().await.unwrap()).unwrap();
     assert_eq!(request["task_id"], id.as_str());
     assert_eq!(request["access"], "proxy");
+    assert_eq!(request["policy"], "auto");
     assert_eq!(request["timeout_ms"], 300);
     assert_eq!(request["steps"].as_array().unwrap().len(), 1);
     assert_eq!(request["steps"][0]["kind"], "click");
@@ -1281,6 +1408,7 @@ impl meow_checkin::Connector for ResolvesInward {
     async fn connect(
         &self,
         _access: Access,
+        _policy: Option<&str>,
         _host: &str,
         _port: u16,
         allow_private: bool,

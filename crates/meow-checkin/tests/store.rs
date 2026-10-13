@@ -30,8 +30,8 @@ fn populated(dir: &Path) -> (Arc<Engine>, String) {
     let id = engine
         .create_task(
             &json!({"name": "主力机场", "home": "https://main.example.com/user",
-                    "access": "proxy", "minute_of_day": 510, "enabled": true,
-                    "subscription_id": "sub1"}),
+                    "access": "proxy", "policy": "region:US", "minute_of_day": 510,
+                    "enabled": true, "subscription_id": "sub1"}),
             false,
         )
         .unwrap()
@@ -86,6 +86,7 @@ fn everything_survives_a_restart() {
     let task = &after["tasks"][0];
     assert_eq!(task["id"], id.as_str());
     assert_eq!(task["access"], "proxy");
+    assert_eq!(task["policy"], "region:US");
     assert_eq!(task["subscription_id"], "sub1");
     assert_eq!(task["steps"].as_array().unwrap().len(), 2);
     assert_eq!(task["variables"][0]["has_value"], true);
@@ -183,6 +184,40 @@ fn a_file_from_a_newer_version_is_set_aside() {
     .unwrap();
     assert!(open(dir.path()).snapshot(false).tasks.is_empty());
     assert!(dir.path().join("checkin.json.v9.bak").exists());
+}
+
+#[test]
+fn a_file_written_before_policies_loads_without_one() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("checkin.json"),
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "tasks": [
+                {"id": "t1", "name": "旧的", "home": "https://a.example/", "access": "proxy",
+                 "minute_of_day": 60, "enabled": true, "steps": [], "variables": []}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let engine = open(dir.path());
+    let task = serde_json::to_value(&engine.snapshot(false).tasks[0]).unwrap();
+    assert_eq!(task["access"], "proxy");
+    assert_eq!(task["policy"], serde_json::Value::Null);
+
+    // Set, it is written under the same name and read back.
+    engine
+        .update_task("t1", &json!({"policy": "auto"}), false)
+        .unwrap();
+    drop(engine);
+    let stored: serde_json::Value =
+        serde_json::from_str(&read(dir.path(), "checkin.json")).unwrap();
+    assert_eq!(stored["tasks"][0]["policy"], "auto");
+    assert_eq!(
+        open(dir.path()).snapshot(false).tasks[0].policy.as_deref(),
+        Some("auto")
+    );
 }
 
 #[test]
