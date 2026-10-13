@@ -3,8 +3,10 @@
 //! Everything is built from what the TUN listener's monitor already
 //! published (`meow_common::route_table`); the builders are pure.
 
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use meow_common::iface_counters::IfaceBytes;
 use meow_common::outbound_balance::{BalanceSnapshot, Link};
 use meow_common::route_table::{
     IfaceDns, OutboundStatus, RouteEntry, RouteIfaceKind, RouteTable, VpnClientProc, VpnManual,
@@ -126,6 +128,8 @@ pub(crate) struct VpnView<'a> {
     pub dns: &'a [IfaceDns],
     /// Every interface's addresses (`name`, `address/prefix`).
     pub addresses: &'a [(String, String)],
+    /// Every interface's own byte counters, by name.
+    pub counters: &'a HashMap<String, IfaceBytes>,
     pub clients: &'a [VpnClientProc],
     pub manual: &'a VpnManual,
     pub status: &'a OutboundStatus,
@@ -141,7 +145,8 @@ pub(crate) struct VpnView<'a> {
 ///       "addresses": ["10.8.0.5/24"],
 ///       "routeCount": 12, "routes": ["10.8.0.0/16", "172.16.0.0/12"],
 ///       "dns": ["10.8.0.1"], "searchDomains": ["corp.example.com"],
-///       "holdsDefault": false } ],
+///       "holdsDefault": false,
+///       "rxBytes": 52341234 | null, "txBytes": 1048576 | null } ],
 ///   "clients": [
 ///     { "pid": 1234, "name": "openconnect",
 ///       "path": "/usr/sbin/openconnect", "iface": "tun0" } ],
@@ -158,7 +163,10 @@ pub(crate) struct VpnView<'a> {
 /// DNS configuration; `tunnel` is false for container bridges / VM
 /// switches (followed like the rest, but not somebody's VPN — the UI
 /// hides them). `routes`: the first few specific routes, `routeCount` all
-/// of them. `clients`: processes found holding a VPN's device (Linux);
+/// of them. `rxBytes` / `txBytes`: what the interface itself has received
+/// and sent since it came up, as the system counts it (this traffic never
+/// passes through the core, so no connection lists it); `null` when the
+/// system does not tell. `clients`: processes found holding a VPN's device (Linux);
 /// `clientApps` / `manualDomains` / `gatewayDomains`: what the
 /// configuration says by hand.
 /// The last five fields are those of `GET /network/outbound`.
@@ -191,6 +199,7 @@ pub(crate) fn vpns_body(view: &VpnView<'_>, is_container: impl Fn(&str) -> bool)
                 .filter(|(n, _)| n == name)
                 .map(|(_, net)| net.clone())
                 .collect();
+            let bytes = view.counters.get(*name);
             json!({
                 "name": name,
                 "tunnel": !is_container(name),
@@ -201,6 +210,8 @@ pub(crate) fn vpns_body(view: &VpnView<'_>, is_container: impl Fn(&str) -> bool)
                     .unwrap_or_default(),
                 "searchDomains": dns.map(|d| d.domains.clone()).unwrap_or_default(),
                 "holdsDefault": view.table.holds_default(name),
+                "rxBytes": bytes.map(|b| b.rx),
+                "txBytes": bytes.map(|b| b.tx),
             })
         })
         .collect();
@@ -449,11 +460,23 @@ mod tests {
             follow_routes: true,
             ..Default::default()
         };
+        // The system counts tun0; docker0 it does not tell about.
+        let counters = HashMap::from([
+            (
+                "tun0".to_string(),
+                IfaceBytes {
+                    rx: 5_000_000_000,
+                    tx: 1024,
+                },
+            ),
+            ("enp3s0".to_string(), IfaceBytes { rx: 1, tx: 2 }),
+        ]);
         let body = vpns_body(
             &VpnView {
                 table: &table,
                 dns: &dns,
                 addresses: &addresses,
+                counters: &counters,
                 clients: &clients,
                 manual: &manual,
                 status: &status,
@@ -466,10 +489,11 @@ mod tests {
             json!([
                 {"name": "docker0", "tunnel": false, "addresses": [], "routeCount": 1,
                  "routes": ["172.17.0.0/16"], "dns": [], "searchDomains": [],
-                 "holdsDefault": false},
+                 "holdsDefault": false, "rxBytes": null, "txBytes": null},
                 {"name": "tun0", "tunnel": true, "addresses": ["10.8.0.5/24"], "routeCount": 2,
                  "routes": ["10.8.0.0/16", "172.16.0.0/12"], "dns": ["10.8.0.1"],
-                 "searchDomains": ["corp.example.com"], "holdsDefault": false},
+                 "searchDomains": ["corp.example.com"], "holdsDefault": false,
+                 "rxBytes": 5_000_000_000u64, "txBytes": 1024},
             ])
         );
         assert_eq!(

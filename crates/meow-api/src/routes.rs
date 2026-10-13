@@ -505,6 +505,11 @@ async fn network_vpns() -> Json<serde_json::Value> {
         not(any(target_os = "android", target_os = "ios"))
     )))]
     let is_container = |_: &str| false;
+    // The other VPNs' traffic never passes through the core: the
+    // interfaces' own counters are all there is to show of it.
+    let counters = tokio::task::spawn_blocking(meow_common::iface_counters::read_iface_bytes)
+        .await
+        .unwrap_or_default();
     let dns = meow_common::route_table::iface_dns();
     let clients = meow_common::route_table::vpn_clients();
     let manual = meow_common::route_table::vpn_manual();
@@ -514,6 +519,7 @@ async fn network_vpns() -> Json<serde_json::Value> {
             table: &table,
             dns: &dns,
             addresses: &addresses,
+            counters: &counters,
             clients: &clients,
             manual: &manual,
             status: &status,
