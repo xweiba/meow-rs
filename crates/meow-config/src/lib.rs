@@ -105,6 +105,9 @@ pub struct GeneralConfig {
     /// `find-process-mode: always`: every connection's process is looked
     /// up and recorded (not only for process rules).
     pub find_process_always: bool,
+    /// PaoPao (`connection-history-limit`): ended connections kept; None
+    /// = the core's default.
+    pub connection_history_limit: Option<usize>,
 }
 
 /// Single source of truth for the effective `ipv6` setting of a config
@@ -4213,6 +4216,7 @@ async fn build_config_inner(
             .find_process_mode
             .as_deref()
             .is_some_and(|m| m.eq_ignore_ascii_case("always")),
+        connection_history_limit: raw.connection_history_limit,
     };
 
     // Registry the provider nodes' `dialer-proxy` targets resolve against

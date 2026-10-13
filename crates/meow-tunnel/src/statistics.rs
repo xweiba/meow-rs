@@ -169,6 +169,10 @@ pub struct ConnectionInfo {
     /// Renamed so the derived JSON matches the REST API's camelCase field.
     #[serde(rename = "rulePayload")]
     pub rule_payload: SmolStr,
+    /// PaoPao: order of arrival (1, 2, 3 …), going on from the history's
+    /// highest across restarts: the number a list shows it by, the same
+    /// while it lives and once it is in [`Statistics::history`].
+    pub seq: u64,
 }
 
 /// Values exposed by the mihomo `/traffic` stream, captured together under
@@ -202,6 +206,9 @@ pub struct Statistics {
     /// never need the metadata and serialization fields used by the API.
     headless_connections: OnceLock<DashMap<usize, Arc<ConnCounters>>>,
     pub rule_match: Arc<RuleMatchCounters>,
+    /// PaoPao: the API-tracked connections that ended.
+    history: crate::history::ConnectionHistory,
+    seq: std::sync::atomic::AtomicU64,
 }
 
 impl Statistics {
@@ -213,7 +220,45 @@ impl Statistics {
             connections: DashMap::new(),
             headless_connections: OnceLock::new(),
             rule_match: Arc::new(RuleMatchCounters::new()),
+            history: crate::history::ConnectionHistory::new(),
+            seq: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// PaoPao: the connections that ended (`GET /connections/history`).
+    pub fn history(&self) -> &crate::history::ConnectionHistory {
+        &self.history
+    }
+
+    /// PaoPao: where the history is saved; what was saved there is read,
+    /// and numbering goes on from it.
+    pub fn open_history(&self, path: &std::path::Path) {
+        self.history.open(path);
+        self.seq
+            .fetch_max(self.history.last_seq(), Ordering::Relaxed);
+    }
+
+    // `Int` is `i32` on 32-bit targets.
+    #[allow(clippy::useless_conversion)]
+    fn remember(&self, info: ConnectionInfo) {
+        let end_ms = crate::history::now_ms();
+        self.history.push(crate::history::EndedConnection {
+            id: info.id,
+            upload: i64::from(info.counters.upload_bytes()),
+            download: i64::from(info.counters.download_bytes()),
+            interface: info.counters.interface(),
+            metadata: info.metadata,
+            start: info.start,
+            chains: info.chains,
+            rule: info.rule,
+            rule_payload: info.rule_payload,
+            end: chrono_now(),
+            end_ms,
+            seq: info.seq,
+            rev: 0,
+            count: 1,
+            first: None,
+        });
     }
 
     pub fn add_upload(&self, n: Int) {
@@ -314,6 +359,7 @@ impl Statistics {
             chains,
             rule,
             rule_payload,
+            seq: self.seq.fetch_add(1, Ordering::Relaxed) + 1,
         };
         self.connections.insert(uuid, info);
         (uuid, counters)
@@ -353,6 +399,7 @@ impl Statistics {
     pub fn close_connection(&self, id: Uuid) {
         if let Some((_, info)) = self.connections.remove(&id) {
             info.counters.close();
+            self.remember(info);
         }
     }
 
@@ -395,13 +442,20 @@ impl Statistics {
     /// Returns the number of closure requests, not completed socket teardowns.
     pub fn close_all_connections_counted(&self) -> usize {
         let mut closed = 0;
+        let mut ended = Vec::new();
         // Signal and remove under the same shard lock. A separate iteration
         // followed by clear could erase newly inserted, unsignalled entries.
         self.connections.retain(|_, info| {
             info.counters.close();
             closed += 1;
+            ended.push(info.clone());
             false
         });
+        // Oldest first, as they would have ended one by one.
+        ended.sort_by_key(|info| info.seq);
+        for info in ended {
+            self.remember(info);
+        }
         if let Some(connections) = self.headless_connections.get() {
             connections.retain(|_, counters| {
                 counters.close();
@@ -546,5 +600,63 @@ mod outbound_interface_tests {
         let snap = balancer.snapshot(std::time::Instant::now());
         assert_eq!(snap.interfaces[1].connections, 0);
         assert_eq!(snap.interfaces[1].download, 30);
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    /// PaoPao: a connection that ends goes into the history with what it
+    /// moved and its number; the numbering is the one `/connections` shows.
+    #[test]
+    fn an_ended_connection_is_kept_with_its_bytes_and_number() {
+        let stats = Statistics::new();
+        let track = |host: &str| {
+            stats.track_connection_with_counters(
+                Metadata {
+                    host: host.into(),
+                    dst_port: 443,
+                    ..Metadata::default()
+                },
+                "DOMAIN".into(),
+                host.into(),
+                smallvec::smallvec![Arc::from("DIRECT")],
+            )
+        };
+        let (a, counters) = track("a.example");
+        let (b, _) = track("b.example");
+        let live = serde_json::to_value(stats.active_connections_view()).unwrap();
+        let mut seqs: Vec<u64> = live
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["seq"].as_u64().unwrap())
+            .collect();
+        seqs.sort_unstable();
+        assert_eq!(seqs, vec![1, 2]);
+
+        stats.record_upload(&counters, 10);
+        stats.record_download(&counters, 30);
+        stats.close_connection(a);
+        // Closing twice (the API, then the owner) keeps it once.
+        stats.close_connection(a);
+        let d = stats.history().delta(0);
+        assert_eq!(d.kept, vec![1]);
+        let v = serde_json::to_value(&d.changed[0]).unwrap();
+        assert_eq!(v["id"], a.to_string());
+        assert_eq!(
+            (v["upload"].as_i64(), v["download"].as_i64()),
+            (Some(10), Some(30))
+        );
+        assert_eq!(v["metadata"]["host"], "a.example");
+        assert_eq!(v["rulePayload"], "a.example");
+        assert!(v["end"].as_str().unwrap().ends_with('Z'));
+
+        // Everything closed at once: each kept, in the order they came.
+        let (_c, _) = track("c.example");
+        stats.close_all_connections();
+        assert_eq!(stats.history().delta(0).kept, vec![1, 2, 3]);
+        let _ = b;
     }
 }

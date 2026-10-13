@@ -1249,6 +1249,25 @@ async fn run(
     tunnel.set_dialer_registry(config.provider_dialer_registry.clone());
     tunnel.set_mode(config.general.mode);
     tunnel.set_find_process_always(config.general.find_process_always);
+    let history_stats = Arc::clone(tunnel.statistics());
+    if config.api.external_controller.is_some() {
+        // PaoPao: the ended connections, kept across restarts beside the
+        // rest of the core's state and saved as they change.
+        let stats = Arc::clone(&history_stats);
+        if let Some(limit) = config.general.connection_history_limit {
+            stats.history().set_limit(limit);
+        }
+        stats.open_history(&meow_common::resolved_home_dir().join("connections.json"));
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let stats = Arc::clone(&stats);
+                let _ = tokio::task::spawn_blocking(move || stats.history().save()).await;
+            }
+        });
+    }
     tunnel.update_routing(config.proxies, config.rules, config.dialer_registry);
     tunnel.spawn_background_tasks();
 
@@ -1783,6 +1802,9 @@ async fn run(
     // Wait for shutdown signal
     shutdown.wait().await?;
     info!("Shutting down...");
+    // What is still open ends with the core, and is kept as such.
+    history_stats.close_all_connections();
+    history_stats.history().save();
 
     Ok(())
 }

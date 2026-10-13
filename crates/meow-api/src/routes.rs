@@ -259,6 +259,12 @@ pub fn create_router_with_checkin(
         .route("/connections/{id}", delete(close_connection))
         .route("/connections", delete(close_all_connections))
         .route(
+            "/connections/history",
+            get(get_connection_history)
+                .put(set_connection_history)
+                .delete(clear_connection_history),
+        )
+        .route(
             "/configs",
             get(get_configs).patch(update_configs).put(put_configs),
         )
@@ -783,6 +789,9 @@ struct ConnectionsResponse<'a> {
     upload_total: i64,
     download_total: i64,
     memory: u64,
+    /// PaoPao: changes whenever `GET /connections/history` would answer
+    /// differently, so a reader asks for it only then.
+    history_rev: u64,
     /// Serialised straight from the live table — no per-connection
     /// `serde_json::Value` tree, no cloned snapshot Vec (audit M8). The
     /// JSON shape (id/upload/download/start/chains/rule/rulePayload) comes
@@ -841,6 +850,7 @@ async fn connections_json(state: &AppState) -> String {
         upload_total: upload,
         download_total: download,
         memory,
+        history_rev: stats.history().rev(),
         connections: stats.active_connections_view(),
     })
     .unwrap_or_else(|_| {
@@ -883,6 +893,53 @@ async fn get_connections(
 
     let body = connections_json(&state).await;
     ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+}
+
+#[derive(Deserialize)]
+struct HistoryParams {
+    after: Option<u64>,
+}
+
+/// PaoPao: `GET /connections/history[?after=<rev>]` → the connections that
+/// ended, as the core keeps them: `{rev, limit, changed: [...], kept:
+/// [seq...]}`. `changed` holds the records added or changed after `after`
+/// (all of them without it), each an entry of `GET /connections` with
+/// `end`, `seq` and — when it stands for several tries that moved nothing —
+/// `count` and `first`; `kept` names every record still there, so a reader
+/// drops what it holds beyond those. Nothing changed since `after`: only
+/// `{rev, limit}`.
+async fn get_connection_history(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HistoryParams>,
+) -> Response {
+    let history = state.tunnel.statistics().history();
+    // From the start (`0`) always the whole answer: `kept` may be empty.
+    if let Some(after) = params.after.filter(|a| *a != 0 && *a == history.rev()) {
+        return Json(serde_json::json!({"rev": after, "limit": history.limit()})).into_response();
+    }
+    Json(history.delta(params.after.unwrap_or(0))).into_response()
+}
+
+#[derive(Deserialize)]
+struct HistoryLimit {
+    limit: usize,
+}
+
+/// PaoPao: `PUT /connections/history` `{"limit": n}` keeps that many from
+/// now on (what is over goes at once; `0` keeps none). Until the next
+/// start, when `connection-history-limit` says it again.
+async fn set_connection_history(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<HistoryLimit>,
+) -> StatusCode {
+    state.tunnel.statistics().history().set_limit(body.limit);
+    StatusCode::NO_CONTENT
+}
+
+/// PaoPao: `DELETE /connections/history` forgets the ended connections.
+async fn clear_connection_history(State(state): State<Arc<AppState>>) -> StatusCode {
+    state.tunnel.statistics().history().clear();
+    StatusCode::NO_CONTENT
 }
 
 async fn close_connection(

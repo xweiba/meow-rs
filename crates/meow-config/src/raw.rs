@@ -175,6 +175,9 @@ pub struct RawConfig {
     /// connection (shown with it: the app filters connections by it);
     /// otherwise only when a rule needs it (`strict`, the default) .
     pub find_process_mode: Option<String>,
+    /// PaoPao: how many ended connections the core keeps for
+    /// `GET /connections/history` (default 500; `0` keeps none).
+    pub connection_history_limit: Option<usize>,
     pub external_controller: Option<String>,
     /// Path to a directory of static files for a third-party web dashboard
     /// (e.g. metacubexd, yacd). When set, it is served at `/ui` instead of the

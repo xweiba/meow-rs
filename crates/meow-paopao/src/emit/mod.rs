@@ -411,6 +411,9 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
     if rt.find_process {
         c.insert("find-process-mode".into(), "always".into());
     }
+    if let Some(n) = rt.connection_history {
+        c.insert("connection-history-limit".into(), n.max(0).into());
+    }
     let level = if rt.log_level == "warn" {
         "warning"
     } else {

@@ -76,6 +76,8 @@ pub struct RuntimeOptions {
     pub mitm_port: Option<i64>,
     /// Look up every connection's program (desktops).
     pub find_process: bool,
+    /// Ended connections the core keeps; None = its default.
+    pub connection_history: Option<i64>,
     /// The app itself as an app matcher (`path:<dir>` / `name:<file>`):
     /// its connections through the TUN go direct. None (phones, an older
     /// controller) = no such rule.
@@ -269,6 +271,7 @@ impl Default for RuntimeOptions {
             route_port: None,
             mitm_port: None,
             find_process: false,
+            connection_history: None,
             self_app: None,
             vpn: None,
             outbound: None,
@@ -319,6 +322,7 @@ impl RuntimeOptions {
             route_port: int_of(v.get("routePort")),
             mitm_port: int_of(v.get("mitmPort")),
             find_process: bool_of(v.get("findProcess"), d.find_process),
+            connection_history: int_of(v.get("connectionHistory")),
             self_app: str_of(v.get("selfApp")),
             vpn: v.get("vpn").and_then(VpnOptions::from_json),
             outbound: v.get("outbound").and_then(OutboundOptions::from_json),
@@ -452,6 +456,7 @@ impl fmt::Debug for RuntimeOptions {
             .field("route_port", &self.route_port)
             .field("mitm_port", &self.mitm_port)
             .field("find_process", &self.find_process)
+            .field("connection_history", &self.connection_history)
             .field("self_app", &self.self_app)
             .field("vpn", &self.vpn)
             .finish()

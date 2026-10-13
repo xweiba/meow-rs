@@ -136,6 +136,9 @@ async fn relay_churn_does_not_leak_connections_or_heap() {
     let echo = spawn_echo_server().await;
     let tunnel = direct_tunnel();
     let stats = Arc::clone(tunnel.statistics());
+    // PaoPao: the ended connections are kept on purpose (bounded by the
+    // history's limit); what is measured here is the relay path alone.
+    stats.history().set_limit(0);
 
     // Warm up: prime DashMap buckets, tokio task slabs, echo-server accept loop.
     const WARM: u32 = 100;

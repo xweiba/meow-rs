@@ -4,6 +4,7 @@
 //! [`Tunnel`] is the shared engine listeners hand connections to.
 
 pub mod health_check;
+pub mod history;
 pub mod match_engine;
 pub mod relay;
 pub mod rule_ir;
