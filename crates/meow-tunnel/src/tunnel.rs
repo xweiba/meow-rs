@@ -344,8 +344,9 @@ impl TunnelInner {
     ///   DIRECT — the dial then binds to that VPN's interface by the route
     ///   snapshot. Any inbound: a program using the proxy port names an
     ///   intranet host just the same. A destination known by name only is
-    ///   judged when the name is one of the VPN's own (and so resolved at
-    ///   the VPN's DNS); the address found is returned for the dial.
+    ///   resolved first — at the VPN's DNS when the name is one of its
+    ///   own — whenever that VPN has routes; the address found is returned
+    ///   for the dial.
     ///
     /// `None` — the usual case, at the cost of two atomic-sized reads —
     /// routes the connection as usual.
@@ -382,7 +383,14 @@ impl TunnelInner {
         let mut resolved = None;
         let ip = match metadata.dst_ip {
             Some(ip) => ip.to_canonical(),
-            None if !metadata.host.is_empty() && rt::vpn_dns_for(&metadata.host).is_some() => {
+            // A name the VPN's DNS answers, or any name while that VPN has
+            // routes of its own: a public name can point into them (the
+            // VPN pushed a host route for a server it fronts), and only
+            // the address tells. A miss leaves the metadata as it was.
+            None if !metadata.host.is_empty()
+                && (rt::vpn_dns_for(&metadata.host).is_some()
+                    || meow_common::outbound_iface::has_other_vpn_routes()) =>
+            {
                 let ip = self.resolver().resolve_ip_real(&metadata.host).await?;
                 resolved = Some(ip);
                 ip
@@ -2580,7 +2588,23 @@ mod tests {
             self as rt, RawRoute, RouteIfaceKind, RouteTable as Routes,
         };
 
-        let tunnel = test_tunnel();
+        // Two public names in the hosts table: one points into the VPN's
+        // route (a server that VPN fronts), one does not.
+        let mut hosts = DomainTrie::new();
+        for (name, ip) in [
+            ("fronted.example.com", "10.99.1.2"),
+            ("plain.example.com", "93.184.216.34"),
+        ] {
+            hosts.insert(name, vec![ip.parse::<IpAddr>().unwrap()].into());
+        }
+        let tunnel = Tunnel::new(Arc::new(Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::Normal,
+            hosts,
+            true,
+            true,
+        )));
         let res = meow_config::rebuild_from_raw(&Default::default()).unwrap();
         tunnel.update_routing(
             res.proxies,
@@ -2654,6 +2678,30 @@ mod tests {
         assert_eq!(
             inner
                 .explain(&to("10.99.1.1", ConnType::Socks5), None)
+                .await
+                .rule,
+            "OtherRoute"
+        );
+        // By name, with no DNS of the VPN's for it: the address decides,
+        // and a miss leaves the name for the proxy to resolve.
+        let named = |host: &str, conn_type| Metadata {
+            dst_ip: None,
+            host: host.into(),
+            ..to("0.0.0.0", conn_type)
+        };
+        for conn_type in [ConnType::Tun, ConnType::Socks5] {
+            let mut meta = named("fronted.example.com", conn_type);
+            let got = inner.resolve_proxy_lazy(&mut meta).await.unwrap();
+            assert_eq!(got.rule_name, "OtherRoute", "named, {conn_type:?}");
+            assert_eq!(meta.dst_ip, Some("10.99.1.2".parse().unwrap()));
+            let mut meta = named("plain.example.com", conn_type);
+            let got = inner.resolve_proxy_lazy(&mut meta).await.unwrap();
+            assert_eq!(got.adapter.adapter_type(), AdapterType::Reject);
+            assert_eq!(meta.dst_ip, None, "left for the rules");
+        }
+        assert_eq!(
+            inner
+                .explain(&named("fronted.example.com", ConnType::Socks5), None)
                 .await
                 .rule,
             "OtherRoute"

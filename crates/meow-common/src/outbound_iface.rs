@@ -428,6 +428,17 @@ pub fn other_vpn_route(dest: IpAddr) -> Option<crate::route_table::RouteHit> {
         .filter(|hit| !crate::route_table::is_own_tun(&hit.iface))
 }
 
+/// PaoPao: whether any destination can be another VPN's right now — it has
+/// a specific route and `tun.follow-system-routes` is on. Lets the tunnel
+/// skip resolving names when there is nothing to compare the address to.
+pub fn has_other_vpn_routes() -> bool {
+    follows_system_routes()
+        && crate::route_table::route_table().specific().any(|route| {
+            route.kind == crate::route_table::RouteIfaceKind::OtherVpn
+                && !crate::route_table::is_own_tun(&route.iface)
+        })
+}
+
 /// Bind `socket` — created in `domain` — to the installed interface, if one
 /// is installed. No-op when none is. Callers must invoke this **before**
 /// `connect()`/`bind()` so the very first packet already takes the physical
