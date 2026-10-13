@@ -43,6 +43,21 @@ pub enum UrlTestError {
 /// `https://` targets are tunneled through a client-side TLS handshake
 /// (`meow_transport::tls::TlsLayer`, BoringSSL by default) before the GET. HTTP targets go over the raw
 /// dialed connection.
+/// mihomo's `unified-delay`: a probe makes a second request on the
+/// connection the first one opened and reports only that one — the round
+/// trip through the proxy, without the dial and the handshakes (which a
+/// connection pays once, and which differ by protocol more than by line).
+static UNIFIED_DELAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turns `unified-delay` on or off for every probe from now on.
+pub fn set_unified_delay(on: bool) {
+    UNIFIED_DELAY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn unified_delay() -> bool {
+    UNIFIED_DELAY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub async fn url_test(
     adapter: &dyn ProxyAdapter,
     url: &str,
@@ -76,10 +91,12 @@ pub async fn url_test(
         ..Default::default()
     };
 
-    let fut = probe_once(adapter, metadata, parsed, ranges);
+    let fut = probe_once(adapter, metadata, parsed, ranges, unified_delay());
     match tokio::time::timeout(timeout, fut).await {
-        Ok(Ok(())) => {
-            let delay = start.elapsed().as_millis().min(u16::MAX as u128) as u16;
+        Ok(Ok(second)) => {
+            // `unified-delay`: the second round trip alone, when it was made.
+            let took = second.unwrap_or_else(|| start.elapsed());
+            let delay = took.as_millis().min(u16::MAX as u128) as u16;
             // Collapse sub-millisecond probes to 1 so callers can treat 0 as
             // the "probe did not complete" sentinel when they choose to.
             let delay = delay.max(1);
@@ -211,7 +228,8 @@ async fn probe_once(
     metadata: meow_common::Metadata,
     parsed: ParsedUrl,
     ranges: Vec<(u16, u16)>,
-) -> Result<(), String> {
+    unified: bool,
+) -> Result<Option<Duration>, String> {
     let conn = adapter
         .dial_tcp(&metadata)
         .await
@@ -227,9 +245,79 @@ async fn probe_once(
             .connect(Box::new(conn))
             .await
             .map_err(|e| format!("tls: {e}"))?;
-        send_get_and_check(tls, &parsed, &ranges).await
+        probe_stream(tls, &parsed, &ranges, unified).await
     } else {
-        send_get_and_check(conn, &parsed, &ranges).await
+        probe_stream(conn, &parsed, &ranges, unified).await
+    }
+}
+
+/// One probe over an open stream. Plain: a `GET`, done at its status line
+/// (`None`). `unified-delay`: a `HEAD` that keeps the connection, then a
+/// second one timed alone (`Some`); a second one that fails leaves the
+/// whole probe's time to stand, as mihomo's does.
+async fn probe_stream<S>(
+    mut stream: S,
+    parsed: &ParsedUrl,
+    ranges: &[(u16, u16)],
+    unified: bool,
+) -> Result<Option<Duration>, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if !unified {
+        return send_get_and_check(stream, parsed, ranges)
+            .await
+            .map(|()| None);
+    }
+    let accepted = |status: u16| ranges.iter().any(|(lo, hi)| status >= *lo && status <= *hi);
+    write_request(&mut stream, parsed, "HEAD", "keep-alive").await?;
+    let status = read_status_line(&mut stream).await?;
+    if !accepted(status) {
+        return Err(format!("unexpected status {status}"));
+    }
+    // The rest of the first answer must be off the wire before the second
+    // is read (a HEAD has no body).
+    if read_past_headers(&mut stream).await.is_err() {
+        return Ok(None);
+    }
+    let second = Instant::now();
+    let again = async {
+        write_request(&mut stream, parsed, "HEAD", "close").await?;
+        read_status_line(&mut stream).await
+    };
+    Ok(match again.await {
+        Ok(status) if accepted(status) => Some(second.elapsed()),
+        _ => None,
+    })
+}
+
+/// Reads up to and including the blank line that ends a response's
+/// headers (the status line is already read).
+async fn read_past_headers<S>(stream: &mut S) -> Result<(), String>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    // The status line's own line break counts towards the blank line.
+    let mut tail = [0u8, 0, b'\r', b'\n'];
+    let mut byte = [0u8; 1];
+    for _ in 0..16 * 1024 {
+        if tail == *b"\r\n\r\n" {
+            return Ok(());
+        }
+        let n = stream
+            .read(&mut byte)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
+        if n == 0 {
+            return Err("eof in headers".into());
+        }
+        tail.rotate_left(1);
+        tail[3] = byte[0];
+    }
+    if tail == *b"\r\n\r\n" {
+        Ok(())
+    } else {
+        Err("headers too long".into())
     }
 }
 
@@ -344,6 +432,18 @@ async fn write_get<S>(stream: &mut S, parsed: &ParsedUrl) -> Result<(), String>
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
+    write_request(stream, parsed, "GET", "close").await
+}
+
+async fn write_request<S>(
+    stream: &mut S,
+    parsed: &ParsedUrl,
+    method: &str,
+    connection: &str,
+) -> Result<(), String>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
     // Host header includes the non-default port so virtual-hosted origins
     // route correctly; mirrors Go net/http's default behaviour.
     use std::io::Write as _;
@@ -353,8 +453,8 @@ where
     if parsed.port == default_port {
         write!(
             cursor,
-            "GET {path} HTTP/1.1\r\nHost: {host}\r\n\
-             User-Agent: clash.meta/{ver}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: {host}\r\n\
+             User-Agent: clash.meta/{ver}\r\nAccept: */*\r\nConnection: {connection}\r\n\r\n",
             path = parsed.path,
             host = parsed.host,
             ver = env!("CARGO_PKG_VERSION"),
@@ -362,8 +462,8 @@ where
     } else {
         write!(
             cursor,
-            "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n\
-             User-Agent: clash.meta/{ver}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n\
+             User-Agent: clash.meta/{ver}\r\nAccept: */*\r\nConnection: {connection}\r\n\r\n",
             path = parsed.path,
             host = parsed.host,
             port = parsed.port,
@@ -548,6 +648,51 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    /// A server slow to answer the first request (a handshake's stand-in)
+    /// and quick on the second: `unified-delay` reports the second alone,
+    /// and falls back to the whole probe when there is no second answer.
+    #[tokio::test]
+    async fn unified_delay_times_the_second_request() {
+        async fn serve(second: bool) -> u16 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut req = [0u8; 512];
+                let n = s.read(&mut req).await.unwrap();
+                assert!(req[..n].starts_with(b"HEAD /generate_204 HTTP/1.1\r\n"));
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let answer = b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
+                s.write_all(answer).await.unwrap();
+                if second {
+                    let n = s.read(&mut req).await.unwrap();
+                    assert!(req[..n].starts_with(b"HEAD "));
+                    s.write_all(answer).await.unwrap();
+                }
+            });
+            port
+        }
+        let ranges = [(200u16, 299u16)];
+        for second in [true, false] {
+            let port = serve(second).await;
+            let parsed =
+                ParsedUrl::parse(&format!("http://127.0.0.1:{port}/generate_204")).unwrap();
+            let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let start = Instant::now();
+            let took = probe_stream(stream, &parsed, &ranges, true).await.unwrap();
+            assert!(start.elapsed() >= Duration::from_millis(300));
+            match took {
+                Some(d) => {
+                    assert!(second);
+                    assert!(d < Duration::from_millis(200), "{d:?}");
+                }
+                None => assert!(!second),
+            }
+        }
     }
 
     #[test]

@@ -175,6 +175,9 @@ pub struct RawConfig {
     /// connection (shown with it: the app filters connections by it);
     /// otherwise only when a rule needs it (`strict`, the default) .
     pub find_process_mode: Option<String>,
+    /// mihomo's `unified-delay`: a delay probe reports its second request
+    /// on the same connection alone (no dial, no handshakes). Default false.
+    pub unified_delay: Option<bool>,
     /// PaoPao: how many ended connections the core keeps for
     /// `GET /connections/history` (default 500; `0` keeps none).
     pub connection_history_limit: Option<usize>,

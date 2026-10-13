@@ -1249,6 +1249,7 @@ async fn run(
     tunnel.set_dialer_registry(config.provider_dialer_registry.clone());
     tunnel.set_mode(config.general.mode);
     tunnel.set_find_process_always(config.general.find_process_always);
+    meow_proxy::health::set_unified_delay(config.general.unified_delay);
     let history_stats = Arc::clone(tunnel.statistics());
     if config.api.external_controller.is_some() {
         // PaoPao: the ended connections, kept across restarts beside the

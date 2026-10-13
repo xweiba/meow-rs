@@ -356,6 +356,7 @@
       ],
       "mode": "rule",
       "find-process-mode": "always",
+      "unified-delay": true,
       "log-level": "warning",
       "ipv6": false,
       "external-controller": "127.0.0.1:40000",

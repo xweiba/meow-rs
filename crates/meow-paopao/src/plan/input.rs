@@ -76,6 +76,8 @@ pub struct RuntimeOptions {
     pub mitm_port: Option<i64>,
     /// Look up every connection's program (desktops).
     pub find_process: bool,
+    /// Delay probes report the round trip alone (`unified-delay`).
+    pub unified_delay: bool,
     /// Ended connections the core keeps; None = its default.
     pub connection_history: Option<i64>,
     /// The app itself as an app matcher (`path:<dir>` / `name:<file>`):
@@ -271,6 +273,7 @@ impl Default for RuntimeOptions {
             route_port: None,
             mitm_port: None,
             find_process: false,
+            unified_delay: true,
             connection_history: None,
             self_app: None,
             vpn: None,
@@ -322,6 +325,7 @@ impl RuntimeOptions {
             route_port: int_of(v.get("routePort")),
             mitm_port: int_of(v.get("mitmPort")),
             find_process: bool_of(v.get("findProcess"), d.find_process),
+            unified_delay: bool_of(v.get("unifiedDelay"), d.unified_delay),
             connection_history: int_of(v.get("connectionHistory")),
             self_app: str_of(v.get("selfApp")),
             vpn: v.get("vpn").and_then(VpnOptions::from_json),
@@ -456,6 +460,7 @@ impl fmt::Debug for RuntimeOptions {
             .field("route_port", &self.route_port)
             .field("mitm_port", &self.mitm_port)
             .field("find_process", &self.find_process)
+            .field("unified_delay", &self.unified_delay)
             .field("connection_history", &self.connection_history)
             .field("self_app", &self.self_app)
             .field("vpn", &self.vpn)

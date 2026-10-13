@@ -105,6 +105,8 @@ pub struct GeneralConfig {
     /// `find-process-mode: always`: every connection's process is looked
     /// up and recorded (not only for process rules).
     pub find_process_always: bool,
+    /// `unified-delay`: see [`meow_proxy::health::set_unified_delay`].
+    pub unified_delay: bool,
     /// PaoPao (`connection-history-limit`): ended connections kept; None
     /// = the core's default.
     pub connection_history_limit: Option<usize>,
@@ -4216,6 +4218,7 @@ async fn build_config_inner(
             .find_process_mode
             .as_deref()
             .is_some_and(|m| m.eq_ignore_ascii_case("always")),
+        unified_delay: raw.unified_delay.unwrap_or(false),
         connection_history_limit: raw.connection_history_limit,
     };
 

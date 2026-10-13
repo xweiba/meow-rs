@@ -97,14 +97,15 @@ fn runtime_variants() {
     let c = &out.config;
     let keys: Vec<&str> = c.keys().map(String::as_str).collect();
     assert_eq!(
-        &keys[..6],
+        &keys[..7],
         [
             "mixed-port",
             "bind-address",
             "allow-lan",
             "mode",
+            "unified-delay",
             "log-level",
-            "ipv6"
+            "ipv6",
         ]
     );
     assert_eq!(c["bind-address"], "127.0.0.1");

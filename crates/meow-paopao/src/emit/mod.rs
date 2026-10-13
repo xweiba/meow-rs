@@ -411,6 +411,9 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
     if rt.find_process {
         c.insert("find-process-mode".into(), "always".into());
     }
+    if rt.unified_delay {
+        c.insert("unified-delay".into(), true.into());
+    }
     if let Some(n) = rt.connection_history {
         c.insert("connection-history-limit".into(), n.max(0).into());
     }
