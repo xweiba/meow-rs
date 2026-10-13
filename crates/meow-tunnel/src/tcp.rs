@@ -459,14 +459,17 @@ pub async fn route_inbound_tcp<C>(
                     }
                 }
                 Err(e) => {
+                    let app = dial_error_app(inner, &metadata).await;
                     warn!(
-                        "{} {} dial error: {} [rule {}({}) using {}]",
-                        metadata.conn_type,
-                        metadata.remote_address(),
-                        e,
-                        route_rule,
-                        route_payload,
-                        proxy.name()
+                        "{}",
+                        dial_error_line(
+                            &metadata,
+                            &e,
+                            &route_rule,
+                            &route_payload,
+                            proxy.name(),
+                            &app
+                        )
                     );
                 }
             }
@@ -474,8 +477,166 @@ pub async fn route_inbound_tcp<C>(
         .await;
 }
 
+/// The line a failed dial is logged as (PaoPao: the app reads it for its
+/// list of failing targets):
+///
+/// ```text
+/// <inbound> <host:port> dial error: <error> [rule <Rule>(<payload>) using <outbound>]
+/// <inbound> <host:port> dial error: <error> [rule <Rule>(<payload>) using <outbound>] [app <name>|<path>]
+/// ```
+///
+/// `app` is [`dial_error_app_suffix`]: empty when the program is not
+/// known, so that line is the first form, byte for byte.
+fn dial_error_line(
+    metadata: &Metadata,
+    error: &dyn std::fmt::Display,
+    rule: &str,
+    payload: &str,
+    outbound: &str,
+    app: &str,
+) -> String {
+    format!(
+        "{} {} dial error: {} [rule {}({}) using {}]{}",
+        metadata.conn_type,
+        metadata.remote_address(),
+        error,
+        rule,
+        payload,
+        outbound,
+        app
+    )
+}
+
+/// ` [app <name>|<path>]` for the dial-error line; empty without a name.
+/// `<path>` may be empty (Android names an app by its package only).
+///
+/// A program's name or path may hold anything, so in both `%`, `|`, `[`,
+/// `]` and control characters are written `%XX` (two upper-case hex
+/// digits of the byte): the bracket is the last thing on the line, holds
+/// no bracket of its own and exactly one `|`, and a name cannot break the
+/// line in two. Everything else (spaces, non-ASCII) is written as it is.
+fn dial_error_app_suffix(name: &str, path: &str) -> String {
+    use std::fmt::Write;
+    if name.is_empty() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(name.len() + path.len() + 8);
+    out.push_str(" [app ");
+    for (i, part) in [name, path].into_iter().enumerate() {
+        if i > 0 {
+            out.push('|');
+        }
+        for c in part.chars() {
+            if matches!(c, '%' | '|' | '[' | ']') || c.is_ascii_control() {
+                let _ = write!(out, "%{:02X}", c as u32);
+            } else {
+                out.push(c);
+            }
+        }
+    }
+    out.push(']');
+    out
+}
+
+/// The program behind a connection whose dial failed, as
+/// [`dial_error_app_suffix`]. Taken from the metadata when the connection
+/// carries it (`find-process-mode: always`, already looked up). Otherwise
+/// looked up now — on this failure path only — when the rules in force
+/// use process lookup; with `always` on, the lookup already ran for this
+/// connection and found nobody, so it is not repeated. Empty when not
+/// known: a forwarded device, a program that has exited, a platform
+/// without process lookup.
+async fn dial_error_app(inner: &TunnelInner, metadata: &Metadata) -> String {
+    use std::sync::atomic::Ordering;
+    if !metadata.process.is_empty() {
+        return dial_error_app_suffix(&metadata.process, &metadata.process_path);
+    }
+    if !meow_common::process_lookup::PROCESS_LOOKUP_SUPPORTED
+        || inner.find_process_always.load(Ordering::Relaxed)
+        || !inner.route().compiled_rules.needs_process_lookup()
+    {
+        return String::new();
+    }
+    match crate::match_engine::maybe_enrich_with_process_async(metadata).await {
+        Some(m) => dial_error_app_suffix(&m.process, &m.process_path),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dial_error_line_names_the_program_only_when_known() {
+        let metadata = Metadata {
+            conn_type: ConnType::Tun,
+            host: "example.com".into(),
+            dst_port: 443,
+            ..Metadata::default()
+        };
+        let line = |app: &str| {
+            dial_error_line(
+                &metadata,
+                &"connection refused",
+                "GeoSite",
+                "youtube",
+                "policy:youtube",
+                app,
+            )
+        };
+        // Not known: the line as it always was.
+        let bare = format!(
+            "{} example.com:443 dial error: connection refused \
+             [rule GeoSite(youtube) using policy:youtube]",
+            metadata.conn_type
+        );
+        assert_eq!(line(&dial_error_app_suffix("", "")), bare);
+        assert_eq!(line(&dial_error_app_suffix("", "/usr/bin/curl")), bare);
+        // Known: one more bracket after the route.
+        assert_eq!(
+            line(&dial_error_app_suffix("curl", "/usr/bin/curl")),
+            format!("{bare} [app curl|/usr/bin/curl]")
+        );
+    }
+
+    #[test]
+    fn dial_error_app_escapes_what_would_break_the_bracket() {
+        assert_eq!(
+            dial_error_app_suffix(
+                "Google Chrome",
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            ),
+            " [app Google Chrome|/Applications/Google Chrome.app/Contents/MacOS/Google Chrome]"
+        );
+        // No path (Android: the package alone).
+        assert_eq!(
+            dial_error_app_suffix("com.android.chrome", ""),
+            " [app com.android.chrome|]"
+        );
+        assert_eq!(
+            dial_error_app_suffix("a|b [x]\n", "C:\\100%\\[v] 浏览器.exe"),
+            " [app a%7Cb %5Bx%5D%0A|C:\\100%25\\%5Bv%5D 浏览器.exe]"
+        );
+    }
+
+    #[tokio::test]
+    async fn dial_error_app_comes_from_the_metadata_when_it_has_it() {
+        let tunnel = test_tunnel();
+        let known = Metadata {
+            process: "curl".into(),
+            process_path: "/usr/bin/curl".into(),
+            ..Metadata::default()
+        };
+        assert_eq!(
+            dial_error_app(tunnel.inner(), &known).await,
+            " [app curl|/usr/bin/curl]"
+        );
+        // No program and no rule asking for one: nothing is looked up.
+        assert_eq!(
+            dial_error_app(tunnel.inner(), &Metadata::default()).await,
+            ""
+        );
+    }
+
     /// A group (or, without `next`, a proxy) that resolves to `next`.
     struct Hop {
         name: &'static str,
