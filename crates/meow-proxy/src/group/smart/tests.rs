@@ -152,6 +152,7 @@ fn group(lines: &[Arc<Line>]) -> SmartGroup {
             reprobe: AtomicI64::new(i64::MAX),
             loads: Loads::default(),
             started: std::sync::atomic::AtomicBool::new(true),
+            refresh_minutes: AtomicU64::new(30),
             // Echo lines answer a GET with the GET: a quick failed test.
             speed_urls: vec!["http://127.0.0.1:9/__down".into()],
             speed_tests: Arc::new(Semaphore::new(SPEED_PROBE_CONCURRENCY)),

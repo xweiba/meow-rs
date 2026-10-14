@@ -494,7 +494,17 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
         .tree
         .groups
         .iter()
-        .map(|g| Value::Object(clash_group(g, input.strategy)))
+        .map(|g| {
+            let mut m = clash_group(g, input.strategy);
+            // 后台测速间隔: how often a smart group re-probes its lines.
+            if let Some(s) = rt
+                .probe_interval
+                .filter(|_| m.get("type").and_then(Value::as_str) == Some("smart"))
+            {
+                m.insert("interval".into(), s.into());
+            }
+            Value::Object(m)
+        })
         .collect();
     if speed_test.is_some() {
         let mut g = Map::new();

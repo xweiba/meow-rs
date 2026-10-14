@@ -3174,6 +3174,11 @@ fn parse_proxy_group_inner(
                 balance,
                 true,
             );
+            // `interval`: how often the lines that matter are re-probed.
+            let group = match config.interval.filter(|s| *s > 0) {
+                Some(s) => group.with_refresh(std::time::Duration::from_secs(s)),
+                None => group,
+            };
             // PaoPao's 速度最快: by real download speed, not latency;
             // 固定出口 (sticky): one line for every site of the group.
             Ok(Arc::new(match config.strategy.as_deref() {

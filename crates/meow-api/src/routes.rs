@@ -277,6 +277,7 @@ pub fn create_router_with_checkin(
         .route("/site", get(get_site))
         .route("/smart/events", get(get_smart_events))
         .route("/smart/peaks", get(get_smart_peaks))
+        .route("/smart/health", get(get_smart_health))
         .route("/dns/results", get(get_dns_results))
         .route("/dns/query", get(dns_query_get).post(dns_query))
         .route("/cache/dns/flush", post(flush_dns_cache))
@@ -3895,6 +3896,39 @@ async fn get_smart_peaks(State(state): State<Arc<AppState>>) -> Response {
         .into_iter()
         .map(|(l, (peak, at))| (l, serde_json::json!({"peak": peak, "at": at})))
         .collect();
+    Json(out).into_response()
+}
+
+/// PaoPao: `GET /smart/health` → `{group: {"lines": n, "banned": {line:
+/// until (unix s)}, "watching": bool}}`, each smart group's lines and those
+/// sitting out now (the app's 「可用 8/11」). `watching` false: not used
+/// yet, so nothing is known of its lines.
+async fn get_smart_health(State(state): State<Arc<AppState>>) -> Response {
+    let route = state.tunnel.route_snapshot();
+    let mut out = serde_json::Map::new();
+    for (name, proxy) in route.proxies.iter() {
+        let Some(smart) = proxy
+            .as_any()
+            .and_then(|a| a.downcast_ref::<meow_proxy::group::smart::SmartGroup>())
+        else {
+            continue;
+        };
+        let names = smart.member_names();
+        let banned: serde_json::Map<String, serde_json::Value> = smart
+            .bans()
+            .into_iter()
+            .filter(|(l, _)| names.contains(l))
+            .map(|(l, until)| (l, serde_json::Value::from(until)))
+            .collect();
+        out.insert(
+            name.to_string(),
+            serde_json::json!({
+                "lines": names.len(),
+                "banned": banned,
+                "watching": smart.watching(),
+            }),
+        );
+    }
     Json(out).into_response()
 }
 

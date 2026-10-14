@@ -27,7 +27,7 @@ mod metered;
 pub mod stats;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -74,6 +74,36 @@ const SWEEP_COOLDOWN: Duration = Duration::from_secs(3600);
 /// stream over at [`CUT_GAIN_FAST`] already.
 const CUT_FAST_BPS: f64 = 3.0 * 1024.0 * 1024.0;
 const CUT_GAIN_FAST: f64 = 1.5;
+/// Background speed tests (all smart groups together) read at most this
+/// much an hour: they spend the user's line traffic, and a busy evening of
+/// slow video must not turn into gigabytes of test downloads.
+const SPEED_BUDGET_PER_HOUR: u64 = 96 << 20;
+/// How often a group re-probes the lines that matter, unless the config
+/// says (`interval`, seconds).
+const DEFAULT_REFRESH: Duration = Duration::from_secs(30 * 60);
+
+/// What background speed tests have read this hour: (hour started, bytes).
+static SPEED_SPENT: parking_lot::Mutex<Option<(Instant, u64)>> = parking_lot::Mutex::new(None);
+
+/// Takes `bytes` from this hour's [`SPEED_BUDGET_PER_HOUR`]; false (and
+/// nothing taken) when it would go over.
+fn spend_speed_budget(bytes: u64) -> bool {
+    let mut spent = SPEED_SPENT.lock();
+    let now = Instant::now();
+    let (start, used) = match *spent {
+        Some((start, used)) if now.duration_since(start) < Duration::from_secs(3600) => {
+            (start, used)
+        }
+        _ => (now, 0),
+    };
+    if used + bytes > SPEED_BUDGET_PER_HOUR {
+        *spent = Some((start, used));
+        return false;
+    }
+    *spent = Some((start, used + bytes));
+    true
+}
+
 /// Speed tests running at once, per group.
 const SPEED_PROBE_CONCURRENCY: usize = 2;
 /// One speed test reads at most this much …
@@ -192,6 +222,8 @@ struct Shared {
     loads: Loads,
     /// Upkeep (probes, the load sampler) runs: from the first dial on.
     started: std::sync::atomic::AtomicBool,
+    /// Minutes between re-probes of the lines that matter.
+    refresh_minutes: AtomicU64,
     /// Where speed tests download from ([`SPEED_URLS`]).
     speed_urls: Vec<String>,
     /// Bounds the speed tests running at once.
@@ -265,6 +297,7 @@ impl SmartGroup {
             reprobe: AtomicI64::new(0),
             loads: Loads::default(),
             started: std::sync::atomic::AtomicBool::new(false),
+            refresh_minutes: AtomicU64::new(DEFAULT_REFRESH.as_secs() / 60),
             speed_urls: SPEED_URLS.iter().map(|u| u.to_string()).collect(),
             speed_tests: Arc::new(Semaphore::new(SPEED_PROBE_CONCURRENCY)),
             sticky: std::sync::atomic::AtomicBool::new(false),
@@ -315,6 +348,27 @@ impl SmartGroup {
     /// Lines sitting out now, with when they may come back (unix seconds).
     pub fn bans(&self) -> std::collections::HashMap<String, i64> {
         self.shared.store.bans()
+    }
+
+    /// How often the lines that matter are re-probed (rounded to whole
+    /// minutes, at least one). Failing lines are re-checked every minute
+    /// regardless: that is how they come back.
+    pub fn with_refresh(self, every: Duration) -> Self {
+        self.shared
+            .refresh_minutes
+            .store((every.as_secs() / 60).max(1), Ordering::Relaxed);
+        self
+    }
+
+    /// The members' names, in order.
+    pub fn member_names(&self) -> Vec<String> {
+        self.shared.names()
+    }
+
+    /// Whether the group is looking after its lines (probing them): from
+    /// its first use on. Before that nothing is known of them.
+    pub fn watching(&self) -> bool {
+        self.shared.started.load(Ordering::Relaxed)
     }
 
     /// Lines slow for `host`'s site now, with until when (unix seconds).
@@ -373,8 +427,17 @@ impl Shared {
                 .is_ok()
         {
             if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                // The lines sitting out (here: all of them), not a sweep.
                 let me = Arc::clone(self);
-                rt.spawn(async move { me.probe(me.names()).await });
+                rt.spawn(async move {
+                    let bans = me.store.bans();
+                    let failed: Vec<String> = me
+                        .names()
+                        .into_iter()
+                        .filter(|l| bans.contains_key(l))
+                        .collect();
+                    me.probe(failed).await;
+                });
             }
         }
         MeowError::Proxy(format!(
@@ -392,6 +455,7 @@ impl Shared {
             let Some(p) = self.member(&line).cloned() else {
                 continue;
             };
+
             let me = Arc::clone(self);
             let sem = Arc::clone(&sem);
             tasks.push(tokio::spawn(async move {
@@ -719,6 +783,10 @@ impl Shared {
             let Some(p) = self.member(&line).cloned() else {
                 continue;
             };
+            if !spend_speed_budget(bytes) {
+                debug!("{}: this hour's speed-test budget is spent", self.name);
+                break;
+            }
             let me = Arc::clone(self);
             tasks.push(tokio::spawn(async move {
                 let Ok(_permit) = me.speed_tests.acquire().await else {
@@ -796,8 +864,9 @@ impl Shared {
 }
 
 /// Starts by probing every line, then: every minute lines whose ban is up
-/// are probed (passing ones come back), every ten minutes the lines that
-/// matter are re-probed, every two minutes the records are saved.
+/// are probed (passing ones come back), every [`Shared::refresh_minutes`]
+/// the lines that matter are re-probed, every two minutes the records are
+/// saved.
 async fn upkeep(weak: Weak<Shared>) {
     if let Some(me) = weak.upgrade() {
         me.probe(me.names()).await;
@@ -815,7 +884,7 @@ async fn upkeep(weak: Weak<Shared>) {
         if !due.is_empty() {
             me.probe(due).await;
         }
-        if n.is_multiple_of(10) {
+        if n.is_multiple_of(me.refresh_minutes.load(Ordering::Relaxed).max(1)) {
             let lines = me.store.refresh_candidates(&me.names(), 12);
             me.probe(lines).await;
         }

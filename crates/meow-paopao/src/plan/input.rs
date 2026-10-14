@@ -80,6 +80,9 @@ pub struct RuntimeOptions {
     pub unified_delay: bool,
     /// Ended connections the core keeps; None = its default.
     pub connection_history: Option<i64>,
+    /// Seconds between the smart groups' re-probes of their lines
+    /// (`interval`); None = the core's default.
+    pub probe_interval: Option<i64>,
     /// The app itself as an app matcher (`path:<dir>` / `name:<file>`):
     /// its connections through the TUN go direct. None (phones, an older
     /// controller) = no such rule.
@@ -275,6 +278,7 @@ impl Default for RuntimeOptions {
             find_process: false,
             unified_delay: true,
             connection_history: None,
+            probe_interval: None,
             self_app: None,
             vpn: None,
             outbound: None,
@@ -327,6 +331,7 @@ impl RuntimeOptions {
             find_process: bool_of(v.get("findProcess"), d.find_process),
             unified_delay: bool_of(v.get("unifiedDelay"), d.unified_delay),
             connection_history: int_of(v.get("connectionHistory")),
+            probe_interval: int_of(v.get("probeInterval")).filter(|s| *s > 0),
             self_app: str_of(v.get("selfApp")),
             vpn: v.get("vpn").and_then(VpnOptions::from_json),
             outbound: v.get("outbound").and_then(OutboundOptions::from_json),
@@ -462,6 +467,7 @@ impl fmt::Debug for RuntimeOptions {
             .field("find_process", &self.find_process)
             .field("unified_delay", &self.unified_delay)
             .field("connection_history", &self.connection_history)
+            .field("probe_interval", &self.probe_interval)
             .field("self_app", &self.self_app)
             .field("vpn", &self.vpn)
             .finish()
