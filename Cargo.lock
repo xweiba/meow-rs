@@ -2869,6 +2869,7 @@ dependencies = [
  "meow-config",
  "meow-dns",
  "meow-listener",
+ "meow-paopao",
  "meow-proxy",
  "meow-rules",
  "meow-trie",

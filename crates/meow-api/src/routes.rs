@@ -233,6 +233,17 @@ pub fn create_router_with_checkin(
     checkin: Option<Arc<meow_checkin::Engine>>,
     web: Option<Arc<crate::checkin::WebRoute>>,
 ) -> Router {
+    create_router_with(state, checkin, web, None)
+}
+
+/// [`create_router_with_checkin`] with PaoPao's `/paopao/…` routes over
+/// `paopao` (None: they answer `501`).
+pub fn create_router_with(
+    state: Arc<AppState>,
+    checkin: Option<Arc<meow_checkin::Engine>>,
+    web: Option<Arc<crate::checkin::WebRoute>>,
+    paopao: Option<Arc<crate::paopao::Runner>>,
+) -> Router {
     // WS routes — accept header or ?token= query param for browser dashboard compat.
     // REST API routes gated behind the Bearer middleware (header-only).
     let api = Router::new()
@@ -340,6 +351,7 @@ pub fn create_router_with_checkin(
         )),
         None => api,
     };
+    let api = api.merge(crate::paopao::router(paopao, Arc::clone(&state.raw_config)));
     let api = api.route_layer(middleware::from_fn_with_state(
         Arc::clone(&state),
         require_auth_ws,

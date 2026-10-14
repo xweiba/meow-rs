@@ -117,6 +117,9 @@ libc = "0.2"
 serde_json = { workspace = true }
 dhat = { workspace = true, optional = true }
 meow-box = { path = "../meow-box", optional = true }
+# `meow paopao …`, the children the API runs for PaoPao's parse / build /
+# fetch: only those child processes ever touch it.
+meow-paopao = { path = "../meow-paopao", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 tracing-appender = "0.2.5"

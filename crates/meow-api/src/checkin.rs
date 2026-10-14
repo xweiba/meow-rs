@@ -254,11 +254,24 @@ pub fn router<S: Clone + Send + Sync + 'static>(
         .layer(middleware::from_fn(same_origin_only))
 }
 
-/// Refuses what a browser says comes from another web page: an `Origin`
-/// that is not this server's own, or `Sec-Fetch-Site` other than
-/// `same-origin` / `none`. Requests without either (the app, `curl`) pass
-/// and are judged by the secret alone.
+/// Refuses what a browser says comes from another web page
+/// ([`from_other_page`]).
 async fn same_origin_only(req: Request, next: Next) -> Response {
+    if from_other_page(&req) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "签到助手不接受来自其他网页的请求。" })),
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+/// What a browser says comes from another web page: an `Origin` that is
+/// not this server's own, or `Sec-Fetch-Site` other than `same-origin` /
+/// `none`. Requests without either (the app, `curl`) are not, and are
+/// judged by the secret alone.
+pub(crate) fn from_other_page(req: &Request) -> bool {
     let headers = req.headers();
     let text = |name: header::HeaderName| headers.get(name).map(|v| v.to_str().unwrap_or(""));
     let own = text(header::HOST)
@@ -275,14 +288,7 @@ async fn same_origin_only(req: Request, next: Next) -> Response {
     });
     let foreign_fetch = text(header::HeaderName::from_static("sec-fetch-site"))
         .is_some_and(|site| !matches!(site, "same-origin" | "none"));
-    if foreign_origin || foreign_fetch {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": "签到助手不接受来自其他网页的请求。" })),
-        )
-            .into_response();
-    }
-    next.run(req).await
+    foreign_origin || foreign_fetch
 }
 
 type Checkin = State<Arc<Engine>>;

@@ -30,6 +30,8 @@ mod app_main;
 pub mod box_host;
 #[cfg(feature = "embed")]
 pub mod embed;
+/// `meow paopao …`: the API's PaoPao children.
+pub mod paopao;
 pub mod subscription_refresh;
 
 /// launchd label for the macOS user agent plist.

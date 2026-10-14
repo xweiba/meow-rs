@@ -6,6 +6,7 @@
 pub mod checkin;
 pub mod log_stream;
 mod network;
+pub mod paopao;
 pub mod routes;
 pub mod ui;
 
@@ -312,6 +313,8 @@ pub struct ApiServer {
     checkin: Option<Arc<meow_checkin::Engine>>,
     /// The route of 签到助手's built-in page ([`Self::with_checkin_web`]).
     checkin_web: Option<Arc<checkin::WebRoute>>,
+    /// Runs PaoPao's parse / build / fetch children ([`Self::with_paopao`]).
+    paopao: Option<Arc<paopao::Runner>>,
 }
 
 impl ApiServer {
@@ -357,6 +360,7 @@ impl ApiServer {
             config_commits: routes::ConfigCommits::default(),
             checkin: None,
             checkin_web: None,
+            paopao: None,
         }
     }
 
@@ -374,6 +378,13 @@ impl ApiServer {
     /// listener the route answers with no address.
     pub fn with_checkin_web(mut self, web: Arc<checkin::WebRoute>) -> Self {
         self.checkin_web = Some(web);
+        self
+    }
+
+    /// Serve `/paopao/…` over `runner`; without one those routes answer
+    /// `501` (the core inside an app has no binary to run).
+    pub fn with_paopao(mut self, runner: Option<paopao::Runner>) -> Self {
+        self.paopao = runner.map(Arc::new);
         self
     }
 
@@ -428,10 +439,11 @@ impl ApiServer {
             }
         });
 
-        let app = routes::create_router_with_checkin(
+        let app = routes::create_router_with(
             state,
             self.checkin.clone(),
             self.checkin_web.clone(),
+            self.paopao.clone(),
         );
 
         let bound = listener.local_addr().unwrap_or(self.listen_addr);

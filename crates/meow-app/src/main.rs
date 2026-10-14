@@ -168,6 +168,13 @@ enum Command {
     /// as JSON `{"host": "site"}`: what apps show and write rules for
     /// ("api.weiba.pp.ua" -> "weiba.pp.ua"). Needs no running core.
     Site { hosts: Vec<String> },
+    /// PaoPao's parse / build / fetch over stdin and stdout: the child
+    /// process the API runs for `/paopao/…`
+    #[command(hide = true)]
+    Paopao {
+        #[command(subcommand)]
+        op: meow_app::paopao::Op,
+    },
     /// Asks the privileged helper: start (with --config / --dir), stop, status,
     /// relocate, wifi
     #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
@@ -844,6 +851,7 @@ fn handle_service_command(cmd: &Command, args: &Args) -> Result<()> {
             println!("{}", meow_proxy::group::smart::stats::sites_json(hosts));
             Ok(())
         }
+        Command::Paopao { op } => std::process::exit(meow_app::paopao::run(op)),
         #[cfg(feature = "mitm")]
         Command::MitmCa { cert, key } => {
             meow_proxy::mitm::load_or_create_ca(
@@ -1736,7 +1744,8 @@ async fn run(
         )
         .with_config_commits(config_commits.clone())
         .with_checkin(Arc::clone(&checkin))
-        .with_checkin_web(start_checkin_web(&tunnel).await);
+        .with_checkin_web(start_checkin_web(&tunnel).await)
+        .with_paopao(meow_api::paopao::Runner::current_exe());
         // Bind eagerly like the DNS listener and the `listeners:` entries:
         // an `external-controller` failure is a hard startup error, not a
         // detached task that dies one log line deep (issue #641).

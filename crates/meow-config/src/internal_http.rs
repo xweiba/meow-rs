@@ -14,6 +14,11 @@
 //!   * Follows up to 5 redirects (`3xx` with `Location`).
 //!   * No streaming — full body buffered in memory, capped at
 //!     `MAX_BODY_BYTES` (256 MiB).
+//!
+//! [`fetch`] answers the body of a 2xx response and fails on any other
+//! status; [`fetch_response`] answers whatever status the last hop gave,
+//! with its headers and URL (PaoPao's subscription fetch reads
+//! `subscription-userinfo` and reports the status itself).
 
 use anyhow::{anyhow, bail, Result};
 use meow_common::adapter::Proxy;
@@ -159,6 +164,44 @@ pub async fn fetch(
     fetch_capped(url, proxy, headers, MAX_BODY_BYTES).await
 }
 
+/// The last hop's answer to [`fetch_response`].
+#[derive(Debug)]
+pub struct Response {
+    pub status: u16,
+    /// As received, in order; names keep their case.
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    /// The URL that answered, after redirects.
+    pub url: String,
+}
+
+impl Response {
+    /// The first header named `name` (any case) whose value is UTF-8.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// [`fetch`] answering any final status (not only 2xx) with the headers and
+/// the URL that answered, the body capped at `limit` bytes.
+pub async fn fetch_response(
+    url: &str,
+    proxy: Option<&Arc<dyn Proxy>>,
+    headers: &[(String, String)],
+    limit: usize,
+) -> Result<Response> {
+    let (reply, url) = fetch_reply(url, proxy, headers, limit, true).await?;
+    Ok(Response {
+        status: reply.status,
+        headers: reply.headers,
+        body: reply.body,
+        url: url.into(),
+    })
+}
+
 /// [`fetch`] with the body cap as a parameter, so tests can exercise the
 /// oversize paths without transferring hundreds of megabytes.
 async fn fetch_capped(
@@ -167,11 +210,23 @@ async fn fetch_capped(
     headers: &[(String, String)],
     limit: usize,
 ) -> Result<Vec<u8>> {
+    Ok(fetch_reply(url, proxy, headers, limit, false).await?.0.body)
+}
+
+/// Follows redirects to the final answer and its URL; `any_status` keeps a
+/// non-2xx answer instead of failing on it.
+async fn fetch_reply(
+    url: &str,
+    proxy: Option<&Arc<dyn Proxy>>,
+    headers: &[(String, String)],
+    limit: usize,
+    any_status: bool,
+) -> Result<(Reply, Url)> {
     let mut current = Url::parse(url).map_err(|e| anyhow!("invalid URL '{url}': {e}"))?;
     let mut headers = headers.to_vec();
     for _ in 0..=MAX_REDIRECTS {
-        match fetch_one(&current, proxy, &headers, limit).await? {
-            Outcome::Body(bytes) => return Ok(bytes),
+        match fetch_one(&current, proxy, &headers, limit, any_status).await? {
+            Outcome::Body(reply) => return Ok((reply, current)),
             Outcome::Redirect(next) => {
                 let next = current
                     .join(&next)
@@ -197,8 +252,15 @@ async fn fetch_capped(
 }
 
 enum Outcome {
-    Body(Vec<u8>),
+    Body(Reply),
     Redirect(String),
+}
+
+/// A final (non-redirect) answer.
+struct Reply {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
 }
 
 async fn fetch_one(
@@ -206,6 +268,7 @@ async fn fetch_one(
     proxy: Option<&Arc<dyn Proxy>>,
     headers: &[(String, String)],
     limit: usize,
+    any_status: bool,
 ) -> Result<Outcome> {
     let scheme = url.scheme();
     let is_https = match scheme {
@@ -338,7 +401,7 @@ async fn fetch_one(
     };
     stream.write_all(request.as_bytes()).await?;
     stream.flush().await?;
-    read_response(&mut stream, limit).await
+    read_response(&mut stream, limit, any_status).await
 }
 
 fn host_header(host: &str, port: u16, is_https: bool) -> String {
@@ -350,7 +413,7 @@ fn host_header(host: &str, port: u16, is_https: bool) -> String {
     }
 }
 
-async fn read_response<S>(stream: &mut S, limit: usize) -> Result<Outcome>
+async fn read_response<S>(stream: &mut S, limit: usize, any_status: bool) -> Result<Outcome>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -378,10 +441,10 @@ where
         .await
         .map_err(|_| anyhow!("response read timed out after {READ_TIMEOUT:?}"))??;
 
-    parse_response(&buf, limit)
+    parse_response(&buf, limit, any_status)
 }
 
-fn parse_response(buf: &[u8], limit: usize) -> Result<Outcome> {
+fn parse_response(buf: &[u8], limit: usize, any_status: bool) -> Result<Outcome> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut resp = httparse::Response::new(&mut headers);
     let parsed = resp
@@ -405,7 +468,7 @@ fn parse_response(buf: &[u8], limit: usize) -> Result<Outcome> {
         }
         bail!("HTTP {status} redirect without Location header");
     }
-    if !(200..300).contains(&status) {
+    if !any_status && !(200..300).contains(&status) {
         let snippet: String = String::from_utf8_lossy(&buf[body_start..])
             .chars()
             .take(200)
@@ -453,7 +516,21 @@ fn parse_response(buf: &[u8], limit: usize) -> Result<Outcome> {
         }
         body.to_vec()
     };
-    Ok(Outcome::Body(body))
+    let headers = resp
+        .headers
+        .iter()
+        .filter_map(|h| {
+            Some((
+                h.name.to_owned(),
+                std::str::from_utf8(h.value).ok()?.to_owned(),
+            ))
+        })
+        .collect();
+    Ok(Outcome::Body(Reply {
+        status,
+        headers,
+        body,
+    }))
 }
 
 fn decode_chunked(mut input: &[u8], limit: usize) -> Result<Vec<u8>> {
@@ -525,8 +602,8 @@ mod tests {
     #[test]
     fn parse_response_decodes_chunked_body_and_extensions() {
         let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4;foo=bar\r\nWiki\r\n5\r\npedia\r\n0\r\nX-Trailer: yes\r\n\r\n";
-        match parse_response(response, MAX_BODY_BYTES).unwrap() {
-            Outcome::Body(body) => assert_eq!(body, b"Wikipedia"),
+        match parse_response(response, MAX_BODY_BYTES, false).unwrap() {
+            Outcome::Body(reply) => assert_eq!(reply.body, b"Wikipedia"),
             Outcome::Redirect(_) => panic!("unexpected redirect"),
         }
     }
@@ -534,7 +611,7 @@ mod tests {
     #[test]
     fn parse_response_rejects_truncated_chunk() {
         let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nabc";
-        assert!(parse_response(response, MAX_BODY_BYTES).is_err());
+        assert!(parse_response(response, MAX_BODY_BYTES, false).is_err());
     }
 
     /// `Proxy` whose `dial_tcp` never completes — models an adapter dialing an
@@ -664,6 +741,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_response_keeps_status_headers_and_url() {
+        let url = spawn_raw_http_server(
+            b"HTTP/1.1 404 Not Found\r\nSubscription-Userinfo: upload=1; total=2\r\nContent-Length: 4\r\n\r\ngone",
+        )
+        .await;
+        let r = fetch_response(&url, None, &[], 16).await.unwrap();
+        assert_eq!(r.status, 404);
+        assert_eq!(r.body, b"gone");
+        assert_eq!(r.header("subscription-userinfo"), Some("upload=1; total=2"));
+        assert_eq!(r.url, url);
+        // The strict fetch still fails on it.
+        let url =
+            spawn_raw_http_server(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await;
+        assert!(fetch_direct(&url).await.is_err());
+    }
+
+    #[tokio::test]
     async fn direct_fetch_rejects_truncated_content_length() {
         let url = spawn_raw_http_server(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc").await;
         let error = fetch_direct(&url).await.unwrap_err();
@@ -676,10 +770,10 @@ mod tests {
             &b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nabc"[..],
             &b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabc"[..],
         ] {
-            assert!(parse_response(response, MAX_BODY_BYTES).is_err());
+            assert!(parse_response(response, MAX_BODY_BYTES, false).is_err());
         }
         assert!(
-            matches!(parse_response(b"HTTP/1.1 200 OK\r\n\r\nabc", MAX_BODY_BYTES).unwrap(), Outcome::Body(body) if body == b"abc")
+            matches!(parse_response(b"HTTP/1.1 200 OK\r\n\r\nabc", MAX_BODY_BYTES, false).unwrap(), Outcome::Body(reply) if reply.body == b"abc")
         );
     }
 
