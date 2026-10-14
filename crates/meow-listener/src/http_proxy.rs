@@ -1,4 +1,5 @@
 use crate::sniffer::SnifferRuntime;
+use crate::Inbound;
 use base64::Engine;
 use meow_common::{with_dial_timeout, AuthConfig, ConnType, Metadata, Network};
 use meow_tunnel::{
@@ -16,24 +17,31 @@ use tracing::{debug, info, warn};
 
 pub async fn handle_http(
     tunnel: &Tunnel,
-    mut stream: TcpStream,
+    stream: TcpStream,
     src_addr: SocketAddr,
     sniffer: Option<&SnifferRuntime>,
     auth: Option<&AuthConfig>,
     in_name: &str,
     in_port: u16,
 ) {
-    if let Err(e) = handle_http_inner(
-        tunnel,
-        &mut stream,
-        src_addr,
-        sniffer,
-        auth,
-        in_name,
-        in_port,
-    )
-    .await
-    {
+    let inbound = Inbound {
+        name: in_name,
+        port: in_port,
+        stamp: None,
+    };
+    handle_http_from(tunnel, stream, src_addr, sniffer, auth, inbound).await;
+}
+
+/// [`handle_http`] for a listener that may stamp its connections.
+pub async fn handle_http_from(
+    tunnel: &Tunnel,
+    mut stream: TcpStream,
+    src_addr: SocketAddr,
+    sniffer: Option<&SnifferRuntime>,
+    auth: Option<&AuthConfig>,
+    inbound: Inbound<'_>,
+) {
+    if let Err(e) = handle_http_inner(tunnel, &mut stream, src_addr, sniffer, auth, inbound).await {
         debug!("HTTP proxy error from {}: {}", src_addr, e);
     }
 }
@@ -44,9 +52,9 @@ async fn handle_http_inner(
     src_addr: SocketAddr,
     sniffer: Option<&SnifferRuntime>,
     auth: Option<&AuthConfig>,
-    in_name: &str,
-    in_port: u16,
+    inbound: Inbound<'_>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (in_name, in_port) = (inbound.name, inbound.port);
     // Read the HTTP request line and headers in chunks until we find
     // \r\n\r\n. Reading one byte at a time costs ~100 syscalls per CONNECT;
     // chunked reads cap the syscall count at ceil(headers / 1024).
@@ -175,6 +183,7 @@ async fn handle_http_inner(
             in_user: in_user.as_deref().map(Into::into),
             ..Default::default()
         };
+        inbound.stamp(&mut metadata);
 
         debug!("HTTP CONNECT to {}:{}", host, port);
 
@@ -215,6 +224,7 @@ async fn handle_http_inner(
             in_user: in_user.as_deref().map(Into::into),
             ..Default::default()
         };
+        inbound.stamp(&mut metadata);
 
         // For plain HTTP, sniff_http on the already-read buffer so IP-literal
         // destinations still benefit from Host-header routing.

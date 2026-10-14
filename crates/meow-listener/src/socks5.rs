@@ -1,4 +1,5 @@
 use crate::sniffer::SnifferRuntime;
+use crate::Inbound;
 use meow_common::{AuthConfig, ConnType, Metadata, Network};
 use meow_tunnel::{route_inbound_tcp, Tunnel};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -19,30 +20,44 @@ const REP_SUCCESS: u8 = 0x00;
 
 pub async fn handle_socks5(
     tunnel: &Tunnel,
-    mut stream: TcpStream,
+    stream: TcpStream,
     src_addr: SocketAddr,
     sniffer: Option<&SnifferRuntime>,
     auth: Option<&AuthConfig>,
     in_name: &str,
     in_port: u16,
 ) {
-    match handle_socks5_inner(
-        tunnel,
-        &mut stream,
-        src_addr,
-        sniffer,
-        auth,
-        in_name,
-        in_port,
-    )
-    .await
-    {
+    let inbound = Inbound {
+        name: in_name,
+        port: in_port,
+        stamp: None,
+    };
+    handle_socks5_from(tunnel, stream, src_addr, sniffer, auth, inbound).await;
+}
+
+/// [`handle_socks5`] for a listener that may stamp its connections.
+pub async fn handle_socks5_from(
+    tunnel: &Tunnel,
+    mut stream: TcpStream,
+    src_addr: SocketAddr,
+    sniffer: Option<&SnifferRuntime>,
+    auth: Option<&AuthConfig>,
+    inbound: Inbound<'_>,
+) {
+    let (in_name, in_port) = (inbound.name, inbound.port);
+    match handle_socks5_inner(tunnel, &mut stream, src_addr, sniffer, auth, inbound).await {
         Ok(PostHandshake::Done) => {}
         Ok(PostHandshake::UdpAssociate {
             requested_ip,
             requested_port,
             in_user,
         }) => {
+            // UDP flows are built per datagram and would not carry the
+            // stamp; a stamped listener is TCP only.
+            if inbound.stamp.is_some() {
+                debug!("SOCKS5 UDP ASSOCIATE from {src_addr} refused on '{in_name}'");
+                return;
+            }
             // The handshake (auth + request) is consumed; the control conn is
             // now ours for the association's lifetime.
             if let Err(e) = crate::socks5_udp::handle_udp_associate(
@@ -85,9 +100,9 @@ async fn handle_socks5_inner(
     src_addr: SocketAddr,
     sniffer: Option<&SnifferRuntime>,
     auth: Option<&AuthConfig>,
-    in_name: &str,
-    in_port: u16,
+    inbound: Inbound<'_>,
 ) -> Result<PostHandshake, Box<dyn std::error::Error + Send + Sync>> {
+    let (in_name, in_port) = (inbound.name, inbound.port);
     let deadline = tokio::time::Instant::now() + crate::DEFAULT_HANDSHAKE_TIMEOUT;
     // 1. Version/method negotiation
     let mut header = [0u8; 2];
@@ -225,6 +240,7 @@ async fn handle_socks5_inner(
         in_user: in_user.as_deref().map(Into::into),
         ..Default::default()
     };
+    inbound.stamp(&mut metadata);
 
     // Sniff TLS SNI or HTTP Host header from the initial payload bytes.
     if let Some(rt) = sniffer {

@@ -56,6 +56,8 @@ tempfile = "3"
 async-trait = { workspace = true }
 smallvec = { workspace = true }
 tokio-tungstenite = { workspace = true }
+# checkin_web_test runs the listener the app binary starts for the page.
+meow-listener = { workspace = true, default-features = false, features = ["listener-mixed"] }
 
 [lints]
 workspace = true

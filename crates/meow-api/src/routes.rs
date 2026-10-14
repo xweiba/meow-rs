@@ -222,14 +222,16 @@ async fn require_auth_ws(
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
-    create_router_with_checkin(state, None)
+    create_router_with_checkin(state, None, None)
 }
 
 /// [`create_router`] plus, when `checkin` is given, the 签到助手 routes
-/// (`/checkin…`) behind the same auth.
+/// (`/checkin…`) behind the same auth; with `web`, the route of its
+/// built-in page as well (`/checkin/web`).
 pub fn create_router_with_checkin(
     state: Arc<AppState>,
     checkin: Option<Arc<meow_checkin::Engine>>,
+    web: Option<Arc<crate::checkin::WebRoute>>,
 ) -> Router {
     // WS routes — accept header or ?token= query param for browser dashboard compat.
     // REST API routes gated behind the Bearer middleware (header-only).
@@ -331,7 +333,10 @@ pub fn create_router_with_checkin(
         // Listeners (read-only list)
         .route("/listeners", get(get_listeners));
     let api = match checkin {
-        Some(engine) => api.merge(crate::checkin::router(engine)),
+        Some(engine) => api.merge(crate::checkin::router(
+            engine,
+            web.map(|web| (web, state.tunnel.clone())),
+        )),
         None => api,
     };
     let api = api.route_layer(middleware::from_fn_with_state(

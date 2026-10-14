@@ -34,7 +34,7 @@ use meow_tunnel::Tunnel;
 use serde::Deserialize;
 use serde_json::Value;
 use smol_str::SmolStr;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -135,6 +135,72 @@ impl Connector for TunnelConnector {
     }
 }
 
+/// Where the built-in web page of 签到助手 leaves from: the address of the
+/// core's loopback listener for it, and the route every connection
+/// accepted there takes right now.
+///
+/// The webview's proxy setting is one for the whole app and carries no
+/// credentials, so the task's choice cannot ride on a connection: the app
+/// points the webview at this listener once and says, before loading a
+/// task's page, which way that task goes (`PUT /checkin/web`). One route
+/// at a time — two pages of different tasks loading at once share it.
+#[derive(Default)]
+pub struct WebRoute {
+    address: parking_lot::RwLock<Option<SocketAddr>>,
+    /// `None`: the rules decide. `Some`: the proxy or group named
+    /// (`DIRECT` for a direct task).
+    special: parking_lot::RwLock<Option<SmolStr>>,
+}
+
+/// The inbound name of the listener behind [`WebRoute`].
+pub const WEB_INBOUND: &str = "checkin-web";
+
+impl WebRoute {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// The listener is up on `address`.
+    pub fn set_address(&self, address: SocketAddr) {
+        *self.address.write() = Some(address);
+    }
+
+    pub fn address(&self) -> Option<SocketAddr> {
+        *self.address.read()
+    }
+
+    /// `direct`: out through `DIRECT`. `proxy`: through `policy` when one
+    /// is named, by the rules otherwise.
+    pub fn set(&self, access: Access, policy: Option<&str>) {
+        *self.special.write() = match (access, policy) {
+            (Access::Direct, _) => Some(SmolStr::new_static("DIRECT")),
+            (Access::Proxy, Some(policy)) => Some(SmolStr::from(policy)),
+            (Access::Proxy, None) => None,
+        };
+    }
+
+    /// Marks one connection of the listener with the route as it is now.
+    /// A name that is not there (any more) is left to the tunnel, which
+    /// refuses such a connection rather than hand it to the rules.
+    pub fn stamp(&self, metadata: &mut Metadata) {
+        if let Some(special) = self.special.read().as_ref() {
+            metadata.special_proxy = special.clone();
+        }
+    }
+
+    fn answer(&self, tunnel: &Tunnel) -> Value {
+        let special = self.special.read().clone();
+        let direct = special.as_deref() == Some("DIRECT");
+        let policy = special.as_deref().filter(|_| !direct);
+        serde_json::json!({
+            "address": self.address().map(|a| a.to_string()),
+            "access": if direct { "direct" } else { "proxy" },
+            "policy": policy,
+            "policy_known": policy.is_none_or(|name| tunnel.inner().has_proxy(name)),
+        })
+    }
+}
+
 /// Opens the engine on `dir` with requests leaving through `tunnel`. The
 /// caller starts it ([`Engine::start`]) and keeps the returned tasks.
 pub fn open_engine(tunnel: &Tunnel, dir: PathBuf) -> Arc<Engine> {
@@ -146,8 +212,18 @@ pub fn open_engine(tunnel: &Tunnel, dir: PathBuf) -> Arc<Engine> {
     )
 }
 
-/// The `/checkin…` routes over `engine`.
-pub fn router<S: Clone + Send + Sync + 'static>(engine: Arc<Engine>) -> Router<S> {
+/// The `/checkin…` routes over `engine`. `web` is the page's route and
+/// its judge of policy names; without one the routes for it are absent.
+pub fn router<S: Clone + Send + Sync + 'static>(
+    engine: Arc<Engine>,
+    web: Option<(Arc<WebRoute>, Tunnel)>,
+) -> Router<S> {
+    let web: Router<S> = match web {
+        Some(web) => Router::new()
+            .route("/checkin/web", get(web_route).put(set_web_route))
+            .with_state(web),
+        None => Router::new(),
+    };
     Router::new()
         .route("/checkin", get(snapshot))
         .route("/checkin/events", get(events))
@@ -173,8 +249,9 @@ pub fn router<S: Clone + Send + Sync + 'static>(engine: Arc<Engine>) -> Router<S
                 .delete(delete_variable)
                 .post(push_variables),
         )
-        .layer(middleware::from_fn(same_origin_only))
         .with_state(engine)
+        .merge(web)
+        .layer(middleware::from_fn(same_origin_only))
 }
 
 /// Refuses what a browser says comes from another web page: an `Origin`
@@ -362,6 +439,43 @@ async fn import_rule(
     body: Bytes,
 ) -> Response {
     answer(rule_text(&body).and_then(|text| engine.import_rule(&text, reveal.on())))
+}
+
+// ---- the page's route ----
+
+type Web = State<(Arc<WebRoute>, Tunnel)>;
+
+/// `{"address": "127.0.0.1:port" | null, "access", "policy",
+/// "policy_known"}`. No address: the listener is not there (the port
+/// could not be opened, or this build has no HTTP/SOCKS inbound).
+async fn web_route(State((web, tunnel)): Web) -> Response {
+    Json(web.answer(&tunnel)).into_response()
+}
+
+/// Body `{"access": "direct" | "proxy", "policy": string | null}`; answers
+/// like the `GET`. An unknown policy is taken (`policy_known: false`):
+/// connections are then refused until it exists or the route changes.
+async fn set_web_route(State((web, tunnel)): Web, body: Bytes) -> Response {
+    let parsed = json(&body).and_then(|body| {
+        let access = match body.get("access").and_then(Value::as_str) {
+            Some("direct") => Access::Direct,
+            Some("proxy") => Access::Proxy,
+            _ => return Err(CheckinError::invalid("访问方式只能是 direct 或 proxy。")),
+        };
+        let policy = match body.get("policy") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(name)) => Some(name.trim().to_string()).filter(|n| !n.is_empty()),
+            Some(_) => return Err(CheckinError::invalid("代理策略应是一个名称。")),
+        };
+        Ok((access, policy))
+    });
+    match parsed {
+        Ok((access, policy)) => {
+            web.set(access, policy.as_deref());
+            Json(web.answer(&tunnel)).into_response()
+        }
+        Err(e) => refuse(&e),
+    }
 }
 
 // ---- streams ----

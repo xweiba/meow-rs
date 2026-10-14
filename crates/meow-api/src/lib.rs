@@ -310,6 +310,8 @@ pub struct ApiServer {
     /// PaoPao 签到助手; its routes exist only when set
     /// ([`Self::with_checkin`]).
     checkin: Option<Arc<meow_checkin::Engine>>,
+    /// The route of 签到助手's built-in page ([`Self::with_checkin_web`]).
+    checkin_web: Option<Arc<checkin::WebRoute>>,
 }
 
 impl ApiServer {
@@ -354,6 +356,7 @@ impl ApiServer {
             provider_dialer_registry,
             config_commits: routes::ConfigCommits::default(),
             checkin: None,
+            checkin_web: None,
         }
     }
 
@@ -362,6 +365,15 @@ impl ApiServer {
     /// without this server.
     pub fn with_checkin(mut self, engine: Arc<meow_checkin::Engine>) -> Self {
         self.checkin = Some(engine);
+        self
+    }
+
+    /// Serve the route of 签到助手's built-in page (`/checkin/web`) over
+    /// `web`. The embedder runs the loopback listener that reads it and
+    /// reports its address ([`checkin::WebRoute::set_address`]); without a
+    /// listener the route answers with no address.
+    pub fn with_checkin_web(mut self, web: Arc<checkin::WebRoute>) -> Self {
+        self.checkin_web = Some(web);
         self
     }
 
@@ -416,7 +428,11 @@ impl ApiServer {
             }
         });
 
-        let app = routes::create_router_with_checkin(state, self.checkin.clone());
+        let app = routes::create_router_with_checkin(
+            state,
+            self.checkin.clone(),
+            self.checkin_web.clone(),
+        );
 
         let bound = listener.local_addr().unwrap_or(self.listen_addr);
         info!("REST API listening on {bound}");

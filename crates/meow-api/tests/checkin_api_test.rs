@@ -91,7 +91,7 @@ fn rig_full(secret: Option<&str>, rules: &[&str], allow_private: bool) -> Rig {
         dns_server: Default::default(),
     });
     Rig {
-        app: create_router_with_checkin(Arc::clone(&state), Some(Arc::clone(&engine))),
+        app: create_router_with_checkin(Arc::clone(&state), Some(Arc::clone(&engine)), None),
         engine,
         state,
         _dir: dir,

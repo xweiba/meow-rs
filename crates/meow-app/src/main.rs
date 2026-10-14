@@ -718,6 +718,44 @@ fn preinstall_global_route_binding(_raw: &meow_config::raw::RawConfig) -> EarlyO
     None
 }
 
+/// PaoPao 签到助手: the listener its built-in web page is pointed at — HTTP
+/// and SOCKS5 on a loopback port the system picks, no credentials, every
+/// connection routed the way the app last said for the page
+/// (`PUT /checkin/web`). Not a `listeners:` entry: it is not the user's,
+/// and not in `GET /listeners`. When the port cannot be opened, or this
+/// build has no mixed inbound, the returned route has no address and the
+/// app keeps to the system-wide ways.
+async fn start_checkin_web(tunnel: &Tunnel) -> Arc<meow_api::checkin::WebRoute> {
+    let web = meow_api::checkin::WebRoute::new();
+    #[cfg(feature = "listener-mixed")]
+    {
+        let loopback = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+        match tokio::net::TcpListener::bind(loopback).await {
+            Ok(socket) => {
+                let bound = socket.local_addr().unwrap_or(loopback);
+                let route = Arc::clone(&web);
+                let listener = MixedListener::new(
+                    tunnel.clone(),
+                    bound,
+                    meow_api::checkin::WEB_INBOUND.to_string(),
+                )
+                .loopback_only()
+                .with_stamp(Arc::new(move |metadata| route.stamp(metadata)));
+                web.set_address(bound);
+                tokio::spawn(async move {
+                    if let Err(e) = listener.run_on(socket).await {
+                        error!("check-in web listener error: {}", e);
+                    }
+                });
+            }
+            Err(e) => warn!("check-in web listener: cannot open a loopback port: {e}"),
+        }
+    }
+    #[cfg(not(feature = "listener-mixed"))]
+    let _ = tunnel;
+    web
+}
+
 /// The cargo feature a `listeners:` entry needs when this binary did not
 /// compile it — `None` when the entry can run. Mirrors the
 /// `#[cfg(feature = …)]` arms in the listener spawn loop below: `mixed`,
@@ -1697,7 +1735,8 @@ async fn run(
             config.provider_dialer_registry.clone(),
         )
         .with_config_commits(config_commits.clone())
-        .with_checkin(Arc::clone(&checkin));
+        .with_checkin(Arc::clone(&checkin))
+        .with_checkin_web(start_checkin_web(&tunnel).await);
         // Bind eagerly like the DNS listener and the `listeners:` entries:
         // an `external-controller` failure is a hard startup error, not a
         // detached task that dies one log line deep (issue #641).

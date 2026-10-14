@@ -7,6 +7,29 @@ pub mod sniffer;
 
 pub const DEFAULT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Marks every connection of one listener before it is routed — e.g. names
+/// the proxy it must leave through (`Metadata::special_proxy`). Called once
+/// per connection, when its destination is known, so what it reads may
+/// change while the listener runs.
+pub type MetadataStamp = std::sync::Arc<dyn Fn(&mut meow_common::Metadata) + Send + Sync>;
+
+/// The listener a connection came in on, as the protocol handlers need it.
+#[derive(Clone, Copy)]
+pub struct Inbound<'a> {
+    pub name: &'a str,
+    pub port: u16,
+    pub stamp: Option<&'a MetadataStamp>,
+}
+
+impl Inbound<'_> {
+    #[cfg(any(feature = "listener-http", feature = "listener-socks5"))]
+    fn stamp(&self, metadata: &mut meow_common::Metadata) {
+        if let Some(stamp) = self.stamp {
+            stamp(metadata);
+        }
+    }
+}
+
 /// Process-wide monotonic timestamp in milliseconds. Used by UDP flow tables
 /// (SOCKS5-UDP and the shadowsocks listener) for idle eviction. The `START`
 /// instant is lazily initialized on the first call and never changes.

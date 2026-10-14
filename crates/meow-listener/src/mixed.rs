@@ -1,6 +1,7 @@
 use crate::http_proxy;
 use crate::sniffer::SnifferRuntime;
 use crate::socks5;
+use crate::{Inbound, MetadataStamp};
 use meow_common::AuthConfig;
 use meow_tunnel::Tunnel;
 use std::net::SocketAddr;
@@ -24,6 +25,8 @@ pub struct MixedListener {
     name: String,
     auth: Option<Arc<AuthConfig>>,
     max_connections: usize,
+    stamp: Option<MetadataStamp>,
+    loopback_only: bool,
 }
 
 impl MixedListener {
@@ -35,7 +38,24 @@ impl MixedListener {
             name,
             auth: None,
             max_connections: DEFAULT_MAX_CONNECTIONS,
+            stamp: None,
+            loopback_only: false,
         }
+    }
+
+    /// Stamp every connection before it is routed (see [`MetadataStamp`]).
+    /// A stamped listener serves TCP only: SOCKS5 UDP ASSOCIATE is refused.
+    pub fn with_stamp(mut self, stamp: MetadataStamp) -> Self {
+        self.stamp = Some(stamp);
+        self
+    }
+
+    /// Serve this machine only: [`Self::run_on`] refuses a socket that is
+    /// not bound to a loopback address, and a peer that is not loopback is
+    /// dropped unanswered. For a listener that asks for no credentials.
+    pub fn loopback_only(mut self) -> Self {
+        self.loopback_only = true;
+        self
     }
 
     /// Override the cap on in-flight inbound connections (default
@@ -72,6 +92,13 @@ impl MixedListener {
         listener: TcpListener,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let bound_addr = listener.local_addr().unwrap_or(self.listen_addr);
+        if self.loopback_only && !bound_addr.ip().is_loopback() {
+            return Err(format!(
+                "listener '{}' is loopback-only and will not serve {bound_addr}",
+                self.name
+            )
+            .into());
+        }
         if self.max_connections == 0 {
             info!(
                 "Mixed listener '{}' on {} (max_connections=unlimited)",
@@ -143,13 +170,27 @@ impl MixedListener {
                 }
             };
 
+            if self.loopback_only && !src_addr.ip().is_loopback() {
+                debug!(
+                    "Mixed listener '{}' dropped non-loopback peer {src_addr}",
+                    self.name
+                );
+                continue;
+            }
+
             let tunnel = self.tunnel.clone();
             let sniffer = self.sniffer.clone();
             let name = self.name.clone();
             let port = bound_addr.port();
             let auth = self.auth.clone();
+            let stamp = self.stamp.clone();
             tokio::spawn(async move {
-                handle_connection(tunnel, stream, src_addr, sniffer, name, port, auth).await;
+                let inbound = Inbound {
+                    name: &name,
+                    port,
+                    stamp: stamp.as_ref(),
+                };
+                handle_connection(tunnel, stream, src_addr, sniffer, auth, inbound).await;
                 drop(permit);
             });
         }
@@ -161,9 +202,8 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     src_addr: SocketAddr,
     sniffer: Option<Arc<SnifferRuntime>>,
-    name: String,
-    port: u16,
     auth: Option<Arc<AuthConfig>>,
+    inbound: Inbound<'_>,
 ) {
     // Peek the first byte to determine protocol
     let mut peek = [0u8; 1];
@@ -182,26 +222,24 @@ async fn handle_connection(
 
     if peek[0] == 0x05 {
         // SOCKS5
-        socks5::handle_socks5(
+        socks5::handle_socks5_from(
             &tunnel,
             stream,
             src_addr,
             sniffer.as_deref(),
             auth.as_deref(),
-            &name,
-            port,
+            inbound,
         )
         .await;
     } else {
         // HTTP proxy
-        http_proxy::handle_http(
+        http_proxy::handle_http_from(
             &tunnel,
             stream,
             src_addr,
             sniffer.as_deref(),
             auth.as_deref(),
-            &name,
-            port,
+            inbound,
         )
         .await;
     }
