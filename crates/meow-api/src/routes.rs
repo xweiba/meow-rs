@@ -237,12 +237,13 @@ pub fn create_router_with_checkin(
 }
 
 /// [`create_router_with_checkin`] with PaoPao's `/paopao/…` routes over
-/// `paopao` (None: they answer `501`).
+/// `paopao` (None: a service without children, its stored state under the
+/// home directory; their child calls answer `501`).
 pub fn create_router_with(
     state: Arc<AppState>,
     checkin: Option<Arc<meow_checkin::Engine>>,
     web: Option<Arc<crate::checkin::WebRoute>>,
-    paopao: Option<Arc<crate::paopao::Runner>>,
+    paopao: Option<Arc<crate::paopao::Service>>,
 ) -> Router {
     // WS routes — accept header or ?token= query param for browser dashboard compat.
     // REST API routes gated behind the Bearer middleware (header-only).
@@ -351,7 +352,16 @@ pub fn create_router_with(
         )),
         None => api,
     };
-    let api = api.merge(crate::paopao::router(paopao, Arc::clone(&state.raw_config)));
+    let paopao = paopao.unwrap_or_else(|| {
+        Arc::new(crate::paopao::Service::new(
+            None,
+            Arc::clone(&state.raw_config),
+            meow_common::resolved_home_dir().join("paopao"),
+            state.config_path.as_ref().map(std::path::PathBuf::from),
+            paopao_reload(Arc::clone(&state)),
+        ))
+    });
+    let api = api.merge(crate::paopao::router(paopao));
     let api = api.route_layer(middleware::from_fn_with_state(
         Arc::clone(&state),
         require_auth_ws,
@@ -3135,6 +3145,33 @@ pub(crate) fn outbound_binding_adopted(
 struct PutConfigsBody {
     path: Option<String>,
     payload: Option<String>,
+}
+
+/// PaoPao's rebuilt config run as `PUT /configs` with its `path` runs one
+/// (read, checked, swapped in under the mutation lane); the answer's
+/// message when the core refuses it, the running config untouched.
+pub(crate) fn paopao_reload(state: Arc<AppState>) -> crate::paopao::Reload {
+    Arc::new(move |path: std::path::PathBuf| {
+        let state = Arc::clone(&state);
+        Box::pin(async move {
+            let body = PutConfigsBody {
+                path: Some(path.to_string_lossy().into_owned()),
+                payload: None,
+            };
+            let res = put_configs(State(state), Query(HashMap::new()), Json(body)).await;
+            let status = res.status();
+            if status.is_success() {
+                return Ok(());
+            }
+            let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
+                .await
+                .unwrap_or_default();
+            Err(serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|v| v.get("message")?.as_str().map(str::to_owned))
+                .unwrap_or_else(|| status.to_string()))
+        })
+    })
 }
 
 async fn put_configs(

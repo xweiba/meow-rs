@@ -120,6 +120,10 @@ meow-box = { path = "../meow-box", optional = true }
 # `meow paopao …`, the children the API runs for PaoPao's parse / build /
 # fetch: only those child processes ever touch it.
 meow-paopao = { path = "../meow-paopao", default-features = false }
+serde = { workspace = true }
+# A refreshed subscription's body is recorded by its SHA-256.
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 tracing-appender = "0.2.5"

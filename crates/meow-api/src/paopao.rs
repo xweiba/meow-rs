@@ -24,20 +24,38 @@
 //! did not answer 200, `503` busy, `504` the child ran out of time, `500`
 //! the child failed, `501` where the core runs inside an app (Android,
 //! iOS) and has no binary to run.
+//!
+//! The core also keeps the subscriptions current itself ([`service`],
+//! state on disk in [`store`]):
+//!
+//! - `PUT /paopao/input` (`?apply=true`: rebuilt and run now): the build
+//!   input to keep → `{subscriptions}` (their count), with `apply` the
+//!   job's report; `400` not a JSON object. `GET`: the input as kept
+//!   (`404` none yet).
+//! - `GET /paopao/subscriptions` (`?nodes=true`: the lines too): `{
+//!   subscriptions: [{id, url, name, refreshed}] }`, `refreshed` the last
+//!   refresh's record (`{via, checked, updated, usage, last_error,
+//!   body_sha, node_count, skipped, …}`) or null.
+//! - `POST /paopao/subscriptions/refresh` (`?id=`: that one): refreshes,
+//!   merges, rebuilds and reloads → the job's report `{refreshed: [{id,
+//!   error?}], input_changed, rebuilt, reloaded, error?}`; `409` no input
+//!   yet, `404` no such subscription, `503` a job runs.
+//! - `PUT /paopao/schedule` `{enabled?, minutes?}` (0 minutes = none; 720
+//!   until set, off until enabled) and `GET` → `{enabled, minutes,
+//!   last_run, next_run, last_error, running}`.
 
 use axum::{
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Request, State},
+    extract::{DefaultBodyLimit, Query, Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
-    routing::post,
+    routing::{get, post},
     Router,
 };
 use futures::StreamExt as _;
-use meow_config::raw::RawConfig;
-use parking_lot::RwLock;
 use serde_json::json;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
@@ -48,6 +66,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdout};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{timeout_at, Instant};
+
+pub mod service;
+pub mod store;
+
+pub use service::{run_schedule, JobError, Reload, Report, Service};
 
 /// The child's exit codes: its answer is the result.
 pub const EXIT_OK: i32 = 0;
@@ -164,6 +187,31 @@ impl Runner {
         let permit = Arc::clone(&self.slots)
             .try_acquire_owned()
             .map_err(|_| RunError::Busy)?;
+        self.run_with(permit, op, input, limit).await
+    }
+
+    /// [`Self::run`], waiting for a free slot instead (the core's own
+    /// jobs: a request answered meanwhile is no reason to fail).
+    pub async fn run_queued(
+        &self,
+        op: &str,
+        input: Bytes,
+        limit: Duration,
+    ) -> Result<Output, RunError> {
+        let permit = Arc::clone(&self.slots)
+            .acquire_owned()
+            .await
+            .map_err(|_| RunError::Busy)?;
+        self.run_with(permit, op, input, limit).await
+    }
+
+    async fn run_with(
+        &self,
+        permit: OwnedSemaphorePermit,
+        op: &str,
+        input: Bytes,
+        limit: Duration,
+    ) -> Result<Output, RunError> {
         let deadline = Instant::now() + limit;
         let mut command = tokio::process::Command::new(&self.program);
         command
@@ -315,24 +363,20 @@ async fn exit_code(
     }
 }
 
-#[derive(Clone)]
-struct PaoPao {
-    runner: Option<Arc<Runner>>,
-    raw_config: Arc<RwLock<RawConfig>>,
-}
+type PaoPao = Arc<Service>;
 
-/// The routes, over `runner` (None: every call answers `501`); `raw_config`
-/// gives the `mixed-port` a `via: "proxy"` fetch goes through. Closed to
-/// other web pages like 签到助手's routes.
-pub fn router<S: Clone + Send + Sync + 'static>(
-    runner: Option<Arc<Runner>>,
-    raw_config: Arc<RwLock<RawConfig>>,
-) -> Router<S> {
+/// The routes over `service` (without a runner every child's call answers
+/// `501`). Closed to other web pages like 签到助手's routes.
+pub fn router<S: Clone + Send + Sync + 'static>(service: Arc<Service>) -> Router<S> {
     Router::new()
         .route("/paopao/parse", post(parse))
         .route("/paopao/build", post(build))
         .route("/paopao/fetch", post(fetch))
-        .with_state(PaoPao { runner, raw_config })
+        .route("/paopao/input", get(get_input).put(put_input))
+        .route("/paopao/subscriptions", get(subscriptions))
+        .route("/paopao/subscriptions/refresh", post(refresh))
+        .route("/paopao/schedule", get(get_schedule).put(put_schedule))
+        .with_state(service)
         .layer(DefaultBodyLimit::max(MAX_INPUT))
         .layer(middleware::from_fn(same_origin_only))
 }
@@ -427,6 +471,159 @@ async fn answer(p: &PaoPao, op: &str, input: Bytes, limit: Duration) -> Response
     }
 }
 
+/// `?name=true` (or `1`).
+fn flag(q: &HashMap<String, String>, name: &str) -> bool {
+    q.get(name).is_some_and(|v| v == "true" || v == "1")
+}
+
+fn job_refusal(e: JobError) -> Response {
+    let status = match e {
+        JobError::Busy => StatusCode::SERVICE_UNAVAILABLE,
+        JobError::Unavailable => StatusCode::NOT_IMPLEMENTED,
+        JobError::NoInput => StatusCode::CONFLICT,
+        JobError::UnknownId => StatusCode::NOT_FOUND,
+        JobError::Invalid(_) => StatusCode::BAD_REQUEST,
+        JobError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    refuse(status, e)
+}
+
+async fn put_input(
+    State(p): State<PaoPao>,
+    Query(q): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Response {
+    let n = match p.store_input(body).await {
+        Ok(n) => n,
+        Err(e) => return job_refusal(e),
+    };
+    give_back();
+    if !flag(&q, "apply") {
+        return Json(json!({ "subscriptions": n })).into_response();
+    }
+    match p.apply().await {
+        Ok(report) => Json(json!({ "subscriptions": n, "apply": report })).into_response(),
+        Err(e) => job_refusal(e),
+    }
+}
+
+async fn get_input(State(p): State<PaoPao>) -> Response {
+    match tokio::fs::File::open(p.store().input()).await {
+        Ok(f) => json_body(StatusCode::OK, giving_back(file_stream(f))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            refuse(StatusCode::NOT_FOUND, JobError::NoInput)
+        }
+        Err(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// `f` read as it is sent.
+fn file_stream(f: tokio::fs::File) -> futures::stream::BoxStream<'static, io::Result<Bytes>> {
+    futures::stream::try_unfold(f, |mut f| async move {
+        let mut buf = vec![0u8; CHUNK];
+        let n = f.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(None);
+        }
+        buf.truncate(n);
+        Ok(Some((Bytes::from(buf), f)))
+    })
+    .boxed()
+}
+
+async fn subscriptions(
+    State(p): State<PaoPao>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let head = match p.input_head().await {
+        Ok(head) => head,
+        Err(JobError::NoInput) => store::InputHead::default(),
+        Err(e) => return job_refusal(e),
+    };
+    let store = p.store().clone();
+    let nodes = flag(&q, "nodes");
+    match tokio::task::spawn_blocking(move || listing(&store, &head, nodes)).await {
+        Ok(body) => {
+            let whole = futures::stream::once(async move { Ok(Bytes::from(body)) });
+            json_body(StatusCode::OK, giving_back(whole.boxed()))
+        }
+        Err(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// `{"subscriptions": [{id, url, name, refreshed}]}`: `refreshed` the
+/// record as it is with `nodes`, else its status alone; null without one.
+fn listing(store: &store::Store, head: &store::InputHead, nodes: bool) -> Vec<u8> {
+    let mut out = b"{\"subscriptions\":[".to_vec();
+    for (i, s) in head.subscriptions.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        let mut entry = json!({ "id": s.id, "url": s.url, "name": s.name }).to_string();
+        entry.pop();
+        out.extend_from_slice(entry.as_bytes());
+        out.extend_from_slice(b",\"refreshed\":");
+        let record = std::fs::read(store.subscription(&s.id)).ok();
+        let status = record
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<store::SubStatus>(b).ok())
+            .filter(|st| st.id == s.id);
+        match (record, status) {
+            (Some(bytes), Some(_)) if nodes => out.extend_from_slice(&bytes),
+            (_, Some(st)) => out.extend_from_slice(json!(st).to_string().as_bytes()),
+            _ => out.extend_from_slice(b"null"),
+        }
+        out.push(b'}');
+    }
+    out.extend_from_slice(b"]}");
+    out
+}
+
+async fn refresh(State(p): State<PaoPao>, Query(q): Query<HashMap<String, String>>) -> Response {
+    match p.refresh(q.get("id").map(String::as_str)).await {
+        Ok(report) => Json(report).into_response(),
+        Err(e) => job_refusal(e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ScheduleBody {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    minutes: Option<u32>,
+}
+
+async fn put_schedule(State(p): State<PaoPao>, body: Bytes) -> Response {
+    let b: ScheduleBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("bad schedule: {e}")),
+    };
+    match p.set_schedule(b.enabled, b.minutes).await {
+        Ok(s) => schedule_answer(&p, &s),
+        Err(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn get_schedule(State(p): State<PaoPao>) -> Response {
+    let s = p.schedule().await;
+    schedule_answer(&p, &s)
+}
+
+fn schedule_answer(p: &Service, s: &store::Schedule) -> Response {
+    Json(json!({
+        "enabled": s.enabled,
+        "minutes": s.minutes,
+        "last_run": s.last_run,
+        "next_run": p.next_run(s),
+        "last_error": s.last_error,
+        "running": p.running(),
+        // False where the core runs inside an app: nothing runs then.
+        "available": p.can_run(),
+    }))
+    .into_response()
+}
+
 /// `answer` as a body that, once sent (or dropped), hands what the
 /// request and the answer's buffers left free in the allocator back to
 /// the system: glibc keeps freed memory in each worker thread's arena,
@@ -435,11 +632,7 @@ fn giving_back(answer: futures::stream::BoxStream<'static, io::Result<Bytes>>) -
     struct GiveBack;
     impl Drop for GiveBack {
         fn drop(&mut self) {
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            // SAFETY: no arguments to get wrong; only returns free memory.
-            unsafe {
-                libc::malloc_trim(0);
-            }
+            give_back();
         }
     }
     let guard = GiveBack;
@@ -447,6 +640,16 @@ fn giving_back(answer: futures::stream::BoxStream<'static, io::Result<Bytes>>) -
         let _held = &guard;
         std::task::Poll::Ready(None)
     })))
+}
+
+/// Hands what the allocator holds free back to the system (glibc keeps
+/// freed memory in each thread's arena).
+pub(crate) fn give_back() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: no arguments to get wrong; only returns free memory.
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
 /// The child's answer as it is: already JSON.
@@ -457,6 +660,8 @@ fn json_body(status: StatusCode, body: Body) -> Response {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use meow_config::raw::RawConfig;
+    use parking_lot::RwLock;
     use tower::ServiceExt as _;
 
     /// A runner whose child is `sh -c script` (`$1` = `paopao`, `$2` =
@@ -587,15 +792,32 @@ mod tests {
 
     use serde_json::Value;
 
+    /// A reload that is never asked for.
+    fn no_reload() -> Reload {
+        Arc::new(|_| Box::pin(async { Err("not expected".to_owned()) }))
+    }
+
+    /// A service over `runner` and `raw`, its store in a directory gone
+    /// with the test process.
+    fn service(runner: Option<Arc<Runner>>, raw: RawConfig) -> Arc<Service> {
+        let dir = tempfile::tempdir().unwrap().keep();
+        Arc::new(Service::new(
+            runner,
+            Arc::new(RwLock::new(raw)),
+            dir,
+            None,
+            no_reload(),
+        ))
+    }
+
     fn app(runner: Option<Runner>, raw: RawConfig) -> Router {
-        router(runner.map(Arc::new), Arc::new(RwLock::new(raw)))
+        router(service(runner.map(Arc::new), raw))
     }
 
     #[tokio::test]
     async fn busy_answers_503_without_queueing() {
         let runner = Arc::new(sh("sleep 2; echo '{}'"));
-        let raw = Arc::new(RwLock::new(RawConfig::default()));
-        let app: Router = router(Some(Arc::clone(&runner)), raw);
+        let app: Router = router(service(Some(Arc::clone(&runner)), RawConfig::default()));
         let slow: Vec<_> = (0..SLOTS)
             .map(|_| tokio::spawn(call(app.clone(), "/paopao/parse", "x")))
             .collect();

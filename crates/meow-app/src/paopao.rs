@@ -1,26 +1,41 @@
-//! `meow paopao parse|build|fetch`: the child process behind the API's
-//! `/paopao/…` routes ([`meow_api::paopao`]). Input on stdin, the answer
-//! on stdout, then exit: what a parse or a build allocates goes with the
-//! process, never into the long-running core.
+//! `meow paopao parse|build|fetch|refresh|apply`: the child process behind
+//! the API's `/paopao/…` routes and the core's own refreshes
+//! ([`meow_api::paopao`]). Input on stdin, the answer on stdout, then exit:
+//! what a parse or a build allocates goes with the process, never into the
+//! long-running core.
 //!
 //! - `parse`: a subscription body → what `paopao_parse` returns.
 //! - `build`: the build input (JSON) → what `paopao_build` returns.
 //! - `fetch`: `{url, user_agent?, proxy?: "host:port"}` → the body fetched
 //!   (HTTP(S), redirects, 30 s, at most 16 MiB) and parsed, plus `status`,
-//!   `final_url` and `content_disposition`; `usage` is the
-//!   `subscription-userinfo` header's when it has one (as the app does).
-//!   `proxy` is an HTTP proxy (the core's mixed port), reached by
-//!   `CONNECT`. Like the app: user agent `clash.meta`, and anything but
-//!   200 is an error.
+//!   `final_url`, `content_disposition` and `body_sha` (SHA-256, hex);
+//!   `usage` is the `subscription-userinfo` header's when it has one (as
+//!   the app does). `proxy` is an HTTP proxy (the core's mixed port),
+//!   reached by `CONNECT`. Like the app: user agent `clash.meta`, and
+//!   anything but 200 is an error.
+//! - `refresh`: `{dir, id, url, user_agent?, proxy?}` → one subscription
+//!   refreshed as the app refreshes it (`meow_paopao::refresh`, its
+//!   downloads made as `fetch` makes them, through `proxy` when directly
+//!   there is no answer) and its record written to the store in `dir`
+//!   ([`meow_api::paopao::store`]); answers `{id, error}`, `error` the
+//!   subscription's problem (null when it worked).
+//! - `apply`: `{dir, ids, config?, now, build?}` → the records of `ids`
+//!   merged into the stored input (written back when that changed it);
+//!   when lines changed (or `build`), the config built at `now` and, when
+//!   it differs from the one in `config`, written to the store's
+//!   `config.next.yaml`. Answers `{input_changed, rebuilt, next}`.
 //!
 //! The exit code says what the answer is ([`meow_api::paopao::EXIT_OK`],
 //! `EXIT_INVALID`, `EXIT_UPSTREAM`); an error answer is `{"error": ...}`.
 
 use std::io::{Read as _, Write as _};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use meow_api::paopao::store::{write_atomic, Store};
 use meow_api::paopao::{EXIT_INVALID, EXIT_OK, EXIT_UPSTREAM};
+use meow_paopao::refresh::{self, Change, Download, Refreshed, Via};
 use serde_json::{json, Value};
 
 /// What the app sends (`HttpClient.userAgent`).
@@ -38,6 +53,10 @@ pub enum Op {
     Build,
     /// `{url, user_agent?, proxy?}` on stdin → the subscription fetched and parsed
     Fetch,
+    /// `{dir, id, url, user_agent?, proxy?}` on stdin → the subscription refreshed into the store
+    Refresh,
+    /// `{dir, ids, config?, now, build?}` on stdin → refreshes merged, the config rebuilt
+    Apply,
 }
 
 /// Runs `op` over stdin and writes the answer; the process's exit code.
@@ -63,6 +82,8 @@ pub fn answer(op: &Op, input: &str) -> (Value, i32) {
         Op::Parse => judged(meow_paopao::parse_json(input)),
         Op::Build => judged(meow_paopao::build_json(input)),
         Op::Fetch => fetch(input),
+        Op::Refresh => refresh(input),
+        Op::Apply => apply(input),
     }
 }
 
@@ -138,6 +159,10 @@ fn fetch(input: &str) -> (Value, i32) {
         .header("subscription-userinfo")
         .and_then(meow_paopao::Usage::parse);
     let disposition = res.header("content-disposition").map(str::to_owned);
+    let sha = {
+        use sha2::Digest as _;
+        hex::encode(sha2::Sha256::digest(&res.body))
+    };
     let (mut v, code) = match String::from_utf8(res.body) {
         Ok(body) => judged(meow_paopao::parse_json(&body)),
         Err(_) => invalid("the subscription is not UTF-8 text"),
@@ -148,12 +173,154 @@ fn fetch(input: &str) -> (Value, i32) {
             if let Some(u) = userinfo {
                 m.insert("usage".into(), u.to_json());
             }
+            m.insert("body_sha".into(), sha.into());
         }
         m.insert("status".into(), status.into());
         m.insert("final_url".into(), res.url.into());
         m.insert("content_disposition".into(), disposition.into());
     }
     (v, code)
+}
+
+/// What a `fetch` answer is to a refresh.
+fn download_of(v: Value, code: i32) -> Download {
+    let status = v
+        .get("status")
+        .and_then(Value::as_u64)
+        .and_then(|s| u16::try_from(s).ok());
+    match (code, status) {
+        (EXIT_OK, _) => Download::Parsed(v),
+        (EXIT_UPSTREAM, Some(s)) => Download::Status(s),
+        // 200, not a subscription (or not text).
+        (EXIT_INVALID, Some(_)) => Download::Unreadable,
+        // Not an address to fetch.
+        (EXIT_INVALID, None) => Download::Unusable,
+        _ => Download::NoAnswer,
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+#[derive(serde::Deserialize)]
+struct RefreshRequest {
+    dir: PathBuf,
+    id: String,
+    url: String,
+    #[serde(default)]
+    user_agent: Option<String>,
+    #[serde(default)]
+    proxy: Option<String>,
+}
+
+fn refresh(input: &str) -> (Value, i32) {
+    let req: RefreshRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return invalid(format!("bad refresh request: {e}")),
+    };
+    let store = Store::new(&req.dir);
+    let path = store.subscription(&req.id);
+    let previous = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Refreshed>(&b).ok());
+    let attempt = refresh::refresh(&req.url, req.proxy.is_some(), |url, via| {
+        let proxy = match via {
+            Via::Direct => None,
+            Via::Proxy => req.proxy.as_deref(),
+        };
+        let ask = json!({ "url": url, "user_agent": req.user_agent, "proxy": proxy });
+        let (v, code) = fetch(&ask.to_string());
+        download_of(v, code)
+    });
+    let record = Refreshed::record(&req.id, req.user_agent.clone(), attempt, previous, now_ms());
+    let written = serde_json::to_vec(&record)
+        .map_err(std::io::Error::other)
+        .and_then(|b| write_atomic(&path, &b, false));
+    if let Err(e) = written {
+        return invalid(format!("cannot keep the subscription's record: {e}"));
+    }
+    (json!({ "id": req.id, "error": record.last_error }), EXIT_OK)
+}
+
+#[derive(serde::Deserialize)]
+struct ApplyRequest {
+    dir: PathBuf,
+    #[serde(default)]
+    ids: Vec<String>,
+    #[serde(default)]
+    config: Option<PathBuf>,
+    now: i64,
+    #[serde(default)]
+    build: bool,
+}
+
+fn apply(input: &str) -> (Value, i32) {
+    let req: ApplyRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return invalid(format!("bad apply request: {e}")),
+    };
+    let store = Store::new(&req.dir);
+    let mut input: Value = match std::fs::read(store.input()) {
+        Err(e) => return invalid(format!("no build input: {e}")),
+        Ok(b) => match serde_json::from_slice(&b) {
+            Ok(v @ Value::Object(_)) => v,
+            _ => return invalid("the stored build input is not a JSON object"),
+        },
+    };
+    let (mut changed, mut lines) = (false, false);
+    for id in &req.ids {
+        let Some(record) = std::fs::read(store.subscription(id))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Refreshed>(&b).ok())
+        else {
+            continue;
+        };
+        match refresh::merge_into_input(&mut input, &record) {
+            Change::None => {}
+            Change::Error => changed = true,
+            Change::Lines => (changed, lines) = (true, true),
+        }
+    }
+    if changed {
+        let written = serde_json::to_vec(&input)
+            .map_err(std::io::Error::other)
+            .and_then(|b| write_atomic(&store.input(), &b, true));
+        if let Err(e) = written {
+            return invalid(format!("cannot keep the build input: {e}"));
+        }
+    }
+    if !lines && !req.build {
+        return (
+            json!({ "input_changed": changed, "rebuilt": false, "next": false }),
+            EXIT_OK,
+        );
+    }
+    // Built at the time it runs (usage running out, plans ending).
+    input["now"] = req.now.into();
+    let config =
+        Value::Object(meow_paopao::build(&meow_paopao::BuildInput::from_json(&input)).config);
+    drop(input);
+    let same = req
+        .config
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .is_some_and(|running| running == config);
+    if !same {
+        // meow reads YAML; JSON is YAML. Holds the API secret.
+        let written = serde_json::to_vec(&config)
+            .map_err(std::io::Error::other)
+            .and_then(|b| write_atomic(&store.next_config(), &b, true));
+        if let Err(e) = written {
+            return invalid(format!("cannot write the new config: {e}"));
+        }
+    }
+    (
+        json!({ "input_changed": changed, "rebuilt": true, "next": !same }),
+        EXIT_OK,
+    )
 }
 
 fn upstream(why: impl std::fmt::Display) -> (Value, i32) {

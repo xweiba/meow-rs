@@ -18,6 +18,8 @@
 //! - [`api`] (L6): [`build`], [`explain`] and the JSON entry points; `ffi`
 //!   (feature `ffi`, on by default) puts them behind a C ABI:
 //!   `paopao_parse`, `paopao_build`, `paopao_explain`, `paopao_free`.
+//! - [`refresh`]: a subscription refreshed as the app does it, merged into
+//!   the build input (the core's own refreshes).
 
 pub mod api;
 mod dart;
@@ -28,6 +30,7 @@ pub mod ingest;
 pub mod model;
 pub mod plan;
 pub mod pool;
+pub mod refresh;
 pub mod rules;
 
 pub use api::{build, build_json, explain, explain_json, parse_json, BuildOutput, Explanation};

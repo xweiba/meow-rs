@@ -313,7 +313,8 @@ pub struct ApiServer {
     checkin: Option<Arc<meow_checkin::Engine>>,
     /// The route of 签到助手's built-in page ([`Self::with_checkin_web`]).
     checkin_web: Option<Arc<checkin::WebRoute>>,
-    /// Runs PaoPao's parse / build / fetch children ([`Self::with_paopao`]).
+    /// Runs PaoPao's parse / build / fetch / refresh / apply children
+    /// ([`Self::with_paopao`]).
     paopao: Option<Arc<paopao::Runner>>,
 }
 
@@ -381,8 +382,9 @@ impl ApiServer {
         self
     }
 
-    /// Serve `/paopao/…` over `runner`; without one those routes answer
-    /// `501` (the core inside an app has no binary to run).
+    /// Serve `/paopao/…` over `runner` and keep the subscriptions current
+    /// with it ([`paopao::service`]); without one the routes that need a
+    /// child answer `501` (the core inside an app has no binary to run).
     pub fn with_paopao(mut self, runner: Option<paopao::Runner>) -> Self {
         self.paopao = runner.map(Arc::new);
         self
@@ -439,11 +441,27 @@ impl ApiServer {
             }
         });
 
+        // PaoPao: the subscriptions kept current here, on the schedule
+        // (off until told) and when asked.
+        let paopao = Arc::new(paopao::Service::new(
+            self.paopao.clone(),
+            Arc::clone(&self.raw_config),
+            meow_common::resolved_home_dir().join("paopao"),
+            self.config_path
+                .as_deref()
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from),
+            routes::paopao_reload(Arc::clone(&state)),
+        ));
+        if paopao.can_run() {
+            tokio::spawn(paopao::run_schedule(Arc::clone(&paopao)));
+        }
+
         let app = routes::create_router_with(
             state,
             self.checkin.clone(),
             self.checkin_web.clone(),
-            self.paopao.clone(),
+            Some(paopao),
         );
 
         let bound = listener.local_addr().unwrap_or(self.listen_addr);

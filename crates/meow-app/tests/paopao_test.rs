@@ -1,6 +1,7 @@
-//! `meow paopao parse|build|fetch` (the children behind `/paopao/…`): the
-//! stdin/stdout contract against the library they wrap, and the API routes
-//! on a running core, against a local subscription server.
+//! `meow paopao parse|build|fetch|refresh|apply` (the children behind
+//! `/paopao/…`): the stdin/stdout contract against the library they wrap,
+//! and the API routes on a running core — its own refresh, rebuild and
+//! reload included — against a local subscription server.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -227,13 +228,24 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// `method path` with `body` on the core's API over HTTP/1.0 (no chunked
+/// `POST path` with `body` on the core's API over HTTP/1.0 (no chunked
 /// framing to undo): (status, body).
 async fn api(port: u16, path: &str, secret: Option<&str>, body: &str) -> (u16, String) {
+    api_call(port, "POST", path, secret, body).await
+}
+
+/// [`api`] with another method.
+async fn api_call(
+    port: u16,
+    method: &str,
+    path: &str,
+    secret: Option<&str>,
+    body: &str,
+) -> (u16, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     let auth = secret.map_or(String::new(), |s| format!("Authorization: Bearer {s}\r\n"));
     let req = format!(
-        "POST {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{auth}Content-Length: {}\r\n\r\n{body}",
+        "{method} {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{auth}Content-Length: {}\r\n\r\n{body}",
         body.len()
     );
     s.write_all(req.as_bytes()).await.unwrap();
@@ -248,11 +260,13 @@ async fn api(port: u16, path: &str, secret: Option<&str>, body: &str) -> (u16, S
     (status, body.to_owned())
 }
 
-#[tokio::test]
-async fn the_api_runs_them_in_children() {
-    let base = subscription_server().await;
-    let (api_port, mixed_port) = (free_port(), free_port());
-    let home = tempfile::tempdir().unwrap();
+/// A core on loopback with its API at `api_port` (secret `s3cret`) and
+/// its home in `home`; killed when dropped.
+async fn start_core(
+    api_port: u16,
+    mixed_port: u16,
+    home: &std::path::Path,
+) -> tokio::process::Child {
     // Geodata links that fail at once: the core must not go online.
     let config = format!(
         "mixed-port: {mixed_port}\nbind-address: 127.0.0.1\nallow-lan: false\n\
@@ -261,13 +275,13 @@ async fn the_api_runs_them_in_children() {
          asn: 'http://127.0.0.1:1/c', geosite: 'http://127.0.0.1:1/d'}}\n\
          proxies: [{{name: d1, type: direct}}]\nrules: ['MATCH,DIRECT']\n"
     );
-    let path = home.path().join("config.yaml");
+    let path = home.join("config.yaml");
     std::fs::write(&path, config).unwrap();
-    let _core = tokio::process::Command::new(env!("CARGO_BIN_EXE_meow"))
+    let core = tokio::process::Command::new(env!("CARGO_BIN_EXE_meow"))
         .arg("-f")
         .arg(&path)
         .arg("-d")
-        .arg(home.path())
+        .arg(home)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true)
@@ -282,6 +296,15 @@ async fn the_api_runs_them_in_children() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(up, "the core's API did not come up");
+    core
+}
+
+#[tokio::test]
+async fn the_api_runs_them_in_children() {
+    let base = subscription_server().await;
+    let (api_port, mixed_port) = (free_port(), free_port());
+    let home = tempfile::tempdir().unwrap();
+    let _core = start_core(api_port, mixed_port, home.path()).await;
 
     // Behind the API's auth.
     assert_eq!(api(api_port, "/paopao/parse", None, LINKS).await.0, 401);
@@ -313,4 +336,259 @@ async fn the_api_runs_them_in_children() {
     let (status, body) = api(api_port, "/paopao/fetch", Some("s3cret"), &req).await;
     assert_eq!(status, 502);
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["status"], 404);
+}
+
+/// A build input as the app hands it over, small: subscription `a1` at
+/// `url` with no lines yet, everything on loopback, mode global (no rule
+/// data to fetch).
+fn handed_over(url: &str, api_port: u16, mixed_port: u16) -> Value {
+    json!({
+        "subscriptions": [{"id": "a1", "url": url, "name": "127.0.0.1", "nodes": [], "skipped": 0}],
+        "settings": {"mixed_port": mixed_port, "mode": "global"},
+        "network": {"kind": "unknown", "addresses": []},
+        "ipv6": false, "vpnOnly": false, "now": 0, "utcOffset": 0,
+        "exits": {}, "resolved": {}, "strategy": "smart", "modules": [], "sshSecrets": {},
+        "runtime": {"controllerPort": api_port, "secret": "s3cret", "ipv6": false},
+    })
+}
+
+/// An HTTP `CONNECT` proxy that tunnels every request to `to`, whatever it
+/// asks for.
+async fn redirecting_proxy(to: String) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else {
+                return;
+            };
+            let to = to.clone();
+            tokio::spawn(async move {
+                read_head(&mut s).await;
+                let Ok(mut up) = TcpStream::connect(&to).await else {
+                    return;
+                };
+                let _ = s
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await;
+                let _ = tokio::io::copy_bidirectional(&mut s, &mut up).await;
+            });
+        }
+    });
+    addr.to_string()
+}
+
+#[tokio::test]
+async fn refresh_and_apply_keep_the_store_as_the_app_would() {
+    let base = subscription_server().await;
+    let store = tempfile::tempdir().unwrap();
+    let dir = store.path();
+    let input = handed_over(&format!("{base}/sub"), 9090, 7890);
+    std::fs::write(dir.join("input.json"), input.to_string()).unwrap();
+    let record = |id: &str| -> Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(dir.join(format!("subscriptions/{id}.json"))).unwrap(),
+        )
+        .unwrap()
+    };
+
+    let req = json!({ "dir": dir, "id": "a1", "url": format!("{base}/sub") });
+    let (out, code) = child("refresh", &req.to_string()).await;
+    assert_eq!(
+        (code, serde_json::from_str::<Value>(&out).unwrap()),
+        (0, json!({"id": "a1", "error": null}))
+    );
+    let r = record("a1");
+    assert_eq!(r["node_count"], 2);
+    assert_eq!(r["via"], "direct");
+    assert_eq!(r["usage"]["total"], 1000);
+    assert_eq!(r["file_name"], "my");
+    assert_eq!(r["body_sha"].as_str().unwrap().len(), 64);
+    assert_eq!(r["nodes"], meow_paopao::parse_json(LINKS)["nodes"]);
+
+    // A dead link: its problem in the app's words (after trying ".../gone/").
+    let req = json!({ "dir": dir, "id": "zz", "url": format!("{base}/gone") });
+    let (out, code) = child("refresh", &req.to_string()).await;
+    assert_eq!(code, 0);
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap()["error"],
+        meow_paopao::refresh::GONE
+    );
+    assert_eq!(record("zz")["last_error"], meow_paopao::refresh::GONE);
+
+    // No answer directly: through the core's port, as the app retries.
+    let (proxy, real) = (
+        redirecting_proxy(base.trim_start_matches("http://").to_owned()).await,
+        format!("http://127.0.0.1:{}/real", free_port()),
+    );
+    let req = json!({ "dir": dir, "id": "p", "url": real, "proxy": proxy });
+    let (out, code) = child("refresh", &req.to_string()).await;
+    assert_eq!(
+        (
+            code,
+            serde_json::from_str::<Value>(&out).unwrap()["error"].clone()
+        ),
+        (0, Value::Null)
+    );
+    assert_eq!(record("p")["via"], "proxy");
+
+    // Merged as the app merges, then built.
+    let config = dir.join("config.yaml");
+    let req = json!({ "dir": dir, "ids": ["a1", "zz"], "config": config, "now": 1_000 });
+    let (out, code) = child("apply", &req.to_string()).await;
+    assert_eq!(
+        (code, serde_json::from_str::<Value>(&out).unwrap()),
+        (
+            0,
+            json!({"input_changed": true, "rebuilt": true, "next": true})
+        )
+    );
+    let kept: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("input.json")).unwrap()).unwrap();
+    let rec: meow_paopao::refresh::Refreshed = serde_json::from_value(record("a1")).unwrap();
+    let want =
+        meow_paopao::refresh::merge_refreshed(input["subscriptions"][0].as_object().unwrap(), &rec);
+    assert_eq!(kept["subscriptions"][0], Value::Object(want));
+    assert_eq!(kept["subscriptions"][0]["name"], "my");
+    // The stored input keeps the time it was handed over with.
+    assert_eq!(kept["now"], 0);
+    let mut at = kept.clone();
+    at["now"] = 1_000.into();
+    let built = meow_paopao::build(&meow_paopao::BuildInput::from_json(&at)).config;
+    let next: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("config.next.yaml")).unwrap())
+            .unwrap();
+    assert_eq!(next, Value::Object(built));
+
+    // Once it runs: the same lines change nothing; a forced build finds
+    // the same config.
+    std::fs::rename(dir.join("config.next.yaml"), &config).unwrap();
+    let (out, _) = child("apply", &req.to_string()).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap(),
+        json!({"input_changed": false, "rebuilt": false, "next": false})
+    );
+    let req = json!({ "dir": dir, "ids": [], "config": config, "now": 1_000, "build": true });
+    let (out, _) = child("apply", &req.to_string()).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap(),
+        json!({"input_changed": false, "rebuilt": true, "next": false})
+    );
+    assert!(!dir.join("config.next.yaml").exists());
+
+    // No input: an error answer, exit 2.
+    let empty = tempfile::tempdir().unwrap();
+    let (out, code) = child("apply", &json!({"dir": empty.path(), "now": 1}).to_string()).await;
+    assert_eq!(code, 2);
+    assert!(serde_json::from_str::<Value>(&out).unwrap()["error"].is_string());
+}
+
+/// The core's configured proxies' names.
+async fn proxy_names(api_port: u16) -> Vec<String> {
+    let (status, body) = api_call(api_port, "GET", "/proxies", Some("s3cret"), "").await;
+    assert_eq!(status, 200);
+    let v: Value = serde_json::from_str(&body).unwrap();
+    v["proxies"].as_object().unwrap().keys().cloned().collect()
+}
+
+#[tokio::test]
+async fn the_core_refreshes_rebuilds_and_reloads_itself() {
+    let base = subscription_server().await;
+    let (api_port, mixed_port) = (free_port(), free_port());
+    let home = tempfile::tempdir().unwrap();
+    let _core = start_core(api_port, mixed_port, home.path()).await;
+    let config = home.path().join("config.yaml");
+    let call = |method: &'static str, path: &'static str, body: String| async move {
+        let (status, body) = api_call(api_port, method, path, Some("s3cret"), &body).await;
+        (
+            status,
+            serde_json::from_str::<Value>(&body).unwrap_or(Value::Null),
+        )
+    };
+
+    let input = handed_over(&format!("{base}/sub"), api_port, mixed_port);
+    assert_eq!(
+        api_call(api_port, "PUT", "/paopao/input", None, "{}")
+            .await
+            .0,
+        401
+    );
+    let (status, v) = call("PUT", "/paopao/input", input.to_string()).await;
+    assert_eq!((status, v), (200, json!({"subscriptions": 1})));
+    assert!(home.path().join("paopao/input.json").exists());
+    assert!(!proxy_names(api_port).await.contains(&"HK 01".to_owned()));
+
+    let (status, v) = call("POST", "/paopao/subscriptions/refresh?id=a1", String::new()).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(
+        v,
+        json!({"refreshed": [{"id": "a1"}], "input_changed": true, "rebuilt": true, "reloaded": true})
+    );
+    let names = proxy_names(api_port).await;
+    assert!(
+        names.contains(&"HK 01".to_owned()) && names.contains(&"JP 02".to_owned()),
+        "{names:?}"
+    );
+    // The file the core runs from is the new config now.
+    let running: Value = serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+    assert_eq!(
+        running["external-controller"],
+        format!("127.0.0.1:{api_port}")
+    );
+    let (_, v) = call("GET", "/paopao/subscriptions", String::new()).await;
+    assert_eq!(v["subscriptions"][0]["name"], "my");
+    assert_eq!(v["subscriptions"][0]["refreshed"]["node_count"], 2);
+    assert!(v["subscriptions"][0]["refreshed"].get("nodes").is_none());
+
+    // The same lines again: nothing to reload.
+    let (_, v) = call("POST", "/paopao/subscriptions/refresh?id=a1", String::new()).await;
+    assert_eq!(v["reloaded"], false);
+
+    // The link dies: its problem kept, the running config and file as
+    // they were.
+    let before = std::fs::read(&config).unwrap();
+    let dead = handed_over(&format!("{base}/gone"), api_port, mixed_port);
+    assert_eq!(call("PUT", "/paopao/input", dead.to_string()).await.0, 200);
+    let (_, v) = call("POST", "/paopao/subscriptions/refresh?id=a1", String::new()).await;
+    assert_eq!(v["refreshed"][0]["error"], meow_paopao::refresh::GONE);
+    assert_eq!(v["reloaded"], false);
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+    assert!(proxy_names(api_port).await.contains(&"HK 01".to_owned()));
+
+    // The schedule: off until told; told, it runs at once (never run).
+    let (_, v) = call("GET", "/paopao/schedule", String::new()).await;
+    assert_eq!(
+        (
+            v["enabled"].clone(),
+            v["minutes"].clone(),
+            v["last_run"].clone()
+        ),
+        (json!(false), json!(720), Value::Null)
+    );
+    assert_eq!(call("PUT", "/paopao/input", input.to_string()).await.0, 200);
+    let (status, v) = call("PUT", "/paopao/schedule", r#"{"enabled": true}"#.to_owned()).await;
+    assert_eq!((status, v["enabled"].clone()), (200, json!(true)));
+    let mut ran = Value::Null;
+    for _ in 0..200 {
+        let (_, v) = call("GET", "/paopao/schedule", String::new()).await;
+        if v["last_run"].is_i64() && v["running"] == false {
+            ran = v;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        ran["last_run"].is_i64(),
+        "the scheduled refresh did not run"
+    );
+    assert_eq!(ran["last_error"], Value::Null);
+    assert_eq!(
+        ran["next_run"],
+        ran["last_run"].as_i64().unwrap() + 720 * 60_000
+    );
+    let (_, v) = call("GET", "/paopao/subscriptions", String::new()).await;
+    assert_eq!(
+        v["subscriptions"][0]["refreshed"]["last_error"],
+        Value::Null
+    );
 }

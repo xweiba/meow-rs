@@ -1,0 +1,1396 @@
+[
+  {
+    "name": "worked: header usage, provider file name, split",
+    "before": {
+      "id": "wsn37uqk",
+      "url": "https://sub.example/clash",
+      "name": "sub.example",
+      "nodes": [
+        {
+          "name": "HK 01",
+          "outbound": {
+            "type": "shadowsocks",
+            "server": "1.2.3.4",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "pass"
+          }
+        },
+        {
+          "name": "JP 02",
+          "outbound": {
+            "type": "vless",
+            "server": "5.6.7.8",
+            "server_port": 443,
+            "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+            "tls": {
+              "enabled": true,
+              "server_name": "a.example"
+            },
+            "packet_encoding": "xudp"
+          }
+        }
+      ],
+      "skipped": 0
+    },
+    "steps": [
+      {
+        "web": {
+          "https://sub.example/clash": {
+            "status": 200,
+            "body": "port: 7890\nproxies:\n  - {name: \"HK 1\", type: ss, server: hk.example.com, port: 8388, cipher: chacha20-ietf-poly1305, password: \"p\"}\n  - name: obfs\n    type: ss\n    server: o.example.com\n    port: 443\n    cipher: aes-128-gcm\n    password: p\n    plugin: obfs\n    plugin-opts: {mode: tls, host: bing.com}\n  - name: vm\n    type: vmess\n    server: vm.example.com\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    tls: true\n    network: ws\n    ws-opts: {path: /p, headers: {Host: vm.example.com}}\n  - name: reality\n    type: vless\n    server: re.example.com\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    flow: xtls-rprx-vision\n    tls: true\n    servername: www.apple.com\n    client-fingerprint: chrome\n    reality-opts: {public-key: jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0, short-id: 0123abcd}\n  - {name: tj, type: trojan, server: tj.example.com, port: 443, password: x, sni: tj.example.com, skip-cert-verify: true}\n  - {name: hy, type: hysteria2, server: hy.example.com, port: 443, password: x, up: \"50 Mbps\", down: \"200 Mbps\"}\n  - {name: tu, type: tuic, server: tu.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, password: x, congestion-controller: bbr}\n  - {name: snell, type: snell, server: s.example.com, port: 1, psk: x}\nproxy-groups:\n  - {name: PROXY, type: select, proxies: [HK 1]}\n",
+            "headers": {
+              "subscription-userinfo": "upload=100; download=900; total=10000; expire=1794013872",
+              "content-disposition": "attachment; filename*=UTF-8''%E6%88%91%E7%9A%84%E6%9C%BA%E5%9C%BA.yaml"
+            }
+          }
+        },
+        "after": {
+          "id": "wsn37uqk",
+          "url": "https://sub.example/clash",
+          "name": "我的机场",
+          "nodes": [
+            {
+              "name": "HK 1",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "hk.example.com",
+                "server_port": 8388,
+                "method": "chacha20-ietf-poly1305",
+                "password": "p"
+              }
+            },
+            {
+              "name": "obfs",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "o.example.com",
+                "server_port": 443,
+                "method": "aes-128-gcm",
+                "password": "p",
+                "plugin": "obfs-local",
+                "plugin_opts": "obfs=tls;obfs-host=bing.com"
+              }
+            },
+            {
+              "name": "vm",
+              "outbound": {
+                "type": "vmess",
+                "server": "vm.example.com",
+                "server_port": 443,
+                "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                "security": "auto",
+                "alter_id": 0,
+                "tls": {
+                  "enabled": true
+                },
+                "transport": {
+                  "type": "ws",
+                  "path": "/p",
+                  "headers": {
+                    "Host": "vm.example.com"
+                  }
+                },
+                "packet_encoding": "xudp"
+              }
+            },
+            {
+              "name": "reality",
+              "outbound": {
+                "type": "vless",
+                "server": "re.example.com",
+                "server_port": 443,
+                "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                "flow": "xtls-rprx-vision",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "www.apple.com",
+                  "utls": {
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                  },
+                  "reality": {
+                    "enabled": true,
+                    "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+                    "short_id": "0123abcd"
+                  }
+                },
+                "packet_encoding": "xudp"
+              }
+            },
+            {
+              "name": "tj",
+              "outbound": {
+                "type": "trojan",
+                "server": "tj.example.com",
+                "server_port": 443,
+                "password": "x",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "tj.example.com",
+                  "insecure": true
+                }
+              }
+            },
+            {
+              "name": "hy",
+              "outbound": {
+                "type": "hysteria2",
+                "server": "hy.example.com",
+                "server_port": 443,
+                "password": "x",
+                "up_mbps": 50,
+                "down_mbps": 200,
+                "tls": {
+                  "enabled": true
+                }
+              }
+            },
+            {
+              "name": "tu",
+              "outbound": {
+                "type": "tuic",
+                "server": "tu.example.com",
+                "server_port": 443,
+                "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                "password": "x",
+                "congestion_control": "bbr",
+                "tls": {
+                  "enabled": true,
+                  "alpn": [
+                    "h3"
+                  ]
+                }
+              }
+            }
+          ],
+          "skipped": 1,
+          "usage": {
+            "upload": 100,
+            "download": 900,
+            "total": 10000,
+            "expire": 1794013872000
+          },
+          "split": {
+            "groups": [
+              {
+                "n": "PROXY",
+                "t": "select",
+                "m": [
+                  "HK 1"
+                ]
+              }
+            ],
+            "rules": []
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "named: the user name stays",
+    "before": {
+      "id": "ctnutjia",
+      "url": "https://sub.example/clash",
+      "name": "我的订阅",
+      "nodes": [
+        {
+          "name": "HK 01",
+          "outbound": {
+            "type": "shadowsocks",
+            "server": "1.2.3.4",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "pass"
+          }
+        },
+        {
+          "name": "JP 02",
+          "outbound": {
+            "type": "vless",
+            "server": "5.6.7.8",
+            "server_port": 443,
+            "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+            "tls": {
+              "enabled": true,
+              "server_name": "a.example"
+            },
+            "packet_encoding": "xudp"
+          }
+        }
+      ],
+      "skipped": 0,
+      "named": true
+    },
+    "steps": [
+      {
+        "web": {
+          "https://sub.example/clash": {
+            "status": 200,
+            "body": "port: 7890\nproxies:\n  - {name: \"HK 1\", type: ss, server: hk.example.com, port: 8388, cipher: chacha20-ietf-poly1305, password: \"p\"}\n  - name: obfs\n    type: ss\n    server: o.example.com\n    port: 443\n    cipher: aes-128-gcm\n    password: p\n    plugin: obfs\n    plugin-opts: {mode: tls, host: bing.com}\n  - name: vm\n    type: vmess\n    server: vm.example.com\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    tls: true\n    network: ws\n    ws-opts: {path: /p, headers: {Host: vm.example.com}}\n  - name: reality\n    type: vless\n    server: re.example.com\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    flow: xtls-rprx-vision\n    tls: true\n    servername: www.apple.com\n    client-fingerprint: chrome\n    reality-opts: {public-key: jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0, short-id: 0123abcd}\n  - {name: tj, type: trojan, server: tj.example.com, port: 443, password: x, sni: tj.example.com, skip-cert-verify: true}\n  - {name: hy, type: hysteria2, server: hy.example.com, port: 443, password: x, up: \"50 Mbps\", down: \"200 Mbps\"}\n  - {name: tu, type: tuic, server: tu.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, password: x, congestion-controller: bbr}\n  - {name: snell, type: snell, server: s.example.com, port: 1, psk: x}\nproxy-groups:\n  - {name: PROXY, type: select, proxies: [HK 1]}\n",
+            "headers": {
+              "content-disposition": "attachment; filename*=UTF-8''%E6%88%91%E7%9A%84%E6%9C%BA%E5%9C%BA.yaml"
+            }
+          }
+        },
+        "after": {
+          "id": "ctnutjia",
+          "url": "https://sub.example/clash",
+          "name": "我的订阅",
+          "nodes": [
+            {
+              "name": "HK 1",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "hk.example.com",
+                "server_port": 8388,
+                "method": "chacha20-ietf-poly1305",
+                "password": "p"
+              }
+            },
+            {
+              "name": "obfs",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "o.example.com",
+                "server_port": 443,
+                "method": "aes-128-gcm",
+                "password": "p",
+                "plugin": "obfs-local",
+                "plugin_opts": "obfs=tls;obfs-host=bing.com"
+              }
+            },
+            {
+              "name": "vm",
+              "outbound": {
+                "type": "vmess",
+                "server": "vm.example.com",
+                "server_port": 443,
+                "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                "security": "auto",
+                "alter_id": 0,
+                "tls": {
+                  "enabled": true
+                },
+                "transport": {
+                  "type": "ws",
+                  "path": "/p",
+                  "headers": {
+                    "Host": "vm.example.com"
+                  }
+                },
+                "packet_encoding": "xudp"
+              }
+            },
+            {
+              "name": "reality",
+              "outbound": {
+                "type": "vless",
+                "server": "re.example.com",
+                "server_port": 443,
+                "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                "flow": "xtls-rprx-vision",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "www.apple.com",
+                  "utls": {
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                  },
+                  "reality": {
+                    "enabled": true,
+                    "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+                    "short_id": "0123abcd"
+                  }
+                },
+                "packet_encoding": "xudp"
+              }
+            },
+            {
+              "name": "tj",
+              "outbound": {
+                "type": "trojan",
+                "server": "tj.example.com",
+                "server_port": 443,
+                "password": "x",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "tj.example.com",
+                  "insecure": true
+                }
+              }
+            },
+            {
+              "name": "hy",
+              "outbound": {
+                "type": "hysteria2",
+                "server": "hy.example.com",
+                "server_port": 443,
+                "password": "x",
+                "up_mbps": 50,
+                "down_mbps": 200,
+                "tls": {
+                  "enabled": true
+                }
+              }
+            },
+            {
+              "name": "tu",
+              "outbound": {
+                "type": "tuic",
+                "server": "tu.example.com",
+                "server_port": 443,
+                "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                "password": "x",
+                "congestion_control": "bbr",
+                "tls": {
+                  "enabled": true,
+                  "alpn": [
+                    "h3"
+                  ]
+                }
+              }
+            }
+          ],
+          "skipped": 1,
+          "split": {
+            "groups": [
+              {
+                "n": "PROXY",
+                "t": "select",
+                "m": [
+                  "HK 1"
+                ]
+              }
+            ],
+            "rules": []
+          },
+          "named": true
+        }
+      }
+    ]
+  },
+  {
+    "name": "404, the last slash answers",
+    "before": {
+      "id": "glqagyty",
+      "url": "https://panel.example/clash",
+      "name": "panel.example",
+      "nodes": [
+        {
+          "name": "HK 01",
+          "outbound": {
+            "type": "shadowsocks",
+            "server": "1.2.3.4",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "pass"
+          }
+        },
+        {
+          "name": "JP 02",
+          "outbound": {
+            "type": "vless",
+            "server": "5.6.7.8",
+            "server_port": 443,
+            "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+            "tls": {
+              "enabled": true,
+              "server_name": "a.example"
+            },
+            "packet_encoding": "xudp"
+          }
+        }
+      ],
+      "skipped": 0
+    },
+    "steps": [
+      {
+        "web": {
+          "https://panel.example/clash": {
+            "status": 404,
+            "body": "",
+            "headers": {}
+          },
+          "https://panel.example/clash/": {
+            "status": 200,
+            "body": "port: 7890\nproxies:\n  - {name: \"HK 1\", type: ss, server: hk.example.com, port: 8388, cipher: chacha20-ietf-poly1305, password: \"p\"}\n  - name: obfs\n    type: ss\n    server: o.example.com\n    port: 443\n    cipher: aes-128-gcm\n    password: p\n    plugin: obfs\n    plugin-opts: {mode: tls, host: bing.com}\n  - name: vm\n    type: vmess\n    server: vm.example.com\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    tls: true\n    network: ws\n    ws-opts: {path: /p, headers: {Host: vm.example.com}}\n  - name: reality\n    type: vless\n    server: re.example.com\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    flow: xtls-rprx-vision\n    tls: true\n    servername: www.apple.com\n    client-fingerprint: chrome\n    reality-opts: {public-key: jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0, short-id: 0123abcd}\n  - {name: tj, type: trojan, server: tj.example.com, port: 443, password: x, sni: tj.example.com, skip-cert-verify: true}\n  - {name: hy, type: hysteria2, server: hy.example.com, port: 443, password: x, up: \"50 Mbps\", down: \"200 Mbps\"}\n  - {name: tu, type: tuic, server: tu.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, password: x, congestion-controller: bbr}\n  - {name: snell, type: snell, server: s.example.com, port: 1, psk: x}\nproxy-groups:\n  - {name: PROXY, type: select, proxies: [HK 1]}\n",
+            "headers": {}
+          }
+        },
+        "after": {
+          "id": "glqagyty",
+          "url": "https://panel.example/clash/",
+          "name": "panel.example",
+          "nodes": [
+            {
+              "name": "HK 1",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "hk.example.com",
+                "server_port": 8388,
+                "method": "chacha20-ietf-poly1305",
+                "password": "p"
+              }
+            },
+            {
+              "name": "obfs",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "o.example.com",
+                "server_port": 443,
+                "method": "aes-128-gcm",
+                "password": "p",
+                "plugin": "obfs-local",
+                "plugin_opts": "obfs=tls;obfs-host=bing.com"
+              }
+            },
+            {
+              "name": "vm",
+              "outbound": {
+                "type": "vmess",
+                "server": "vm.example.com",
+                "server_port": 443,
+                "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                "security": "auto",
+                "alter_id": 0,
+                "tls": {
+                  "enabled": true
+                },
+                "transport": {
+                  "type": "ws",
+                  "path": "/p",
+                  "headers": {
+                    "Host": "vm.example.com"
+                  }
+                },
+                "packet_encoding": "xudp"
+              }
+            },
+            {
+              "name": "reality",
+              "outbound": {
+                "type": "vless",
+                "server": "re.example.com",
+                "server_port": 443,
+                "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                "flow": "xtls-rprx-vision",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "www.apple.com",
+                  "utls": {
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                  },
+                  "reality": {
+                    "enabled": true,
+                    "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+                    "short_id": "0123abcd"
+                  }
+                },
+                "packet_encoding": "xudp"
+              }
+            },
+            {
+              "name": "tj",
+              "outbound": {
+                "type": "trojan",
+                "server": "tj.example.com",
+                "server_port": 443,
+                "password": "x",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "tj.example.com",
+                  "insecure": true
+                }
+              }
+            },
+            {
+              "name": "hy",
+              "outbound": {
+                "type": "hysteria2",
+                "server": "hy.example.com",
+                "server_port": 443,
+                "password": "x",
+                "up_mbps": 50,
+                "down_mbps": 200,
+                "tls": {
+                  "enabled": true
+                }
+              }
+            },
+            {
+              "name": "tu",
+              "outbound": {
+                "type": "tuic",
+                "server": "tu.example.com",
+                "server_port": 443,
+                "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                "password": "x",
+                "congestion_control": "bbr",
+                "tls": {
+                  "enabled": true,
+                  "alpn": [
+                    "h3"
+                  ]
+                }
+              }
+            }
+          ],
+          "skipped": 1,
+          "split": {
+            "groups": [
+              {
+                "n": "PROXY",
+                "t": "select",
+                "m": [
+                  "HK 1"
+                ]
+              }
+            ],
+            "rules": []
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "404 both ways",
+    "before": {
+      "id": "e8iov6rl",
+      "url": "https://panel.example/clash",
+      "name": "panel.example",
+      "nodes": [
+        {
+          "name": "HK 01",
+          "outbound": {
+            "type": "shadowsocks",
+            "server": "1.2.3.4",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "pass"
+          }
+        },
+        {
+          "name": "JP 02",
+          "outbound": {
+            "type": "vless",
+            "server": "5.6.7.8",
+            "server_port": 443,
+            "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+            "tls": {
+              "enabled": true,
+              "server_name": "a.example"
+            },
+            "packet_encoding": "xudp"
+          }
+        }
+      ],
+      "skipped": 0
+    },
+    "steps": [
+      {
+        "web": {
+          "https://panel.example/clash": {
+            "status": 404,
+            "body": "",
+            "headers": {}
+          },
+          "https://panel.example/clash/": {
+            "status": 404,
+            "body": "",
+            "headers": {}
+          }
+        },
+        "after": {
+          "id": "e8iov6rl",
+          "url": "https://panel.example/clash",
+          "name": "panel.example",
+          "nodes": [
+            {
+              "name": "HK 01",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "1.2.3.4",
+                "server_port": 8388,
+                "method": "aes-256-gcm",
+                "password": "pass"
+              }
+            },
+            {
+              "name": "JP 02",
+              "outbound": {
+                "type": "vless",
+                "server": "5.6.7.8",
+                "server_port": 443,
+                "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "a.example"
+                },
+                "packet_encoding": "xudp"
+              }
+            }
+          ],
+          "skipped": 0,
+          "error": "订阅已失效，请向机场索取新的订阅链接"
+        }
+      }
+    ]
+  },
+  {
+    "name": "403",
+    "before": {
+      "id": "ukmii2o8",
+      "url": "https://sub.example/clash",
+      "name": "sub.example",
+      "nodes": [
+        {
+          "name": "HK 01",
+          "outbound": {
+            "type": "shadowsocks",
+            "server": "1.2.3.4",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "pass"
+          }
+        },
+        {
+          "name": "JP 02",
+          "outbound": {
+            "type": "vless",
+            "server": "5.6.7.8",
+            "server_port": 443,
+            "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+            "tls": {
+              "enabled": true,
+              "server_name": "a.example"
+            },
+            "packet_encoding": "xudp"
+          }
+        }
+      ],
+      "skipped": 0
+    },
+    "steps": [
+      {
+        "web": {
+          "https://sub.example/clash": {
+            "status": 403,
+            "body": "",
+            "headers": {}
+          }
+        },
+        "after": {
+          "id": "ukmii2o8",
+          "url": "https://sub.example/clash",
+          "name": "sub.example",
+          "nodes": [
+            {
+              "name": "HK 01",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "1.2.3.4",
+                "server_port": 8388,
+                "method": "aes-256-gcm",
+                "password": "pass"
+              }
+            },
+            {
+              "name": "JP 02",
+              "outbound": {
+                "type": "vless",
+                "server": "5.6.7.8",
+                "server_port": 443,
+                "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "a.example"
+                },
+                "packet_encoding": "xudp"
+              }
+            }
+          ],
+          "skipped": 0,
+          "error": "订阅已失效，请向机场索取新的订阅链接"
+        }
+      }
+    ]
+  },
+  {
+    "name": "server error",
+    "before": {
+      "id": "1uh8z783",
+      "url": "https://sub.example/clash",
+      "name": "sub.example",
+      "nodes": [
+        {
+          "name": "HK 01",
+          "outbound": {
+            "type": "shadowsocks",
+            "server": "1.2.3.4",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "pass"
+          }
+        },
+        {
+          "name": "JP 02",
+          "outbound": {
+            "type": "vless",
+            "server": "5.6.7.8",
+            "server_port": 443,
+            "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+            "tls": {
+              "enabled": true,
+              "server_name": "a.example"
+            },
+            "packet_encoding": "xudp"
+          }
+        }
+      ],
+      "skipped": 0
+    },
+    "steps": [
+      {
+        "web": {
+          "https://sub.example/clash": {
+            "status": 502,
+            "body": "",
+            "headers": {}
+          }
+        },
+        "after": {
+          "id": "1uh8z783",
+          "url": "https://sub.example/clash",
+          "name": "sub.example",
+          "nodes": [
+            {
+              "name": "HK 01",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "1.2.3.4",
+                "server_port": 8388,
+                "method": "aes-256-gcm",
+                "password": "pass"
+              }
+            },
+            {
+              "name": "JP 02",
+              "outbound": {
+                "type": "vless",
+                "server": "5.6.7.8",
+                "server_port": 443,
+                "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "a.example"
+                },
+                "packet_encoding": "xudp"
+              }
+            }
+          ],
+          "skipped": 0,
+          "error": "订阅服务器出错（502），请稍后再试"
+        }
+      }
+    ]
+  },
+  {
+    "name": "no answer, the core off",
+    "before": {
+      "id": "279h5whu",
+      "url": "https://sub.example/clash",
+      "name": "sub.example",
+      "nodes": [
+        {
+          "name": "HK 01",
+          "outbound": {
+            "type": "shadowsocks",
+            "server": "1.2.3.4",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "pass"
+          }
+        },
+        {
+          "name": "JP 02",
+          "outbound": {
+            "type": "vless",
+            "server": "5.6.7.8",
+            "server_port": 443,
+            "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+            "tls": {
+              "enabled": true,
+              "server_name": "a.example"
+            },
+            "packet_encoding": "xudp"
+          }
+        }
+      ],
+      "skipped": 0
+    },
+    "steps": [
+      {
+        "web": {},
+        "after": {
+          "id": "279h5whu",
+          "url": "https://sub.example/clash",
+          "name": "sub.example",
+          "nodes": [
+            {
+              "name": "HK 01",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "1.2.3.4",
+                "server_port": 8388,
+                "method": "aes-256-gcm",
+                "password": "pass"
+              }
+            },
+            {
+              "name": "JP 02",
+              "outbound": {
+                "type": "vless",
+                "server": "5.6.7.8",
+                "server_port": 443,
+                "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "a.example"
+                },
+                "packet_encoding": "xudp"
+              }
+            }
+          ],
+          "skipped": 0,
+          "error": "无法连接订阅地址，请检查网络后重试"
+        }
+      }
+    ]
+  },
+  {
+    "name": "no lines",
+    "before": {
+      "id": "oho3ejjh",
+      "url": "https://sub.example/clash",
+      "name": "sub.example",
+      "nodes": [
+        {
+          "name": "HK 01",
+          "outbound": {
+            "type": "shadowsocks",
+            "server": "1.2.3.4",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "pass"
+          }
+        },
+        {
+          "name": "JP 02",
+          "outbound": {
+            "type": "vless",
+            "server": "5.6.7.8",
+            "server_port": 443,
+            "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+            "tls": {
+              "enabled": true,
+              "server_name": "a.example"
+            },
+            "packet_encoding": "xudp"
+          }
+        }
+      ],
+      "skipped": 0
+    },
+    "steps": [
+      {
+        "web": {
+          "https://sub.example/clash": {
+            "status": 200,
+            "body": "",
+            "headers": {}
+          }
+        },
+        "after": {
+          "id": "oho3ejjh",
+          "url": "https://sub.example/clash",
+          "name": "sub.example",
+          "nodes": [
+            {
+              "name": "HK 01",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "1.2.3.4",
+                "server_port": 8388,
+                "method": "aes-256-gcm",
+                "password": "pass"
+              }
+            },
+            {
+              "name": "JP 02",
+              "outbound": {
+                "type": "vless",
+                "server": "5.6.7.8",
+                "server_port": 443,
+                "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "a.example"
+                },
+                "packet_encoding": "xudp"
+              }
+            }
+          ],
+          "skipped": 0,
+          "error": "订阅中没有节点"
+        }
+      }
+    ]
+  },
+  {
+    "name": "only unsupported lines",
+    "before": {
+      "id": "i8scs67a",
+      "url": "https://sub.example/clash",
+      "name": "sub.example",
+      "nodes": [
+        {
+          "name": "HK 01",
+          "outbound": {
+            "type": "shadowsocks",
+            "server": "1.2.3.4",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "pass"
+          }
+        },
+        {
+          "name": "JP 02",
+          "outbound": {
+            "type": "vless",
+            "server": "5.6.7.8",
+            "server_port": 443,
+            "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+            "tls": {
+              "enabled": true,
+              "server_name": "a.example"
+            },
+            "packet_encoding": "xudp"
+          }
+        }
+      ],
+      "skipped": 0
+    },
+    "steps": [
+      {
+        "web": {
+          "https://sub.example/clash": {
+            "status": 200,
+            "body": "proxies:\n  - {name: a, type: snell, server: s.example, port: 1, psk: x}\n  - {name: b, type: wireguard, server: w.example, port: 2}\n",
+            "headers": {}
+          }
+        },
+        "after": {
+          "id": "i8scs67a",
+          "url": "https://sub.example/clash",
+          "name": "sub.example",
+          "nodes": [
+            {
+              "name": "HK 01",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "1.2.3.4",
+                "server_port": 8388,
+                "method": "aes-256-gcm",
+                "password": "pass"
+              }
+            },
+            {
+              "name": "JP 02",
+              "outbound": {
+                "type": "vless",
+                "server": "5.6.7.8",
+                "server_port": 443,
+                "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "a.example"
+                },
+                "packet_encoding": "xudp"
+              }
+            }
+          ],
+          "skipped": 0,
+          "error": "订阅中的节点暂不支持"
+        }
+      }
+    ]
+  },
+  {
+    "name": "usage from the node names",
+    "before": {
+      "id": "dejnivt5",
+      "url": "https://sub.example/clash",
+      "name": "sub.example",
+      "nodes": [
+        {
+          "name": "HK 01",
+          "outbound": {
+            "type": "shadowsocks",
+            "server": "1.2.3.4",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "pass"
+          }
+        },
+        {
+          "name": "JP 02",
+          "outbound": {
+            "type": "vless",
+            "server": "5.6.7.8",
+            "server_port": 443,
+            "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+            "tls": {
+              "enabled": true,
+              "server_name": "a.example"
+            },
+            "packet_encoding": "xudp"
+          }
+        }
+      ],
+      "skipped": 0
+    },
+    "steps": [
+      {
+        "web": {
+          "https://sub.example/clash": {
+            "status": 200,
+            "body": "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388#%E5%89%A9%E4%BD%99%E6%B5%81%E9%87%8F%EF%BC%9A100.5%20GB\nss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8389#%E5%A5%97%E9%A4%90%E5%88%B0%E6%9C%9F%EF%BC%9A2027-01-01\nss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.5:8388#US%2001\n",
+            "headers": {}
+          }
+        },
+        "after": {
+          "id": "dejnivt5",
+          "url": "https://sub.example/clash",
+          "name": "sub.example",
+          "nodes": [
+            {
+              "name": "剩余流量：100.5 GB",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "1.2.3.4",
+                "server_port": 8388,
+                "method": "aes-256-gcm",
+                "password": "pass"
+              }
+            },
+            {
+              "name": "套餐到期：2027-01-01",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "1.2.3.4",
+                "server_port": 8389,
+                "method": "aes-256-gcm",
+                "password": "pass"
+              }
+            },
+            {
+              "name": "US 01",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "1.2.3.5",
+                "server_port": 8388,
+                "method": "aes-256-gcm",
+                "password": "pass"
+              }
+            }
+          ],
+          "skipped": 0,
+          "usage": {
+            "upload": 0,
+            "download": 0,
+            "total": 107911053312,
+            "expire": 1798847940000
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "an error, then it works again; usage gone",
+    "before": {
+      "id": "3o4nb001",
+      "url": "https://sub.example/clash",
+      "name": "sub.example",
+      "nodes": [
+        {
+          "name": "HK 01",
+          "outbound": {
+            "type": "shadowsocks",
+            "server": "1.2.3.4",
+            "server_port": 8388,
+            "method": "aes-256-gcm",
+            "password": "pass"
+          }
+        },
+        {
+          "name": "JP 02",
+          "outbound": {
+            "type": "vless",
+            "server": "5.6.7.8",
+            "server_port": 443,
+            "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+            "tls": {
+              "enabled": true,
+              "server_name": "a.example"
+            },
+            "packet_encoding": "xudp"
+          }
+        }
+      ],
+      "skipped": 0,
+      "usage": {
+        "upload": 100,
+        "download": 900,
+        "total": 10000,
+        "expire": 1794013872000
+      }
+    },
+    "steps": [
+      {
+        "web": {
+          "https://sub.example/clash": {
+            "status": 500,
+            "body": "",
+            "headers": {}
+          }
+        },
+        "after": {
+          "id": "3o4nb001",
+          "url": "https://sub.example/clash",
+          "name": "sub.example",
+          "nodes": [
+            {
+              "name": "HK 01",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "1.2.3.4",
+                "server_port": 8388,
+                "method": "aes-256-gcm",
+                "password": "pass"
+              }
+            },
+            {
+              "name": "JP 02",
+              "outbound": {
+                "type": "vless",
+                "server": "5.6.7.8",
+                "server_port": 443,
+                "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "a.example"
+                },
+                "packet_encoding": "xudp"
+              }
+            }
+          ],
+          "skipped": 0,
+          "usage": {
+            "upload": 100,
+            "download": 900,
+            "total": 10000,
+            "expire": 1794013872000
+          },
+          "error": "订阅服务器出错（500），请稍后再试"
+        }
+      },
+      {
+        "web": {
+          "https://sub.example/clash": {
+            "status": 200,
+            "body": "port: 7890\nproxies:\n  - {name: \"HK 1\", type: ss, server: hk.example.com, port: 8388, cipher: chacha20-ietf-poly1305, password: \"p\"}\n  - name: obfs\n    type: ss\n    server: o.example.com\n    port: 443\n    cipher: aes-128-gcm\n    password: p\n    plugin: obfs\n    plugin-opts: {mode: tls, host: bing.com}\n  - name: vm\n    type: vmess\n    server: vm.example.com\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    tls: true\n    network: ws\n    ws-opts: {path: /p, headers: {Host: vm.example.com}}\n  - name: reality\n    type: vless\n    server: re.example.com\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    flow: xtls-rprx-vision\n    tls: true\n    servername: www.apple.com\n    client-fingerprint: chrome\n    reality-opts: {public-key: jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0, short-id: 0123abcd}\n  - {name: tj, type: trojan, server: tj.example.com, port: 443, password: x, sni: tj.example.com, skip-cert-verify: true}\n  - {name: hy, type: hysteria2, server: hy.example.com, port: 443, password: x, up: \"50 Mbps\", down: \"200 Mbps\"}\n  - {name: tu, type: tuic, server: tu.example.com, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, password: x, congestion-controller: bbr}\n  - {name: snell, type: snell, server: s.example.com, port: 1, psk: x}\nproxy-groups:\n  - {name: PROXY, type: select, proxies: [HK 1]}\n",
+            "headers": {}
+          }
+        },
+        "after": {
+          "id": "3o4nb001",
+          "url": "https://sub.example/clash",
+          "name": "sub.example",
+          "nodes": [
+            {
+              "name": "HK 1",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "hk.example.com",
+                "server_port": 8388,
+                "method": "chacha20-ietf-poly1305",
+                "password": "p"
+              }
+            },
+            {
+              "name": "obfs",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "o.example.com",
+                "server_port": 443,
+                "method": "aes-128-gcm",
+                "password": "p",
+                "plugin": "obfs-local",
+                "plugin_opts": "obfs=tls;obfs-host=bing.com"
+              }
+            },
+            {
+              "name": "vm",
+              "outbound": {
+                "type": "vmess",
+                "server": "vm.example.com",
+                "server_port": 443,
+                "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                "security": "auto",
+                "alter_id": 0,
+                "tls": {
+                  "enabled": true
+                },
+                "transport": {
+                  "type": "ws",
+                  "path": "/p",
+                  "headers": {
+                    "Host": "vm.example.com"
+                  }
+                },
+                "packet_encoding": "xudp"
+              }
+            },
+            {
+              "name": "reality",
+              "outbound": {
+                "type": "vless",
+                "server": "re.example.com",
+                "server_port": 443,
+                "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                "flow": "xtls-rprx-vision",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "www.apple.com",
+                  "utls": {
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                  },
+                  "reality": {
+                    "enabled": true,
+                    "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+                    "short_id": "0123abcd"
+                  }
+                },
+                "packet_encoding": "xudp"
+              }
+            },
+            {
+              "name": "tj",
+              "outbound": {
+                "type": "trojan",
+                "server": "tj.example.com",
+                "server_port": 443,
+                "password": "x",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "tj.example.com",
+                  "insecure": true
+                }
+              }
+            },
+            {
+              "name": "hy",
+              "outbound": {
+                "type": "hysteria2",
+                "server": "hy.example.com",
+                "server_port": 443,
+                "password": "x",
+                "up_mbps": 50,
+                "down_mbps": 200,
+                "tls": {
+                  "enabled": true
+                }
+              }
+            },
+            {
+              "name": "tu",
+              "outbound": {
+                "type": "tuic",
+                "server": "tu.example.com",
+                "server_port": 443,
+                "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+                "password": "x",
+                "congestion_control": "bbr",
+                "tls": {
+                  "enabled": true,
+                  "alpn": [
+                    "h3"
+                  ]
+                }
+              }
+            }
+          ],
+          "skipped": 1,
+          "split": {
+            "groups": [
+              {
+                "n": "PROXY",
+                "t": "select",
+                "m": [
+                  "HK 1"
+                ]
+              }
+            ],
+            "rules": []
+          }
+        }
+      },
+      {
+        "web": {
+          "https://sub.example/clash": {
+            "status": 200,
+            "body": "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388#HK%2001\nvless://0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21@5.6.7.8:443?security=tls&sni=a.example&type=tcp#JP%2002\n",
+            "headers": {
+              "content-disposition": "attachment; filename*=UTF-8''%E6%88%91%E7%9A%84%E6%9C%BA%E5%9C%BA.yaml"
+            }
+          }
+        },
+        "after": {
+          "id": "3o4nb001",
+          "url": "https://sub.example/clash",
+          "name": "我的机场",
+          "nodes": [
+            {
+              "name": "HK 01",
+              "outbound": {
+                "type": "shadowsocks",
+                "server": "1.2.3.4",
+                "server_port": 8388,
+                "method": "aes-256-gcm",
+                "password": "pass"
+              }
+            },
+            {
+              "name": "JP 02",
+              "outbound": {
+                "type": "vless",
+                "server": "5.6.7.8",
+                "server_port": 443,
+                "uuid": "0b9a8b56-58a4-4a8c-9a3a-1a8f7c0d3e21",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "a.example"
+                },
+                "packet_encoding": "xudp"
+              }
+            }
+          ],
+          "skipped": 0
+        }
+      }
+    ]
+  }
+]
