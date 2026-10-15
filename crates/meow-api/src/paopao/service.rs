@@ -16,11 +16,19 @@
 //! subscription's problem is kept in its record, a build's or reload's in
 //! the job's report and `schedule.json`.
 //!
+//! A config built from the stored input stays this core's own: its API
+//! address and secret ([`Service::with_identity`]) and its `mixed-port`
+//! (the running config's) replace what the input said when it was handed
+//! over (an app that started the core on other ports since, or none).
+//!
 //! The scheduler ([`run_schedule`]) is one task asleep until the next run,
 //! holding only the schedule's few numbers; it starts working only once
-//! told to (`PUT /paopao/schedule`).
+//! told to (`PUT /paopao/schedule`). A run due as the core starts waits
+//! for an input handed over in this run, a schedule minute at most: an
+//! app starting the core hands its input over first.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -57,6 +65,11 @@ pub struct Service {
     /// as a string.
     config_path: Option<PathBuf>,
     reload: Reload,
+    /// The API's address and secret as the core serves them; None: what
+    /// the stored input says.
+    identity: Option<(String, String)>,
+    /// An input was handed over since the core started.
+    handed: AtomicBool,
     /// Held through a whole job.
     job: Mutex<()>,
     /// Held while `input.json` is written.
@@ -143,11 +156,20 @@ impl Service {
             store: Store::new(dir),
             config_path,
             reload,
+            identity: None,
+            handed: AtomicBool::new(false),
             job: Mutex::new(()),
             input: Mutex::new(()),
             wake: Notify::new(),
             minute: Duration::from_secs(60),
         }
+    }
+
+    /// Configs built here keep the API at `controller` (`host:port`) with
+    /// `secret` (None: none), as the core serves it.
+    pub fn with_identity(mut self, controller: String, secret: Option<String>) -> Self {
+        self.identity = Some((controller, secret.unwrap_or_default()));
+        self
     }
 
     /// A schedule minute of `minute` instead (tests).
@@ -181,7 +203,7 @@ impl Service {
         let head = InputHead::parse(&body).map_err(JobError::Invalid)?;
         let _input = self.input.lock().await;
         let store = self.store.clone();
-        tokio::task::spawn_blocking(move || {
+        let n = tokio::task::spawn_blocking(move || {
             super::store::write_atomic(&store.input(), &body, true)
                 .map_err(|e| JobError::Failed(format!("cannot keep the build input: {e}")))?;
             let keep: std::collections::HashSet<String> = head
@@ -200,7 +222,10 @@ impl Service {
             Ok(head.subscriptions.len())
         })
         .await
-        .map_err(|e| JobError::Failed(e.to_string()))?
+        .map_err(|e| JobError::Failed(e.to_string()))??;
+        self.handed.store(true, Ordering::Relaxed);
+        self.wake.notify_one();
+        Ok(n)
     }
 
     /// The stored input's subscriptions.
@@ -338,6 +363,7 @@ impl Service {
             "config": self.config_path,
             "now": now_ms(),
             "build": always,
+            "keep": self.own_runtime(),
         });
         let applied = {
             let _input = self.input.lock().await;
@@ -376,6 +402,20 @@ impl Service {
                 report.error = Some(format!("the core refused the new config: {why}"));
             }
         }
+    }
+
+    /// What a config built here keeps of the running core (the apply
+    /// child's `keep`): its API and its `mixed-port`.
+    fn own_runtime(&self) -> Value {
+        let mut keep = serde_json::Map::new();
+        if let Some((controller, secret)) = &self.identity {
+            keep.insert("external-controller".into(), controller.clone().into());
+            keep.insert("secret".into(), secret.clone().into());
+        }
+        if let Some(port) = self.raw_config.read().mixed_port.filter(|&p| p != 0) {
+            keep.insert("mixed-port".into(), port.into());
+        }
+        Value::Object(keep)
     }
 
     /// The schedule's run is done (now), with its problem.
@@ -428,11 +468,16 @@ async fn small(runner: &Runner, op: &str, req: Value, limit: Duration) -> Result
 /// Refreshes on the schedule while it is on; sleeps otherwise (woken by
 /// [`Service::set_schedule`]). Runs for good: spawn it.
 pub async fn run_schedule(svc: Arc<Service>) {
+    let started = tokio::time::Instant::now();
     loop {
         let s = svc.schedule().await;
-        let wait = svc.next_run(&s).map(|at| {
+        let mut wait = svc.next_run(&s).map(|at| {
             Duration::from_millis(u64::try_from(at.saturating_sub(now_ms())).unwrap_or(0))
         });
+        // Due as the core starts: the input an app hands over first.
+        if wait == Some(Duration::ZERO) && !svc.handed.load(Ordering::Relaxed) {
+            wait = Some(svc.minute.saturating_sub(started.elapsed()));
+        }
         if wait != Some(Duration::ZERO) {
             let nap = wait.unwrap_or(MAX_NAP).min(MAX_NAP);
             tokio::select! {
@@ -670,6 +715,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rebuild_keeps_the_running_cores_api_and_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let req = dir.path().join("apply");
+        let runner = children(
+            "exit 9",
+            &format!(
+                r#"cat > {}; echo '{{"input_changed":false,"rebuilt":true,"next":false}}'"#,
+                req.display()
+            ),
+        );
+        let rig = rig(Some(runner), Ok(()));
+        let rig = Rig {
+            svc: Arc::new(
+                Arc::try_unwrap(rig.svc)
+                    .ok()
+                    .unwrap()
+                    .with_identity("127.0.0.1:9999".into(), Some("live".into())),
+            ),
+            ..rig
+        };
+        // Handed over by a start on other ports, with another secret.
+        let stale = r#"{"subscriptions": [], "settings": {"mixed_port": 1112},
+            "runtime": {"controllerPort": 1111, "secret": "old"}}"#;
+        rig.svc
+            .store_input(Bytes::from_static(stale.as_bytes()))
+            .await
+            .unwrap();
+        rig.svc.apply().await.unwrap();
+        let asked: Value = serde_json::from_str(&std::fs::read_to_string(&req).unwrap()).unwrap();
+        assert_eq!(
+            asked["keep"],
+            json!({"external-controller": "127.0.0.1:9999", "secret": "live", "mixed-port": 7890})
+        );
+
+        // Without an API of its own (tests): the port alone.
+        let rig = self::rig(
+            Some(children(
+                "exit 9",
+                &format!(
+                    r#"cat > {}; echo '{{"input_changed":false,"rebuilt":true,"next":false}}'"#,
+                    req.display()
+                ),
+            )),
+            Ok(()),
+        );
+        rig.svc
+            .store_input(Bytes::from_static(stale.as_bytes()))
+            .await
+            .unwrap();
+        rig.svc.apply().await.unwrap();
+        let asked: Value = serde_json::from_str(&std::fs::read_to_string(&req).unwrap()).unwrap();
+        assert_eq!(asked["keep"], json!({"mixed-port": 7890}));
+    }
+
+    #[tokio::test]
     async fn a_refused_config_leaves_the_running_one_and_its_file() {
         let runner = children(
             r#"cat >/dev/null; echo '{"id":"a1","error":"订阅已失效，请向机场索取新的订阅链接"}'"#,
@@ -776,6 +876,60 @@ mod tests {
             .unwrap();
         let (s, _) = call(&rig, "POST", "/paopao/subscriptions/refresh?id=zz", "").await;
         assert_eq!(s, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_run_due_at_start_waits_for_the_input_a_minute_at_most() {
+        for handed in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let runs = dir.path().join("runs");
+            let rig = rig(
+                Some(children(
+                    &format!(
+                        r#"cat >/dev/null; echo x >> {}; echo '{{"id":"a1","error":null}}'"#,
+                        runs.display()
+                    ),
+                    r#"cat >/dev/null; echo '{"input_changed":false,"rebuilt":false,"next":false}'"#,
+                )),
+                Ok(()),
+            );
+            let rig = Rig {
+                svc: Arc::new(
+                    Arc::try_unwrap(rig.svc)
+                        .ok()
+                        .unwrap()
+                        .with_minute(Duration::from_millis(1500)),
+                ),
+                ..rig
+            };
+            // Kept by an earlier run of the core, the schedule on and due.
+            std::fs::create_dir_all(rig.store()).unwrap();
+            std::fs::write(rig.store().join("input.json"), INPUT).unwrap();
+            rig.svc.set_schedule(Some(true), Some(1)).await.unwrap();
+            let count = || std::fs::read_to_string(&runs).map_or(0, |s| s.lines().count());
+            let task = tokio::spawn(run_schedule(Arc::clone(&rig.svc)));
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            assert_eq!(count(), 0, "ran before the input came");
+            let started = tokio::time::Instant::now();
+            if handed {
+                rig.svc
+                    .store_input(Bytes::from_static(INPUT.as_bytes()))
+                    .await
+                    .unwrap();
+            }
+            while count() < 2 {
+                assert!(started.elapsed() < Duration::from_secs(5), "never ran");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            // Handed over: at once; else once the minute is up.
+            let took = started.elapsed();
+            if handed {
+                assert!(took < Duration::from_millis(700), "{took:?}");
+            } else {
+                assert!(took > Duration::from_millis(800), "{took:?}");
+            }
+            task.abort();
+        }
     }
 
     #[tokio::test]

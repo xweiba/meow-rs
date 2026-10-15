@@ -441,18 +441,22 @@ impl ApiServer {
             }
         });
 
+        let bound = listener.local_addr().unwrap_or(self.listen_addr);
         // PaoPao: the subscriptions kept current here, on the schedule
-        // (off until told) and when asked.
-        let paopao = Arc::new(paopao::Service::new(
-            self.paopao.clone(),
-            Arc::clone(&self.raw_config),
-            meow_common::resolved_home_dir().join("paopao"),
-            self.config_path
-                .as_deref()
-                .filter(|p| !p.is_empty())
-                .map(PathBuf::from),
-            routes::paopao_reload(Arc::clone(&state)),
-        ));
+        // (off until told) and when asked; what it builds keeps this API.
+        let paopao = Arc::new(
+            paopao::Service::new(
+                self.paopao.clone(),
+                Arc::clone(&self.raw_config),
+                meow_common::resolved_home_dir().join("paopao"),
+                self.config_path
+                    .as_deref()
+                    .filter(|p| !p.is_empty())
+                    .map(PathBuf::from),
+                routes::paopao_reload(Arc::clone(&state)),
+            )
+            .with_identity(bound.to_string(), self.secret.clone()),
+        );
         if paopao.can_run() {
             tokio::spawn(paopao::run_schedule(Arc::clone(&paopao)));
         }
@@ -464,7 +468,6 @@ impl ApiServer {
             Some(paopao),
         );
 
-        let bound = listener.local_addr().unwrap_or(self.listen_addr);
         info!("REST API listening on {bound}");
         info!("Web UI available at http://{bound}/ui");
         axum::serve(listener, app).await?;

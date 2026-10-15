@@ -19,11 +19,12 @@
 //!   there is no answer) and its record written to the store in `dir`
 //!   ([`meow_api::paopao::store`]); answers `{id, error}`, `error` the
 //!   subscription's problem (null when it worked).
-//! - `apply`: `{dir, ids, config?, now, build?}` → the records of `ids`
-//!   merged into the stored input (written back when that changed it);
-//!   when lines changed (or `build`), the config built at `now` and, when
-//!   it differs from the one in `config`, written to the store's
-//!   `config.next.yaml`. Answers `{input_changed, rebuilt, next}`.
+//! - `apply`: `{dir, ids, config?, now, build?, keep?}` → the records of
+//!   `ids` merged into the stored input (written back when that changed
+//!   it); when lines changed (or `build`), the config built at `now`, its
+//!   keys in `keep` (the running core's API and port) set as `keep` has
+//!   them, and, when it differs from the one in `config`, written to the
+//!   store's `config.next.yaml`. Answers `{input_changed, rebuilt, next}`.
 //!
 //! The exit code says what the answer is ([`meow_api::paopao::EXIT_OK`],
 //! `EXIT_INVALID`, `EXIT_UPSTREAM`); an error answer is `{"error": ...}`.
@@ -55,7 +56,7 @@ pub enum Op {
     Fetch,
     /// `{dir, id, url, user_agent?, proxy?}` on stdin → the subscription refreshed into the store
     Refresh,
-    /// `{dir, ids, config?, now, build?}` on stdin → refreshes merged, the config rebuilt
+    /// `{dir, ids, config?, now, build?, keep?}` on stdin → refreshes merged, the config rebuilt
     Apply,
 }
 
@@ -255,6 +256,9 @@ struct ApplyRequest {
     now: i64,
     #[serde(default)]
     build: bool,
+    /// Top-level keys the config keeps as the running core has them.
+    #[serde(default)]
+    keep: serde_json::Map<String, Value>,
 }
 
 fn apply(input: &str) -> (Value, i32) {
@@ -300,9 +304,16 @@ fn apply(input: &str) -> (Value, i32) {
     }
     // Built at the time it runs (usage running out, plans ending).
     input["now"] = req.now.into();
-    let config =
-        Value::Object(meow_paopao::build(&meow_paopao::BuildInput::from_json(&input)).config);
+    let mut config = meow_paopao::build(&meow_paopao::BuildInput::from_json(&input)).config;
     drop(input);
+    // The input may be from a start on other ports: the core stays where
+    // it is.
+    for (k, v) in req.keep {
+        if let Some(slot) = config.get_mut(&k) {
+            *slot = v;
+        }
+    }
+    let config = Value::Object(config);
     let same = req
         .config
         .and_then(|p| std::fs::read(p).ok())

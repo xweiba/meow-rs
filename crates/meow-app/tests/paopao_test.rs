@@ -592,3 +592,48 @@ async fn the_core_refreshes_rebuilds_and_reloads_itself() {
         Value::Null
     );
 }
+
+#[tokio::test]
+async fn a_rebuilt_config_keeps_the_running_cores_api_and_port() {
+    let base = subscription_server().await;
+    let (api_port, mixed_port) = (free_port(), free_port());
+    let home = tempfile::tempdir().unwrap();
+    let _core = start_core(api_port, mixed_port, home.path()).await;
+    let config = home.path().join("config.yaml");
+
+    // Handed over by a start on other ports, with another secret.
+    let mut stale = handed_over(&format!("{base}/sub"), free_port(), free_port());
+    stale["runtime"]["secret"] = "old".into();
+    let (status, _) = api_call(
+        api_port,
+        "PUT",
+        "/paopao/input",
+        Some("s3cret"),
+        &stale.to_string(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, body) = api(
+        api_port,
+        "/paopao/subscriptions/refresh?id=a1",
+        Some("s3cret"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["reloaded"],
+        true
+    );
+
+    let running: Value = serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+    assert_eq!(
+        running["external-controller"],
+        format!("127.0.0.1:{api_port}")
+    );
+    assert_eq!(running["secret"], "s3cret");
+    assert_eq!(running["mixed-port"], mixed_port);
+    // Still reached where it was, with its secret; the lines are in.
+    assert!(proxy_names(api_port).await.contains(&"HK 01".to_owned()));
+    assert!(TcpStream::connect(("127.0.0.1", mixed_port)).await.is_ok());
+}
