@@ -209,8 +209,9 @@ impl<'a> Plan<'a> {
     }
 
     /// A built-in policy's rules: QUIC to its sites refused first (they fall
-    /// back to TCP on the same group), its rule sets, domains, programs and
-    /// ranges; each minus the sites the user left out of it.
+    /// back to TCP on the same group), the domestic part of its sites to
+    /// 国内网站 ([`Policy::domestic_first`]), its rule sets, domains,
+    /// programs and ranges; each minus the sites the user left out of it.
     fn policy_rules(&self, p: &Policy) -> Vec<String> {
         let tag = p.tag();
         let mut out = Vec::new();
@@ -222,6 +223,15 @@ impl<'a> Plan<'a> {
                     ));
                 }
             }
+        }
+        if !p.domestic_first.is_empty() {
+            let china = POLICIES
+                .iter()
+                .find(|c| c.id == "china")
+                .map(Policy::tag)
+                .filter(|c| self.has_group(c))
+                .unwrap_or_else(|| "DIRECT".to_owned());
+            out.extend(p.domestic_first.iter().map(|r| geo_rule(r, &china)));
         }
         out.extend(p.rule_sets.iter().map(|r| geo_rule(r, &tag)));
         out.extend(p.domains.iter().map(|d| format!("DOMAIN-SUFFIX,{d},{tag}")));

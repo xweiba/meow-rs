@@ -334,12 +334,7 @@
         "jp:<routekey>",
         "sg:<routekey>",
         "us:<routekey>",
-        "kr:<routekey>",
-        "gb:<routekey>",
-        "de:<routekey>",
-        "my:<routekey>",
-        "vn:<routekey>",
-        "tr:<routekey>",
+        "other:<routekey>",
         "dedicated:<routekey>",
         "youtube:<routekey>",
         "google:<routekey>",
@@ -620,20 +615,11 @@
           "type": "select",
           "proxies": [
             "auto",
-            "DIRECT",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ]
@@ -644,19 +630,7 @@
           "proxies": [
             "auto~smart",
             "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:TW",
-            "region:JP",
-            "region:SG",
-            "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
-            "region:other"
+            "auto~fastest"
           ]
         },
         {
@@ -671,23 +645,15 @@
           "name": "policy:youtube",
           "type": "select",
           "proxies": [
-            "auto~fastest",
+            "policy:youtube@auto~fastest",
             "DIRECT",
             "REJECT",
             "proxy",
-            "auto",
-            "auto~balance",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ]
@@ -696,22 +662,13 @@
           "name": "policy:google",
           "type": "select",
           "proxies": [
-            "policy:google~auto",
+            "policy:google@auto~auto",
             "DIRECT",
             "REJECT",
-            "policy:google~balance",
-            "policy:google~fastest",
-            "proxy",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other"
           ]
         },
@@ -722,19 +679,10 @@
             "policy:ai@region:US~sticky",
             "DIRECT",
             "REJECT",
-            "policy:ai~auto",
-            "policy:ai~balance",
-            "policy:ai~fastest",
-            "proxy",
+            "policy:ai@auto~auto",
             "region:TW",
             "region:JP",
             "region:SG",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other"
           ]
         },
@@ -746,19 +694,11 @@
             "DIRECT",
             "REJECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ]
@@ -771,19 +711,11 @@
             "DIRECT",
             "REJECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ]
@@ -796,19 +728,11 @@
             "DIRECT",
             "REJECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ]
@@ -817,23 +741,15 @@
           "name": "policy:games",
           "type": "select",
           "proxies": [
-            "proxy",
             "DIRECT",
             "REJECT",
+            "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ]
@@ -846,19 +762,11 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ]
@@ -871,19 +779,11 @@
             "DIRECT",
             "REJECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ]
@@ -896,19 +796,11 @@
             "DIRECT",
             "REJECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ]
@@ -921,19 +813,11 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ]
@@ -946,19 +830,11 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ]
@@ -971,19 +847,11 @@
             "DIRECT",
             "REJECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ]
@@ -996,19 +864,11 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ]
@@ -1021,19 +881,11 @@
             "DIRECT",
             "REJECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ]
@@ -1099,51 +951,18 @@
           ]
         },
         {
-          "name": "region:KR",
-          "type": "select",
-          "proxies": [
-            "韩国 01"
-          ]
-        },
-        {
-          "name": "region:GB",
-          "type": "select",
-          "proxies": [
-            "英国 01"
-          ]
-        },
-        {
-          "name": "region:DE",
-          "type": "select",
-          "proxies": [
-            "德国 01"
-          ]
-        },
-        {
-          "name": "region:MY",
-          "type": "select",
-          "proxies": [
-            "马来西亚 01"
-          ]
-        },
-        {
-          "name": "region:VN",
-          "type": "select",
-          "proxies": [
-            "越南 01"
-          ]
-        },
-        {
-          "name": "region:TR",
-          "type": "select",
-          "proxies": [
-            "土耳其 01"
-          ]
-        },
-        {
           "name": "region:other",
           "type": "select",
           "proxies": [
+            "region:other~auto",
+            "region:other~balance",
+            "region:other~fastest",
+            "韩国 01",
+            "英国 01",
+            "德国 01",
+            "土耳其 01",
+            "马来西亚 01",
+            "越南 01",
             "无名节点"
           ]
         },
@@ -1319,6 +1138,50 @@
           "url": "https://www.gstatic.com/generate_204"
         },
         {
+          "name": "region:other~auto",
+          "type": "smart",
+          "proxies": [
+            "韩国 01",
+            "英国 01",
+            "德国 01",
+            "土耳其 01",
+            "马来西亚 01",
+            "越南 01",
+            "无名节点"
+          ],
+          "url": "https://www.gstatic.com/generate_204"
+        },
+        {
+          "name": "region:other~balance",
+          "type": "smart",
+          "proxies": [
+            "韩国 01",
+            "英国 01",
+            "德国 01",
+            "土耳其 01",
+            "马来西亚 01",
+            "越南 01",
+            "无名节点"
+          ],
+          "strategy": "consistent-hashing",
+          "url": "https://www.gstatic.com/generate_204"
+        },
+        {
+          "name": "region:other~fastest",
+          "type": "smart",
+          "proxies": [
+            "韩国 01",
+            "英国 01",
+            "德国 01",
+            "土耳其 01",
+            "马来西亚 01",
+            "越南 01",
+            "无名节点"
+          ],
+          "strategy": "throughput",
+          "url": "https://www.gstatic.com/generate_204"
+        },
+        {
           "name": "kind:dedicated~auto",
           "type": "smart",
           "proxies": [
@@ -1369,9 +1232,9 @@
             "韩国 01",
             "英国 01",
             "德国 01",
+            "土耳其 01",
             "马来西亚 01",
             "越南 01",
-            "土耳其 01",
             "无名节点"
           ],
           "url": "https://www.gstatic.com/generate_204"
@@ -1398,9 +1261,9 @@
             "韩国 01",
             "英国 01",
             "德国 01",
+            "土耳其 01",
             "马来西亚 01",
             "越南 01",
-            "土耳其 01",
             "无名节点"
           ],
           "strategy": "consistent-hashing",
@@ -1428,16 +1291,16 @@
             "韩国 01",
             "英国 01",
             "德国 01",
+            "土耳其 01",
             "马来西亚 01",
             "越南 01",
-            "土耳其 01",
             "无名节点"
           ],
           "strategy": "throughput",
           "url": "https://www.gstatic.com/generate_204"
         },
         {
-          "name": "policy:google~auto",
+          "name": "policy:google@auto~auto",
           "type": "smart",
           "proxies": [
             "台湾 01",
@@ -1454,15 +1317,15 @@
             "韩国 01",
             "英国 01",
             "德国 01",
+            "土耳其 01",
             "马来西亚 01",
             "越南 01",
-            "土耳其 01",
             "无名节点"
           ],
           "url": "https://www.gstatic.com/generate_204"
         },
         {
-          "name": "policy:google~balance",
+          "name": "policy:ai@auto~auto",
           "type": "smart",
           "proxies": [
             "台湾 01",
@@ -1479,69 +1342,21 @@
             "韩国 01",
             "英国 01",
             "德国 01",
+            "土耳其 01",
             "马来西亚 01",
             "越南 01",
-            "土耳其 01",
-            "无名节点"
-          ],
-          "strategy": "consistent-hashing",
-          "url": "https://www.gstatic.com/generate_204"
-        },
-        {
-          "name": "policy:google~fastest",
-          "type": "smart",
-          "proxies": [
-            "台湾 01",
-            "TW 02",
-            "日本 01 中转",
-            "JP 02",
-            "HY 日本",
-            "新加坡 01",
-            "SG 02 专线",
-            "TJ 新加坡",
-            "美国 01",
-            "🇺🇸 美国 02 0.5x",
-            "美国 v6",
-            "韩国 01",
-            "英国 01",
-            "德国 01",
-            "马来西亚 01",
-            "越南 01",
-            "土耳其 01",
-            "无名节点"
-          ],
-          "strategy": "throughput",
-          "url": "https://www.gstatic.com/generate_204"
-        },
-        {
-          "name": "policy:ai~auto",
-          "type": "smart",
-          "proxies": [
-            "台湾 01",
-            "TW 02",
-            "日本 01 中转",
-            "JP 02",
-            "HY 日本",
-            "新加坡 01",
-            "SG 02 专线",
-            "TJ 新加坡",
-            "美国 01",
-            "🇺🇸 美国 02 0.5x",
-            "美国 v6",
-            "韩国 01",
-            "英国 01",
-            "德国 01",
-            "马来西亚 01",
-            "越南 01",
-            "土耳其 01",
             "无名节点"
           ],
           "url": "https://www.gstatic.com/generate_204"
         },
         {
-          "name": "policy:ai~balance",
+          "name": "policy:youtube@auto~fastest",
           "type": "smart",
           "proxies": [
+            "香港 01 IEPL",
+            "香港 02",
+            "HK 03 x2",
+            "香港 02 2",
             "台湾 01",
             "TW 02",
             "日本 01 中转",
@@ -1556,35 +1371,9 @@
             "韩国 01",
             "英国 01",
             "德国 01",
+            "土耳其 01",
             "马来西亚 01",
             "越南 01",
-            "土耳其 01",
-            "无名节点"
-          ],
-          "strategy": "consistent-hashing",
-          "url": "https://www.gstatic.com/generate_204"
-        },
-        {
-          "name": "policy:ai~fastest",
-          "type": "smart",
-          "proxies": [
-            "台湾 01",
-            "TW 02",
-            "日本 01 中转",
-            "JP 02",
-            "HY 日本",
-            "新加坡 01",
-            "SG 02 专线",
-            "TJ 新加坡",
-            "美国 01",
-            "🇺🇸 美国 02 0.5x",
-            "美国 v6",
-            "韩国 01",
-            "英国 01",
-            "德国 01",
-            "马来西亚 01",
-            "越南 01",
-            "土耳其 01",
             "无名节点"
           ],
           "strategy": "throughput",
@@ -1641,12 +1430,7 @@
         "IN-USER,jp,region:JP",
         "IN-USER,sg,region:SG",
         "IN-USER,us,region:US",
-        "IN-USER,kr,region:KR",
-        "IN-USER,gb,region:GB",
-        "IN-USER,de,region:DE",
-        "IN-USER,my,region:MY",
-        "IN-USER,vn,region:VN",
-        "IN-USER,tr,region:TR",
+        "IN-USER,other,region:other",
         "IN-USER,dedicated,kind:dedicated",
         "IN-USER,youtube,policy:youtube",
         "IN-USER,google,policy:google",
@@ -1747,6 +1531,7 @@
         "GEOSITE,whatsapp,policy:social",
         "GEOSITE,line,policy:social",
         "GEOSITE,netflix,policy:netflix",
+        "GEOSITE,category-games@cn,policy:china",
         "GEOSITE,steam,policy:games",
         "GEOSITE,epicgames,policy:games",
         "GEOSITE,playstation,policy:games",
@@ -2139,21 +1924,12 @@
           "label": "🚀 节点选择",
           "kind": "select",
           "members": [
-            "DIRECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ],
@@ -2164,22 +1940,11 @@
           "tag": "auto",
           "label": "♻️ 自动选择",
           "kind": "select",
-          "members": [
+          "members": [],
+          "modes": [
             "auto~smart",
             "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:TW",
-            "region:JP",
-            "region:SG",
-            "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
-            "region:other"
+            "auto~fastest"
           ],
           "pick": "auto~smart",
           "card": true
@@ -2204,24 +1969,16 @@
             "DIRECT",
             "REJECT",
             "proxy",
-            "auto",
-            "auto~balance",
-            "auto~fastest",
+            "policy:youtube@auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ],
-          "pick": "auto~fastest",
+          "pick": "policy:youtube@auto~fastest",
           "card": true,
           "badge": "内置"
         },
@@ -2232,23 +1989,14 @@
           "members": [
             "DIRECT",
             "REJECT",
-            "policy:google~auto",
-            "policy:google~balance",
-            "policy:google~fastest",
-            "proxy",
+            "policy:google@auto~auto",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other"
           ],
-          "pick": "policy:google~auto",
+          "pick": "policy:google@auto~auto",
           "card": true,
           "badge": "内置"
         },
@@ -2259,20 +2007,11 @@
           "members": [
             "DIRECT",
             "REJECT",
-            "policy:ai~auto",
-            "policy:ai~balance",
-            "policy:ai~fastest",
-            "proxy",
+            "policy:ai@auto~auto",
             "region:TW",
             "region:JP",
             "region:SG",
             "policy:ai@region:US~sticky",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other"
           ],
           "pick": "policy:ai@region:US~sticky",
@@ -2281,26 +2020,18 @@
         },
         {
           "tag": "policy:telegram",
-          "label": "📲 电报信息",
+          "label": "📲 Telegram",
           "kind": "select",
           "members": [
             "DIRECT",
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ],
@@ -2317,19 +2048,11 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ],
@@ -2339,26 +2062,18 @@
         },
         {
           "tag": "policy:netflix",
-          "label": "🎥 NETFLIX",
+          "label": "🎥 Netflix",
           "kind": "select",
           "members": [
             "DIRECT",
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ],
@@ -2375,23 +2090,15 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ],
-          "pick": "proxy",
+          "pick": "DIRECT",
           "card": true,
           "badge": "内置"
         },
@@ -2404,19 +2111,11 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ],
@@ -2433,19 +2132,11 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ],
@@ -2462,19 +2153,11 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ],
@@ -2491,19 +2174,11 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ],
@@ -2520,19 +2195,11 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ],
@@ -2549,19 +2216,11 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ],
@@ -2577,19 +2236,11 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ],
@@ -2605,19 +2256,11 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
             "region:HK",
             "region:TW",
             "region:JP",
             "region:SG",
             "region:US",
-            "region:KR",
-            "region:GB",
-            "region:DE",
-            "region:MY",
-            "region:VN",
-            "region:TR",
             "region:other",
             "kind:dedicated"
           ],
@@ -2629,13 +2272,15 @@
           "label": "🇭🇰 香港",
           "kind": "select",
           "members": [
-            "region:HK~auto",
-            "region:HK~balance",
-            "region:HK~fastest",
             "香港 01 IEPL",
             "香港 02",
             "HK 03 x2",
             "香港 02 2"
+          ],
+          "modes": [
+            "region:HK~auto",
+            "region:HK~balance",
+            "region:HK~fastest"
           ],
           "pick": "region:HK~auto",
           "card": true
@@ -2645,11 +2290,13 @@
           "label": "🇹🇼 台湾",
           "kind": "select",
           "members": [
-            "region:TW~auto",
-            "region:TW~balance",
-            "region:TW~fastest",
             "台湾 01",
             "TW 02"
+          ],
+          "modes": [
+            "region:TW~auto",
+            "region:TW~balance",
+            "region:TW~fastest"
           ],
           "pick": "region:TW~auto",
           "card": true
@@ -2659,12 +2306,14 @@
           "label": "🇯🇵 日本",
           "kind": "select",
           "members": [
-            "region:JP~auto",
-            "region:JP~balance",
-            "region:JP~fastest",
             "日本 01 中转",
             "JP 02",
             "HY 日本"
+          ],
+          "modes": [
+            "region:JP~auto",
+            "region:JP~balance",
+            "region:JP~fastest"
           ],
           "pick": "region:JP~auto",
           "card": true
@@ -2674,12 +2323,14 @@
           "label": "🇸🇬 新加坡",
           "kind": "select",
           "members": [
-            "region:SG~auto",
-            "region:SG~balance",
-            "region:SG~fastest",
             "新加坡 01",
             "SG 02 专线",
             "TJ 新加坡"
+          ],
+          "modes": [
+            "region:SG~auto",
+            "region:SG~balance",
+            "region:SG~fastest"
           ],
           "pick": "region:SG~auto",
           "card": true
@@ -2689,84 +2340,37 @@
           "label": "🇺🇸 美国",
           "kind": "select",
           "members": [
-            "region:US~auto",
-            "region:US~balance",
-            "region:US~fastest",
             "美国 01",
             "🇺🇸 美国 02 0.5x",
             "美国 v6"
+          ],
+          "modes": [
+            "region:US~auto",
+            "region:US~balance",
+            "region:US~fastest"
           ],
           "pick": "region:US~auto",
           "card": true
         },
         {
-          "tag": "region:KR",
-          "label": "🇰🇷 韩国",
-          "kind": "select",
-          "members": [
-            "韩国 01"
-          ],
-          "pick": "韩国 01",
-          "card": true
-        },
-        {
-          "tag": "region:GB",
-          "label": "🇬🇧 英国",
-          "kind": "select",
-          "members": [
-            "英国 01"
-          ],
-          "pick": "英国 01",
-          "card": true
-        },
-        {
-          "tag": "region:DE",
-          "label": "🇩🇪 德国",
-          "kind": "select",
-          "members": [
-            "德国 01"
-          ],
-          "pick": "德国 01",
-          "card": true
-        },
-        {
-          "tag": "region:MY",
-          "label": "🇲🇾 马来西亚",
-          "kind": "select",
-          "members": [
-            "马来西亚 01"
-          ],
-          "pick": "马来西亚 01",
-          "card": true
-        },
-        {
-          "tag": "region:VN",
-          "label": "🇻🇳 越南",
-          "kind": "select",
-          "members": [
-            "越南 01"
-          ],
-          "pick": "越南 01",
-          "card": true
-        },
-        {
-          "tag": "region:TR",
-          "label": "🇹🇷 土耳其",
-          "kind": "select",
-          "members": [
-            "土耳其 01"
-          ],
-          "pick": "土耳其 01",
-          "card": true
-        },
-        {
           "tag": "region:other",
-          "label": "🏳️ 其他地区",
+          "label": "🌐 其他地区",
           "kind": "select",
           "members": [
+            "韩国 01",
+            "英国 01",
+            "德国 01",
+            "土耳其 01",
+            "马来西亚 01",
+            "越南 01",
             "无名节点"
           ],
-          "pick": "无名节点",
+          "modes": [
+            "region:other~auto",
+            "region:other~balance",
+            "region:other~fastest"
+          ],
+          "pick": "region:other~auto",
           "card": true
         },
         {
@@ -2774,11 +2378,13 @@
           "label": "⚡ 专线",
           "kind": "select",
           "members": [
-            "kind:dedicated~auto",
-            "kind:dedicated~balance",
-            "kind:dedicated~fastest",
             "香港 01 IEPL",
             "SG 02 专线"
+          ],
+          "modes": [
+            "kind:dedicated~auto",
+            "kind:dedicated~balance",
+            "kind:dedicated~fastest"
           ],
           "pick": "kind:dedicated~auto",
           "card": true
@@ -2964,6 +2570,54 @@
           "card": false
         },
         {
+          "tag": "region:other~auto",
+          "label": "🌐 其他地区 · 智能选择",
+          "short": "智能选择",
+          "kind": "smart",
+          "members": [
+            "韩国 01",
+            "英国 01",
+            "德国 01",
+            "土耳其 01",
+            "马来西亚 01",
+            "越南 01",
+            "无名节点"
+          ],
+          "card": false
+        },
+        {
+          "tag": "region:other~balance",
+          "label": "🌐 其他地区 · 负载均衡",
+          "short": "负载均衡",
+          "kind": "balance",
+          "members": [
+            "韩国 01",
+            "英国 01",
+            "德国 01",
+            "土耳其 01",
+            "马来西亚 01",
+            "越南 01",
+            "无名节点"
+          ],
+          "card": false
+        },
+        {
+          "tag": "region:other~fastest",
+          "label": "🌐 其他地区 · 速度最快",
+          "short": "速度最快",
+          "kind": "fastest",
+          "members": [
+            "韩国 01",
+            "英国 01",
+            "德国 01",
+            "土耳其 01",
+            "马来西亚 01",
+            "越南 01",
+            "无名节点"
+          ],
+          "card": false
+        },
+        {
           "tag": "kind:dedicated~auto",
           "label": "⚡ 专线 · 智能选择",
           "short": "智能选择",
@@ -3020,9 +2674,9 @@
             "韩国 01",
             "英国 01",
             "德国 01",
+            "土耳其 01",
             "马来西亚 01",
             "越南 01",
-            "土耳其 01",
             "无名节点"
           ],
           "card": false
@@ -3051,9 +2705,9 @@
             "韩国 01",
             "英国 01",
             "德国 01",
+            "土耳其 01",
             "马来西亚 01",
             "越南 01",
-            "土耳其 01",
             "无名节点"
           ],
           "card": false
@@ -3082,17 +2736,16 @@
             "韩国 01",
             "英国 01",
             "德国 01",
+            "土耳其 01",
             "马来西亚 01",
             "越南 01",
-            "土耳其 01",
             "无名节点"
           ],
           "card": false
         },
         {
-          "tag": "policy:google~auto",
-          "label": "💡 Google + Gemini · 自动选择",
-          "short": "自动选择",
+          "tag": "policy:google@auto~auto",
+          "label": "♻️ 自动选择 · 智能选择",
           "kind": "smart",
           "members": [
             "台湾 01",
@@ -3109,71 +2762,17 @@
             "韩国 01",
             "英国 01",
             "德国 01",
+            "土耳其 01",
             "马来西亚 01",
             "越南 01",
-            "土耳其 01",
             "无名节点"
           ],
-          "card": false
+          "card": false,
+          "origin": "auto"
         },
         {
-          "tag": "policy:google~balance",
-          "label": "💡 Google + Gemini · 负载均衡",
-          "short": "负载均衡",
-          "kind": "balance",
-          "members": [
-            "台湾 01",
-            "TW 02",
-            "日本 01 中转",
-            "JP 02",
-            "HY 日本",
-            "新加坡 01",
-            "SG 02 专线",
-            "TJ 新加坡",
-            "美国 01",
-            "🇺🇸 美国 02 0.5x",
-            "美国 v6",
-            "韩国 01",
-            "英国 01",
-            "德国 01",
-            "马来西亚 01",
-            "越南 01",
-            "土耳其 01",
-            "无名节点"
-          ],
-          "card": false
-        },
-        {
-          "tag": "policy:google~fastest",
-          "label": "💡 Google + Gemini · 速度最快",
-          "short": "速度最快",
-          "kind": "fastest",
-          "members": [
-            "台湾 01",
-            "TW 02",
-            "日本 01 中转",
-            "JP 02",
-            "HY 日本",
-            "新加坡 01",
-            "SG 02 专线",
-            "TJ 新加坡",
-            "美国 01",
-            "🇺🇸 美国 02 0.5x",
-            "美国 v6",
-            "韩国 01",
-            "英国 01",
-            "德国 01",
-            "马来西亚 01",
-            "越南 01",
-            "土耳其 01",
-            "无名节点"
-          ],
-          "card": false
-        },
-        {
-          "tag": "policy:ai~auto",
-          "label": "🤖 AI 服务 · 自动选择",
-          "short": "自动选择",
+          "tag": "policy:ai@auto~auto",
+          "label": "♻️ 自动选择 · 智能选择",
           "kind": "smart",
           "members": [
             "台湾 01",
@@ -3190,46 +2789,23 @@
             "韩国 01",
             "英国 01",
             "德国 01",
+            "土耳其 01",
             "马来西亚 01",
             "越南 01",
-            "土耳其 01",
             "无名节点"
           ],
-          "card": false
+          "card": false,
+          "origin": "auto"
         },
         {
-          "tag": "policy:ai~balance",
-          "label": "🤖 AI 服务 · 负载均衡",
-          "short": "负载均衡",
-          "kind": "balance",
-          "members": [
-            "台湾 01",
-            "TW 02",
-            "日本 01 中转",
-            "JP 02",
-            "HY 日本",
-            "新加坡 01",
-            "SG 02 专线",
-            "TJ 新加坡",
-            "美国 01",
-            "🇺🇸 美国 02 0.5x",
-            "美国 v6",
-            "韩国 01",
-            "英国 01",
-            "德国 01",
-            "马来西亚 01",
-            "越南 01",
-            "土耳其 01",
-            "无名节点"
-          ],
-          "card": false
-        },
-        {
-          "tag": "policy:ai~fastest",
-          "label": "🤖 AI 服务 · 速度最快",
-          "short": "速度最快",
+          "tag": "policy:youtube@auto~fastest",
+          "label": "♻️ 自动选择 · 速度最快",
           "kind": "fastest",
           "members": [
+            "香港 01 IEPL",
+            "香港 02",
+            "HK 03 x2",
+            "香港 02 2",
             "台湾 01",
             "TW 02",
             "日本 01 中转",
@@ -3244,16 +2820,17 @@
             "韩国 01",
             "英国 01",
             "德国 01",
+            "土耳其 01",
             "马来西亚 01",
             "越南 01",
-            "土耳其 01",
             "无名节点"
           ],
-          "card": false
+          "card": false,
+          "origin": "auto"
         },
         {
           "tag": "policy:ai@region:US~sticky",
-          "label": "🇺🇸 美国 · 智能选择 · 固定出口",
+          "label": "🇺🇸 美国 · 智能选择 · 固定节点",
           "kind": "sticky",
           "members": [
             "美国 01",

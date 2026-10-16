@@ -304,6 +304,7 @@ pub fn create_router_with(
         .route("/smart/events", get(get_smart_events))
         .route("/smart/peaks", get(get_smart_peaks))
         .route("/smart/health", get(get_smart_health))
+        .route("/paopao/line-health", get(get_line_health))
         .route("/dns/results", get(get_dns_results))
         .route("/dns/query", get(dns_query_get).post(dns_query))
         .route("/cache/dns/flush", post(flush_dns_cache))
@@ -4018,6 +4019,52 @@ async fn get_smart_health(State(state): State<Arc<AppState>>) -> Response {
     Json(out).into_response()
 }
 
+/// PaoPao: `GET /paopao/line-health` → `{line: {"delay_ms": n | null,
+/// "at": unix ms}}`: each line's newest delay as the core measured it in
+/// the background or on request (its own history: url-test / fallback /
+/// load-balance checks and the delay API; a smart group's probes, kept
+/// apart) — null when it did not answer. Lines never probed are left out;
+/// groups are never listed.
+async fn get_line_health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let route = state.tunnel.route_snapshot();
+    Json(line_health_json(
+        route.proxies.iter().map(|(n, p)| (n.as_str(), p)),
+        meow_proxy::health::line_probe,
+    ))
+}
+
+/// [`get_line_health`]'s answer over `proxies`, with `probe` the smart
+/// groups' probes by line.
+fn line_health_json<'a>(
+    proxies: impl Iterator<Item = (&'a str, &'a Arc<dyn meow_common::Proxy>)>,
+    probe: impl Fn(&str) -> Option<meow_common::DelayHistory>,
+) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for (name, proxy) in proxies {
+        if proxy.members().is_some() {
+            continue;
+        }
+        let own = proxy.delay_history().into_iter().max_by_key(|h| h.time);
+        let newest = match (own, probe(name)) {
+            (Some(a), Some(b)) => Some(if b.time > a.time { b } else { a }),
+            (a, b) => a.or(b),
+        };
+        let Some(h) = newest else { continue };
+        let at = h
+            .time
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        out.insert(
+            name.to_string(),
+            serde_json::json!({
+                "delay_ms": (h.delay > 0).then_some(h.delay),
+                "at": at,
+            }),
+        );
+    }
+    serde_json::Value::Object(out)
+}
+
 async fn get_memory(
     State(_state): State<Arc<AppState>>,
     MaybeWebSocket(ws): MaybeWebSocket,
@@ -5282,5 +5329,47 @@ mod global_route_binding_tests {
         );
         assert!(!state.tunnel.has_tun());
         assert_eq!(iface(), None, "nothing runs, so nothing stays bound");
+    }
+}
+
+#[cfg(test)]
+mod line_health_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn each_line_its_newest_delay_groups_left_out() {
+        let raw = meow_config::parse_raw_yaml(
+            "mode: rule\nproxies:\n  - {name: a, type: direct}\n  - {name: b, type: direct}\n  - {name: c, type: direct}\nproxy-groups:\n  - {name: g, type: select, proxies: [a, b]}\nrules:\n  - MATCH,g\n",
+        )
+        .unwrap();
+        let built = meow_config::rebuild_from_raw(&raw).unwrap();
+        let proxies = built.proxies;
+        let get = |n: &str| proxies.get(n).cloned().expect(n);
+        // a: its own check, newer than the smart probe's failure.
+        // b: its own check, then a smart probe that got no answer.
+        // c: never probed. g: a group.
+        get("b").health().record_delay(50);
+        let old = SystemTime::now() - Duration::from_secs(60);
+        get("a").health().record_delay(80);
+        get("g").health().record_delay(10);
+        let probe = |n: &str| match n {
+            "a" => Some(meow_common::DelayHistory {
+                time: old,
+                delay: 0,
+            }),
+            "b" => Some(meow_common::DelayHistory {
+                time: SystemTime::now() + Duration::from_secs(1),
+                delay: 0,
+            }),
+            _ => None,
+        };
+        let out = line_health_json(proxies.iter().map(|(n, p)| (n.as_str(), p)), probe);
+        assert_eq!(out["a"]["delay_ms"], 80);
+        assert!(out["a"]["at"].as_u64().unwrap() > 0);
+        assert!(out["b"]["delay_ms"].is_null(), "the newest: no answer");
+        assert!(out.get("c").is_none());
+        assert!(out.get("g").is_none());
+        assert!(out.get("DIRECT").is_none());
     }
 }

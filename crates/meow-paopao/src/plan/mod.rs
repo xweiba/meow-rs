@@ -69,8 +69,13 @@ pub fn our_group_for(name: &str, settings: &ProxySettings, groups: &[NodeGroup])
     }
     if let Some(r) = region_of(name) {
         let tag = r.tag();
-        if groups.iter().any(|g| g.tag == tag) {
-            return Some(tag);
+        // A region with too few lines for a group of its own is in 其他地区.
+        if let Some(g) = groups.iter().find(|g| g.tag == tag) {
+            return Some(if group_tree::has_own_group(g) {
+                tag
+            } else {
+                group_tree::OTHER_REGION_TAG.into()
+            });
         }
     }
     ["其他", "其它", "other"]

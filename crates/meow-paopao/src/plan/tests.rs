@@ -161,15 +161,21 @@ fn select_and_other_names_like_dart() {
             "{n:?}"
         );
     }
-    // A region only when the pool has a group there.
-    let hk = [NodeGroup {
-        tag: "region:HK".into(),
-        label: "🇭🇰 香港".into(),
-        members: s(&["HK 1"]),
-    }];
+    // A region only when the pool has a group there; one line: 其他地区.
+    let hk = |lines: &[&str]| {
+        [NodeGroup {
+            tag: "region:HK".into(),
+            label: "🇭🇰 香港".into(),
+            members: s(lines),
+        }]
+    };
     assert_eq!(
-        our_group_for("香港自动", &on, &hk).as_deref(),
+        our_group_for("香港自动", &on, &hk(&["HK 1", "HK 2"])).as_deref(),
         Some("region:HK")
+    );
+    assert_eq!(
+        our_group_for("香港自动", &on, &hk(&["HK 1"])).as_deref(),
+        Some(OTHER_REGION_TAG)
     );
     assert_eq!(our_group_for("香港自动", &on, &[]), None);
     // Built-in groups off: no aliases.
@@ -352,7 +358,7 @@ fn a_line_switched_off_stays_listed_but_not_automatic() {
     });
     let hk = g(&t, "region:HK");
     assert!(hk.members.contains(&"HK 2".into()), "picked by hand here");
-    assert!(!hk.members.iter().any(|m| group_child::is_child(m)));
+    assert!(hk.modes.is_empty(), "one line on: nothing to choose");
     for x in t.groups.iter().filter(|x| x.kind != GroupKind::Select) {
         assert!(!x.members.contains(&"HK 2".into()), "{}", x.tag);
     }
@@ -362,9 +368,10 @@ fn a_line_switched_off_stays_listed_but_not_automatic() {
     }
     let all = build_with(&ProxySettings::default());
     assert!(g(&all, "region:HK")
-        .members
+        .modes
         .iter()
-        .any(|m| group_child::is_child(m)));
+        .all(|m| group_child::is_child(m)));
+    assert_eq!(g(&all, "region:HK").modes.len(), 3);
     assert!(g(&all, outbound_tags::SMART)
         .members
         .contains(&"HK 2".into()));
@@ -465,58 +472,99 @@ fn an_edited_built_in_policy_gets_outlets_and_is_marked() {
 }
 
 #[test]
+fn auto_select_takes_a_mode_never_a_region_or_a_line() {
+    // A pick saved by hand (a region, a line) is not read: the default mode.
+    for want in ["region:HK", "HK 1"] {
+        let t = build_with(&ProxySettings {
+            group_picks: map(&[("auto", want)]),
+            ..ProxySettings::default()
+        });
+        assert_eq!(pick(&t, "auto"), outbound_tags::SMART, "{want}");
+    }
+    let t = build_with(&ProxySettings {
+        group_picks: map(&[("auto", outbound_tags::FASTEST)]),
+        ..ProxySettings::default()
+    });
+    assert_eq!(pick(&t, "auto"), outbound_tags::FASTEST);
+}
+
+#[test]
 fn layers_lines_regions_auto_services() {
     let t = build_with(&ProxySettings::default());
+    // A region: its lines; its own ways of choosing are modes, no member.
+    let hk = g(&t, "region:HK");
+    assert_eq!(hk.members, s(&["HK 1", "HK 2"]));
     assert_eq!(
-        g(&t, "region:HK").members,
-        s(&[
-            "region:HK~auto",
-            "region:HK~balance",
-            "region:HK~fastest",
-            "HK 1",
-            "HK 2"
-        ])
+        hk.modes,
+        s(&["region:HK~auto", "region:HK~balance", "region:HK~fastest"])
     );
     assert_eq!(pick(&t, "region:HK"), "region:HK~auto");
-    assert_eq!(g(&t, OTHER_REGION_TAG).members, s(&["X 1"]));
-    assert_eq!(g(&t, "region:JP").members, s(&["JP 1"]));
+    // 日本 has one line: in 其他地区, with the line of no region.
+    assert!(t.by_tag("region:JP").is_none());
+    assert_eq!(g(&t, OTHER_REGION_TAG).members, s(&["JP 1", "X 1"]));
+    assert_eq!(g(&t, OTHER_REGION_TAG).label, "🌐 其他地区");
     assert_eq!(g(&t, "region:HK~balance").kind, GroupKind::Balance);
     assert_eq!(g(&t, "region:HK~fastest").kind, GroupKind::Fastest);
 
-    let regions = ["region:HK", "region:US", "region:JP", OTHER_REGION_TAG];
-    let mut want = s(&[
-        outbound_tags::SMART,
-        outbound_tags::BALANCE,
-        outbound_tags::FASTEST,
-    ]);
-    want.extend(s(&regions));
-    assert_eq!(g(&t, "auto").members, want);
+    let regions = ["region:HK", "region:US", OTHER_REGION_TAG];
+    // ♻️ 自动选择 offers its modes only: no region, no line to pick.
+    let auto = g(&t, "auto");
+    assert!(auto.members.is_empty());
+    assert_eq!(
+        auto.modes,
+        s(&[
+            outbound_tags::SMART,
+            outbound_tags::BALANCE,
+            outbound_tags::FASTEST,
+        ])
+    );
     assert_eq!(g(&t, outbound_tags::SMART).members, lines());
     assert_eq!(g(&t, outbound_tags::SMART).kind, GroupKind::Smart);
 
+    // 🚀 节点选择: 自动选择, the regions and kinds; no 直连, no mode.
     let select = g(&t, "proxy");
     assert_eq!(select.pick.as_deref(), Some("auto"));
-    assert_eq!(select.members[0], "DIRECT");
-    assert!(!select.members.iter().any(|m| lines().contains(m)));
+    assert_eq!(
+        select.members,
+        s(&[
+            "auto",
+            "region:HK",
+            "region:US",
+            OTHER_REGION_TAG,
+            "kind:relay"
+        ])
+    );
     let netflix = g(&t, "policy:netflix");
     assert_eq!(
-        netflix.members[..6],
+        netflix.members,
         s(&[
             "DIRECT",
             "REJECT",
             "proxy",
             "auto",
-            outbound_tags::BALANCE,
-            outbound_tags::FASTEST
+            "region:HK",
+            "region:US",
+            OTHER_REGION_TAG,
+            "kind:relay"
         ])
     );
-    for m in regions.iter().chain(&["kind:relay"]) {
-        assert!(netflix.members.contains(&(*m).to_owned()));
+    for m in regions {
+        assert_eq!(netflix.members.iter().filter(|x| *x == m).count(), 1);
     }
     assert_eq!(netflix.pick.as_deref(), Some("proxy"));
     assert!(t.by_tag("policy:netflix~auto").is_none());
     assert_eq!(g(&t, "policy:ads").members, s(&["REJECT", "DIRECT"]));
     assert_eq!(g(&t, "policy:ads").badge, Some(BADGE_BUILT_IN));
+    // No group lists a mode as a member.
+    for x in &t.groups {
+        assert!(
+            !x.members
+                .iter()
+                .any(|m| group_child::is_child(m) && !m.contains('@')),
+            "{}",
+            x.tag
+        );
+    }
 
     assert!(!t.cards().any(|c| group_child::is_child(&c.tag)));
     let mut leaves = t.leaves("proxy");
@@ -530,70 +578,119 @@ fn layers_lines_regions_auto_services() {
 fn ai_leaves_out_regions_it_does_not_serve() {
     let t = build_with(&ProxySettings::default());
     let ai = g(&t, "policy:ai");
+    // No 香港, and no 节点选择 or kind: they may lead there.
     assert!(!ai.members.contains(&"region:HK".into()));
-    // 固定出口 is no member of its own any more.
+    assert!(!ai.members.contains(&"proxy".into()));
+    assert!(!ai.members.contains(&"kind:relay".into()));
+    // Its own 自动选择 over the lines it serves, shown as 自动选择; 美国
+    // (its default, 固定出口 on there); 其他地区 (no refused line in it).
     assert_eq!(
-        ai.members[..5],
+        ai.members,
         s(&[
             "DIRECT",
             "REJECT",
-            "policy:ai~auto",
-            "policy:ai~balance",
-            "policy:ai~fastest"
+            "policy:ai@auto~auto",
+            "policy:ai@region:US~sticky",
+            OTHER_REGION_TAG
         ])
     );
-    assert!(t.by_tag("policy:ai~sticky").is_none());
     assert_eq!(
-        g(&t, "policy:ai~auto").members,
-        s(&["US 1", "US 2", "JP 1", "X 1"])
+        t.plain_members("policy:ai"),
+        s(&["DIRECT", "REJECT", "auto", "region:US", OTHER_REGION_TAG])
     );
-    // Its built-in default: 美国, 智能选择 there, with 固定出口 on — the
-    // same lines and the same behaviour as the member it had.
+    let own = g(&t, "policy:ai@auto~auto");
+    assert_eq!(own.kind, GroupKind::Smart);
+    assert_eq!(own.members, s(&["US 1", "US 2", "JP 1", "X 1"]));
+    assert_eq!(own.origin.as_deref(), Some("auto"));
+    assert!(t.by_tag("policy:ai~sticky").is_none());
+    assert!(t.by_tag("policy:ai~auto").is_none());
+    // Its built-in default: 美国, 智能选择 there, with 固定出口 on.
     let sticky = g(&t, "policy:ai@region:US~sticky");
     assert_eq!(sticky.kind, GroupKind::Sticky);
     assert_eq!(sticky.members, s(&["US 1", "US 2"]));
     assert_eq!(sticky.origin.as_deref(), Some("region:US"));
     assert!(!sticky.card);
-    assert_eq!(sticky.label, "🇺🇸 美国 · 智能选择 · 固定出口");
+    assert_eq!(sticky.label, "🇺🇸 美国 · 智能选择 · 固定节点");
     assert_eq!(ai.pick.as_deref(), Some("policy:ai@region:US~sticky"));
-    assert!(ai.members.contains(&"policy:ai@region:US~sticky".into()));
-    assert!(!ai.members.contains(&"region:US".into()));
-    assert!(t.plain_members("policy:ai").contains(&"region:US".into()));
     // The region itself is as it was.
     assert_eq!(pick(&t, "region:US"), "region:US~auto");
+}
+
+#[test]
+fn a_refused_line_in_other_regions_gets_ai_its_own_copy() {
+    // 香港 with one line is in 其他地区: AI and Google get their own copy
+    // of it over the rest.
+    let lines = s(&["HK 1", "US 1", "US 2", "JP 1", "X 1"]);
+    let g1 = |tag: &str, members: &[&str]| NodeGroup {
+        tag: tag.into(),
+        label: tag.into(),
+        members: s(members),
+    };
+    let base = vec![
+        g1("region:HK", &["HK 1"]),
+        g1("region:US", &["US 1", "US 2"]),
+        g1("region:JP", &["JP 1"]),
+    ];
+    let settings = ProxySettings::default();
+    let t = build_group_tree(&TreeInput {
+        lines: &lines,
+        base: &base,
+        settings: &settings,
+        split: &ImportedSplit::default(),
+        extras: &[],
+        smart_mode: true,
+    });
+    assert_eq!(g(&t, OTHER_REGION_TAG).members, s(&["HK 1", "JP 1", "X 1"]));
+    for p in ["policy:ai", "policy:google"] {
+        let copy = format!("{p}@{OTHER_REGION_TAG}~auto");
+        assert!(g(&t, p).members.contains(&copy), "{p}");
+        assert_eq!(g(&t, &copy).members, s(&["JP 1", "X 1"]));
+        assert_eq!(g(&t, &copy).origin.as_deref(), Some(OTHER_REGION_TAG));
+        assert!(!t.leaves(p).contains(&"HK 1".to_owned()), "{p}");
+    }
+    // Everyone else has 其他地区 itself.
+    assert!(g(&t, "policy:netflix")
+        .members
+        .contains(&OTHER_REGION_TAG.to_owned()));
 }
 
 #[test]
 fn group_defaults_precedence_own_pick_then_default_then_built_in() {
     let t = build_with(&ProxySettings::default());
     assert_eq!(pick(&t, "policy:netflix"), "proxy");
-    assert_eq!(pick(&t, "policy:youtube"), outbound_tags::FASTEST);
+    // YouTube: 自动选择, 速度最快 there.
+    assert_eq!(pick(&t, "policy:youtube"), "policy:youtube@auto~fastest");
+    assert_eq!(
+        g(&t, "policy:youtube@auto~fastest").kind,
+        GroupKind::Fastest
+    );
+    assert_eq!(t.plain_members("policy:youtube")[3], "auto");
     let t = build_with(&ProxySettings {
         group_defaults: defaults(&[
-            ("policy:netflix", GroupDefault::region("JP")),
+            ("policy:netflix", GroupDefault::region("US")),
             ("policy:youtube", GroupDefault::of(GroupDefaultKind::Auto)),
             ("policy:cnmedia", GroupDefault::of(GroupDefaultKind::Select)),
             ("policy:ads", GroupDefault::of(GroupDefaultKind::Direct)),
         ]),
         ..ProxySettings::default()
     });
-    assert_eq!(pick(&t, "policy:netflix"), "region:JP");
+    assert_eq!(pick(&t, "policy:netflix"), "region:US");
     assert_eq!(pick(&t, "policy:youtube"), "auto");
     assert_eq!(pick(&t, "policy:cnmedia"), "proxy");
     assert_eq!(pick(&t, "policy:ads"), "DIRECT");
     let t = build_with(&ProxySettings {
-        group_defaults: defaults(&[("policy:netflix", GroupDefault::region("JP"))]),
-        policies: map(&[("policy:netflix", "region:US")]),
+        group_defaults: defaults(&[("policy:netflix", GroupDefault::region("US"))]),
+        policies: map(&[("policy:netflix", "region:HK")]),
         ..ProxySettings::default()
     });
-    assert_eq!(pick(&t, "policy:netflix"), "region:US");
+    assert_eq!(pick(&t, "policy:netflix"), "region:HK");
     // An own pick the group no longer offers: the default, not 直连.
     let t = build_with(&ProxySettings {
-        group_defaults: defaults(&[("policy:netflix", GroupDefault::region("JP"))]),
+        group_defaults: defaults(&[("policy:netflix", GroupDefault::region("US"))]),
         policies: map(&[("policy:netflix", "region:SG")]),
         ..ProxySettings::default()
     });
-    assert_eq!(pick(&t, "policy:netflix"), "region:JP");
+    assert_eq!(pick(&t, "policy:netflix"), "region:US");
 }
 
 #[test]
@@ -602,15 +699,16 @@ fn ai_default_region_moves_the_sticky_exit() {
         group_defaults: defaults(&[("policy:ai", GroupDefault::region("JP"))]),
         ..ProxySettings::default()
     });
-    // One line there: nothing to choose, no copy.
-    assert_eq!(pick(&t, "policy:ai"), "region:JP");
+    // One line there: no 日本 group (其他地区 has it), the built-in.
+    assert_eq!(pick(&t, "policy:ai"), "policy:ai@region:US~sticky");
     let t = build_with(&ProxySettings {
         group_defaults: defaults(&[("policy:ai", GroupDefault::of(GroupDefaultKind::Fastest))]),
         ..ProxySettings::default()
     });
-    // Another default ran without 固定出口 and still does.
-    assert_eq!(pick(&t, "policy:ai"), "policy:ai~fastest");
-    assert!(!t.groups.iter().any(|g| g.origin.is_some()));
+    // Another default ran without 固定出口 and still does: its own
+    // 自动选择, 速度最快 there.
+    assert_eq!(pick(&t, "policy:ai"), "policy:ai@auto~fastest");
+    assert!(!t.groups.iter().any(|g| g.tag.ends_with("~sticky")));
 }
 
 #[test]
@@ -638,7 +736,7 @@ fn a_refused_region_or_one_without_lines_keeps_the_built_in_default() {
         s(&["US 1", "US 2"])
     );
     assert_eq!(pick(&t, "policy:ai"), "policy:ai@region:US~sticky");
-    assert_eq!(pick(&t, "policy:youtube"), outbound_tags::FASTEST);
+    assert_eq!(pick(&t, "policy:youtube"), "policy:youtube@auto~fastest");
 }
 
 #[test]
@@ -655,11 +753,9 @@ fn group_default_choices_regions_first() {
         choices("policy:ai"),
         s(&[
             "🇺🇸 美国",
-            "🇯🇵 日本",
             "速度最快",
             "自动选择",
             "负载均衡",
-            "节点选择",
             "直连",
             "拦截"
         ])
@@ -669,7 +765,6 @@ fn group_default_choices_regions_first() {
         s(&[
             "🇭🇰 香港",
             "🇺🇸 美国",
-            "🇯🇵 日本",
             "速度最快",
             "自动选择",
             "负载均衡",
@@ -802,8 +897,9 @@ fn subscription_groups_kept_same_names_merged_conflicts_merged() {
     );
     let t = build(&ProxySettings::default(), &split);
     let nf = g(&t, "sub:🎥 NETFLIX");
+    assert_eq!(nf.members, s(&["HK 1", "US 1", "HK 2"]));
     assert_eq!(
-        nf.members[..3],
+        nf.modes,
         s(&[
             "sub:🎥 NETFLIX~auto",
             "sub:🎥 NETFLIX~balance",

@@ -173,10 +173,7 @@
         "rule:<routekey>",
         "proxy:<routekey>",
         "direct:<routekey>",
-        "hk:<routekey>",
-        "jp:<routekey>",
-        "sg:<routekey>",
-        "us:<routekey>"
+        "other:<routekey>"
       ],
       "skip-auth-prefixes": [
         "127.0.0.1/8",
@@ -282,13 +279,7 @@
           "type": "select",
           "proxies": [
             "auto",
-            "DIRECT",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
@@ -297,40 +288,56 @@
           "proxies": [
             "auto~smart",
             "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "auto~fastest"
           ]
         },
         {
-          "name": "region:HK",
+          "name": "region:other",
           "type": "select",
           "proxies": [
-            "HK 01"
-          ]
-        },
-        {
-          "name": "region:JP",
-          "type": "select",
-          "proxies": [
-            "JP 01"
-          ]
-        },
-        {
-          "name": "region:SG",
-          "type": "select",
-          "proxies": [
+            "region:other~auto",
+            "region:other~balance",
+            "region:other~fastest",
+            "HK 01",
+            "JP 01",
+            "US 01",
             "🎥 奈飞 SG"
           ]
         },
         {
-          "name": "region:US",
-          "type": "select",
+          "name": "region:other~auto",
+          "type": "smart",
           "proxies": [
-            "US 01"
-          ]
+            "HK 01",
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
+          ],
+          "url": "https://www.gstatic.com/generate_204"
+        },
+        {
+          "name": "region:other~balance",
+          "type": "smart",
+          "proxies": [
+            "HK 01",
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
+          ],
+          "strategy": "consistent-hashing",
+          "url": "https://www.gstatic.com/generate_204"
+        },
+        {
+          "name": "region:other~fastest",
+          "type": "smart",
+          "proxies": [
+            "HK 01",
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
+          ],
+          "strategy": "throughput",
+          "url": "https://www.gstatic.com/generate_204"
         },
         {
           "name": "auto~smart",
@@ -338,8 +345,8 @@
           "proxies": [
             "HK 01",
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
           "url": "https://www.gstatic.com/generate_204"
         },
@@ -349,8 +356,8 @@
           "proxies": [
             "HK 01",
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
           "strategy": "consistent-hashing",
           "url": "https://www.gstatic.com/generate_204"
@@ -361,8 +368,8 @@
           "proxies": [
             "HK 01",
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
           "strategy": "throughput",
           "url": "https://www.gstatic.com/generate_204"
@@ -384,10 +391,7 @@
         "IN-USER,fastest,auto~fastest",
         "IN-USER,proxy,proxy",
         "IN-USER,direct,DIRECT",
-        "IN-USER,hk,region:HK",
-        "IN-USER,jp,region:JP",
-        "IN-USER,sg,region:SG",
-        "IN-USER,us,region:US",
+        "IN-USER,other,region:other",
         "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
         "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
         "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
@@ -487,14 +491,8 @@
           "label": "🚀 节点选择",
           "kind": "select",
           "members": [
-            "DIRECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ],
           "pick": "auto",
           "card": true
@@ -503,57 +501,71 @@
           "tag": "auto",
           "label": "♻️ 自动选择",
           "kind": "select",
-          "members": [
+          "members": [],
+          "modes": [
             "auto~smart",
             "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "auto~fastest"
           ],
           "pick": "auto~smart",
           "card": true
         },
         {
-          "tag": "region:HK",
-          "label": "🇭🇰 香港",
+          "tag": "region:other",
+          "label": "🌐 其他地区",
           "kind": "select",
           "members": [
-            "HK 01"
-          ],
-          "pick": "HK 01",
-          "card": true
-        },
-        {
-          "tag": "region:JP",
-          "label": "🇯🇵 日本",
-          "kind": "select",
-          "members": [
-            "JP 01"
-          ],
-          "pick": "JP 01",
-          "card": true
-        },
-        {
-          "tag": "region:SG",
-          "label": "🇸🇬 新加坡",
-          "kind": "select",
-          "members": [
+            "HK 01",
+            "JP 01",
+            "US 01",
             "🎥 奈飞 SG"
           ],
-          "pick": "🎥 奈飞 SG",
+          "modes": [
+            "region:other~auto",
+            "region:other~balance",
+            "region:other~fastest"
+          ],
+          "pick": "region:other~auto",
           "card": true
         },
         {
-          "tag": "region:US",
-          "label": "🇺🇸 美国",
-          "kind": "select",
+          "tag": "region:other~auto",
+          "label": "🌐 其他地区 · 智能选择",
+          "short": "智能选择",
+          "kind": "smart",
           "members": [
-            "US 01"
+            "HK 01",
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
           ],
-          "pick": "US 01",
-          "card": true
+          "card": false
+        },
+        {
+          "tag": "region:other~balance",
+          "label": "🌐 其他地区 · 负载均衡",
+          "short": "负载均衡",
+          "kind": "balance",
+          "members": [
+            "HK 01",
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
+          ],
+          "card": false
+        },
+        {
+          "tag": "region:other~fastest",
+          "label": "🌐 其他地区 · 速度最快",
+          "short": "速度最快",
+          "kind": "fastest",
+          "members": [
+            "HK 01",
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
+          ],
+          "card": false
         },
         {
           "tag": "auto~smart",
@@ -563,8 +575,8 @@
           "members": [
             "HK 01",
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
           "card": false
         },
@@ -576,8 +588,8 @@
           "members": [
             "HK 01",
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
           "card": false
         },
@@ -589,8 +601,8 @@
           "members": [
             "HK 01",
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
           "card": false
         }

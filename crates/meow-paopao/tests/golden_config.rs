@@ -140,7 +140,7 @@ fn missing_targets_reject() {
 }
 
 /// B2: the screen's tree is the config's: same groups, same order, same
-/// members (the config's selectors list their pick first).
+/// members and modes (the config's selectors list their pick first).
 #[test]
 fn tree_is_the_config_tree() {
     for path in common::golden_files("build") {
@@ -161,7 +161,7 @@ fn tree_is_the_config_tree() {
                 .iter()
                 .filter_map(|m| m.as_str())
                 .collect();
-            let mut want: Vec<&str> = t.members.iter().map(String::as_str).collect();
+            let mut want: Vec<&str> = t.choices().map(String::as_str).collect();
             got.sort_unstable();
             want.sort_unstable();
             assert_eq!(got, want, "{} {}", path.display(), t.tag);

@@ -7,10 +7,11 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Map, Value};
 
 use crate::model::settings::{
-    is_policy_tag, GroupEdit, GroupMode, GroupStrategy, MemberUse, ProxySettings, COPY_MARK,
+    copy_origin, is_policy_tag, GroupDefault, GroupDefaultKind, GroupEdit, GroupMode,
+    GroupStrategy, MemberUse, ProxySettings, COPY_MARK,
 };
 use crate::plan::outbound_tags;
-use crate::plan::policies::{Policy, POLICIES};
+use crate::plan::policies::{policy_by_tag, Policy, POLICIES};
 use crate::plan::sub_rules::ImportedSplit;
 use crate::pool::{group_names, NodeGroup};
 
@@ -82,7 +83,7 @@ fn child_name(suffix: &str) -> &'static str {
         group_child::AUTO => "自动选择",
         group_child::BALANCE => "负载均衡",
         group_child::FASTEST => "速度最快",
-        _ => "固定出口",
+        _ => "固定节点",
     }
 }
 
@@ -96,10 +97,19 @@ pub const BADGE_CUSTOM: &str = "自定义";
 /// The ♻️ 自动选择 group's own way of choosing (and a region's).
 pub const SMART_CHILD_NAME: &str = "智能选择";
 
-/// Lines with no known region: a base group of their own.
+/// Lines with no known region, and those of regions with fewer than
+/// [`MIN_REGION_LINES`]: a base group of their own.
 pub const OTHER_REGION_TAG: &str = "region:other";
 /// What [`OTHER_REGION_TAG`] is shown as.
-pub const OTHER_REGION_LABEL: &str = "🏳️ 其他地区";
+pub const OTHER_REGION_LABEL: &str = "🌐 其他地区";
+/// Lines a region needs for a group of its own; fewer go to 其他地区.
+pub const MIN_REGION_LINES: usize = 2;
+
+/// Whether the pool's region group `g` is a group of its own in the tree
+/// (else its lines are in [`OTHER_REGION_TAG`]).
+pub fn has_own_group(g: &NodeGroup) -> bool {
+    g.members.len() >= MIN_REGION_LINES
+}
 
 /// One group of the tree, as the core and the screen see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,9 +120,14 @@ pub struct GroupSpec {
     /// Name inside its parent ("速度最快"); [`GroupSpec::label`] when None.
     pub short: Option<String>,
     pub kind: GroupKind,
-    /// Tags: lines, other groups, DIRECT, REJECT.
+    /// Tags: lines, other groups, DIRECT, REJECT — what a user picks
+    /// between.
     pub members: Vec<String>,
-    /// [`GroupKind::Select`]: the member in use.
+    /// A shared group's own automatic ways of choosing (its hidden
+    /// children `<tag>~auto` / `~smart` / `~balance` / `~fastest`, not
+    /// cards): only its own pick may be one, no other group lists them.
+    pub modes: Vec<String>,
+    /// [`GroupKind::Select`]: the member (or mode) in use.
     pub pick: Option<String>,
     /// Shown as a card of its own (the automatic children are not).
     pub card: bool,
@@ -137,6 +152,7 @@ impl GroupSpec {
             short: None,
             kind,
             members,
+            modes: Vec::new(),
             pick: None,
             card: true,
             badge: None,
@@ -146,9 +162,14 @@ impl GroupSpec {
         }
     }
 
+    /// Its modes, then its members: everything its selector holds.
+    pub fn choices(&self) -> impl Iterator<Item = &String> {
+        self.modes.iter().chain(&self.members)
+    }
+
     /// The golden corpus' shape (Dart `treeJson`): `tag`, `label`,
-    /// `short?`, `kind`, `members`, `pick?`, `card`, `badge?`, `rawType?`,
-    /// `edited?` (only when true), `origin?`.
+    /// `short?`, `kind`, `members`, `modes?` (only when any), `pick?`,
+    /// `card`, `badge?`, `rawType?`, `edited?` (only when true), `origin?`.
     pub fn to_json(&self) -> Value {
         let mut m = Map::new();
         m.insert("tag".into(), self.tag.clone().into());
@@ -158,6 +179,9 @@ impl GroupSpec {
         }
         m.insert("kind".into(), self.kind.name().into());
         m.insert("members".into(), self.members.clone().into());
+        if !self.modes.is_empty() {
+            m.insert("modes".into(), self.modes.clone().into());
+        }
         if let Some(p) = &self.pick {
             m.insert("pick".into(), p.clone().into());
         }
@@ -228,7 +252,7 @@ impl GroupTree {
                     }
                 }
                 Some(g) => {
-                    for m in &g.members {
+                    for m in g.choices() {
                         walk(t, m, seen, out);
                     }
                 }
@@ -238,7 +262,7 @@ impl GroupTree {
         let mut seen = HashSet::new();
         if let Some(g) = self.by_tag(tag) {
             seen.insert(tag.to_owned());
-            for m in &g.members {
+            for m in g.choices() {
                 walk(self, m, &mut seen, &mut out);
             }
         }
@@ -314,13 +338,18 @@ fn pick_of(s: &ProxySettings, tag: &str, members: &[String], fallback: &str) -> 
 /// Builds the groups in layers, as in Clash:
 ///
 /// 1. lines, sorted into region groups (the base) and kind groups;
-/// 2. ♻️ 自动选择 over every region group, and 🚀 节点选择;
+/// 2. ♻️ 自动选择 (its modes only), and 🚀 节点选择;
 /// 3. the service groups over the region groups too, and the
 ///    subscriptions' own groups.
 ///
-/// Every group carries 负载均衡 and 速度最快 over its members (two or
-/// more enabled lines); those that are not automatic themselves also
-/// 自动选择. Children over the same members are shared.
+/// A region needs [`MIN_REGION_LINES`] for a group of its own; the rest
+/// share 其他地区. A shared group (♻️ 自动选择, a region, a kind, a
+/// subscription's group) carries 智能选择, 负载均衡 and 速度最快 over its
+/// lines (two or more enabled) as [`GroupSpec::modes`]: its own pick may
+/// be one, no other group lists them. Members are the groups themselves;
+/// how a user uses one (a mode, a line) is its copy ([`with_group_use`]).
+/// 🚀 节点选择 has no 直连; a policy refusing regions (AI, Google) has no
+/// 节点选择 and its own copies of 自动选择 / 其他地区 without them.
 ///
 /// Without lines: 节点选择 over the extras (or DIRECT) and the user's own
 /// groups. With [`GroupMode::Subscription`] and a split that has its own
@@ -394,29 +423,38 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
         children: Vec::new(),
     };
 
-    // 1. Base: regions (every usable line in one), kinds.
-    let mut placed: HashSet<&str> = HashSet::new();
+    // 1. Base: regions with two lines or more (every usable line in one,
+    // the rest in 其他地区), kinds.
+    let mut line_region: HashMap<String, String> = HashMap::new();
     let mut region_groups: Vec<NodeGroup> = Vec::new();
     let mut kind_groups: Vec<&NodeGroup> = Vec::new();
     for g in input.base {
-        if g.tag.starts_with("region:") {
-            region_groups.push(g.clone());
-            placed.extend(g.members.iter().map(String::as_str));
+        if let Some(code) = g.tag.strip_prefix("region:") {
+            for m in &g.members {
+                line_region.insert(m.clone(), code.to_owned());
+            }
+            if has_own_group(g) {
+                region_groups.push(g.clone());
+            }
         } else {
             kind_groups.push(g);
         }
     }
-    let unplaced: Vec<String> = input
+    let in_own: HashSet<&str> = region_groups
+        .iter()
+        .flat_map(|g| g.members.iter().map(String::as_str))
+        .collect();
+    let other: Vec<String> = input
         .lines
         .iter()
-        .filter(|l| !placed.contains(l.as_str()))
+        .filter(|l| !in_own.contains(l.as_str()))
         .cloned()
         .collect();
-    if !unplaced.is_empty() {
+    if !other.is_empty() {
         region_groups.push(NodeGroup {
             tag: OTHER_REGION_TAG.into(),
             label: OTHER_REGION_LABEL.into(),
-            members: unplaced,
+            members: other,
         });
     }
     // A single line chosen in 🚀 节点选择 (before it listed lines): now its
@@ -430,36 +468,37 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
     } else {
         None
     };
+    // Each region / kind: its lines, and its own ways of choosing among
+    // them (智能选择, 负载均衡, 速度最快) as modes only its pick may be.
     let mut base_specs = Vec::new();
     for g in region_groups.iter().chain(kind_groups.iter().copied()) {
-        // A region chooses by itself (智能选择), not "自动选择".
-        let mut members = b.children_of(&g.tag, &g.label, &g.members, true, Some(SMART_CHILD_NAME));
-        members.extend(g.members.iter().cloned());
+        let modes = b.children_of(&g.tag, &g.label, &g.members, true, Some(SMART_CHILD_NAME));
+        let mut spec = GroupSpec::new(&g.tag, &g.label, GroupKind::Select, g.members.clone());
+        spec.modes = modes;
         let fallback = if line_home.as_deref() == Some(g.tag.as_str()) {
             wanted.clone()
         } else {
-            members[0].clone()
+            spec.choices().next().cloned().unwrap_or_default()
         };
-        let mut spec = GroupSpec::new(&g.tag, &g.label, GroupKind::Select, members);
-        spec.pick = Some(pick_of(s, &g.tag, &spec.members, &fallback));
+        let choices: Vec<String> = spec.choices().cloned().collect();
+        spec.pick = Some(pick_of(s, &g.tag, &choices, &fallback));
         base_specs.push(spec);
     }
     let region_tags: Vec<String> = region_groups.iter().map(|g| g.tag.clone()).collect();
     let kind_tags: Vec<String> = kind_groups.iter().map(|g| g.tag.clone()).collect();
     // The automatic children choose among the lines themselves, not the
     // region groups (one layer of racing).
-    let lines_of = |tags: &[String]| -> Vec<String> {
-        region_groups
-            .iter()
-            .filter(|g| tags.contains(&g.tag))
-            .flat_map(|g| g.members.iter().cloned())
-            .collect()
-    };
-    let all_lines = lines_of(&region_tags);
+    let all_lines: Vec<String> = region_groups
+        .iter()
+        .flat_map(|g| g.members.iter().cloned())
+        .collect();
     let auto_lines = b.enabled(&all_lines);
 
-    // 2. ♻️ 自动选择 over the regions; its 智能选择 is how it chooses.
-    let mut auto_members = Vec::new();
+    // 2. ♻️ 自动选择: its modes only (智能选择, 负载均衡, 速度最快), never a
+    // line or a region to pick by hand (picking one is 节点选择's, a
+    // policy's or the user's own group's). Fewer than two lines on: no
+    // modes, the regions stand in.
+    let mut auto_modes = Vec::new();
     if auto_lines.len() >= 2 {
         let mut smart = GroupSpec::new(
             outbound_tags::SMART,
@@ -470,16 +509,20 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
         smart.short = Some(SMART_CHILD_NAME.into());
         smart.card = false;
         b.children.push(smart);
-        auto_members.push(outbound_tags::SMART.to_owned());
+        auto_modes.push(outbound_tags::SMART.to_owned());
     }
-    auto_members.extend(b.children_of(
+    auto_modes.extend(b.children_of(
         outbound_tags::AUTO,
         group_names::AUTO,
         &all_lines,
         false,
         None,
     ));
-    auto_members.extend(region_tags.iter().cloned());
+    let auto_members = if auto_modes.is_empty() {
+        region_tags.clone()
+    } else {
+        Vec::new()
+    };
     let mut out = Vec::new();
     let mut auto = GroupSpec::new(
         outbound_tags::AUTO,
@@ -487,23 +530,17 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
         GroupKind::Select,
         auto_members,
     );
+    auto.modes = auto_modes;
+    let auto_choices: Vec<String> = auto.choices().cloned().collect();
     auto.pick = Some(pick_of(
         s,
         outbound_tags::AUTO,
-        &auto.members,
-        &auto.members[0],
+        &auto_choices,
+        &auto_choices[0],
     ));
-    out.push(auto);
-    // What "all regions" offers above the base.
-    let mut over_all = strings(&[outbound_tags::AUTO]);
-    if auto_lines.len() >= 2 {
-        over_all.extend(strings(&[outbound_tags::BALANCE, outbound_tags::FASTEST]));
-    }
 
-    // 🚀 节点选择: 直连 first, then the automatic ones, each region, kind,
-    // chain.
-    let mut select_members = strings(&["DIRECT"]);
-    select_members.extend(over_all.iter().cloned());
+    // 🚀 节点选择: 自动选择, each region, kind, chain (直连 is a policy's).
+    let mut select_members = strings(&[outbound_tags::AUTO]);
     select_members.extend(region_tags.iter().cloned());
     select_members.extend(kind_tags.iter().cloned());
     select_members.extend(extras.iter().cloned());
@@ -519,25 +556,29 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
         select_members,
     );
     select.pick = Some(select_pick);
-    out.insert(0, select);
+    out.push(select);
 
     // 3. Service groups.
     if input.smart_mode {
+        let shared: HashMap<String, GroupSpec> = std::iter::once(&auto)
+            .chain(&base_specs)
+            .map(|g| (g.tag.clone(), g.clone()))
+            .collect();
+        let c = PolicyContext {
+            region_groups: &region_groups,
+            region_tags: &region_tags,
+            kind_tags: &kind_tags,
+            all_lines: &all_lines,
+            line_region: &line_region,
+            shared: &shared,
+            extras,
+        };
         for p in &POLICIES {
             if !p.base && !s.built_in_groups {
                 continue;
             }
-            out.push(b.policy_group(
-                p,
-                s,
-                &PolicyContext {
-                    region_groups: &region_groups,
-                    region_tags: &region_tags,
-                    kind_tags: &kind_tags,
-                    over_all: &over_all,
-                    extras,
-                },
-            ));
+            let g = b.policy_group(p, s, &c);
+            out.push(g);
         }
         // The subscriptions' own groups, with their own automatic children.
         let line_set: HashSet<&str> = input.lines.iter().map(String::as_str).collect();
@@ -549,26 +590,32 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
                 .filter(|m| line_set.contains(m.as_str()))
                 .cloned()
                 .collect();
-            let kids = b.children_of(&g.tag, &g.name, &own, true, None);
+            let modes = b.children_of(&g.tag, &g.name, &own, true, None);
             let is_fixed = |m: &String| m == "DIRECT" || m == "REJECT";
             // 直连 / 拦截 first, as everywhere.
             let mut members: Vec<String> =
                 g.members.iter().filter(|m| is_fixed(m)).cloned().collect();
-            members.extend(kids);
             members.extend(g.members.iter().filter(|m| !is_fixed(m)).cloned());
             // The provider's own default comes first in its list.
             let fallback = g.members[0].clone();
             let mut spec = GroupSpec::new(&g.tag, &g.name, GroupKind::Select, members);
-            spec.pick = Some(pick_of(s, &g.tag, &spec.members, &fallback));
+            spec.modes = modes;
+            let choices: Vec<String> = spec.choices().cloned().collect();
+            spec.pick = Some(pick_of(s, &g.tag, &choices, &fallback));
             spec.badge = Some(BADGE_SUBSCRIPTION);
             out.push(spec);
         }
     }
+    out.insert(1, auto);
     out.extend(base_specs);
     let built = edited(s, out, &outlet_there);
     // The user's own policies: over what every business policy is over.
-    let mut own_members = strings(&["DIRECT", "REJECT", outbound_tags::PROXY]);
-    own_members.extend(over_all.iter().cloned());
+    let mut own_members = strings(&[
+        "DIRECT",
+        "REJECT",
+        outbound_tags::PROXY,
+        outbound_tags::AUTO,
+    ]);
     own_members.extend(region_tags.iter().cloned());
     own_members.extend(kind_tags.iter().cloned());
     own_members.extend(extras.iter().cloned());
@@ -593,8 +640,65 @@ struct PolicyContext<'a> {
     region_groups: &'a [NodeGroup],
     region_tags: &'a [String],
     kind_tags: &'a [String],
-    over_all: &'a [String],
+    /// Every line in a region group, in their order.
+    all_lines: &'a [String],
+    /// Line → the code of the region it is in (those in 其他地区 too).
+    line_region: &'a HashMap<String, String>,
+    /// ♻️ 自动选择 and the region / kind groups, by tag.
+    shared: &'a HashMap<String, GroupSpec>,
     extras: &'a [String],
+}
+
+/// How group `user` uses its member `member`: the saved use
+/// ([`ProxySettings::member_use`]); a built-in policy's ♻️ 自动选择 with
+/// none saved: its 分组默认's mode when that is 自动选择 in a mode, else
+/// its own ([`Policy::auto_mode`], YouTube: 速度最快). None = as `member`
+/// decides.
+fn use_of(s: &ProxySettings, user: &str, member: &str) -> Option<MemberUse> {
+    if let Some(u) = s.member_use(user, member) {
+        return Some(u.clone());
+    }
+    if member != outbound_tags::AUTO {
+        return None;
+    }
+    let p = policy_by_tag(user)?;
+    // A 分组默认 that is 自动选择 in some mode says how; any other (a
+    // region, 直连 …) leaves the built-in way as it is.
+    let kind = match s.group_defaults.get(user).map(|d| d.kind) {
+        Some(
+            k @ (GroupDefaultKind::Fastest | GroupDefaultKind::Auto | GroupDefaultKind::Balance),
+        ) => k,
+        _ => p.auto_mode?,
+    };
+    GroupDefault::auto_use(kind)
+}
+
+/// A shared group's own pick as a use: one of its modes, or a line.
+fn own_use(g: &GroupSpec) -> Option<MemberUse> {
+    let pick = g.pick.as_deref()?;
+    let mode = pick
+        .strip_prefix(g.tag.as_str())
+        .and_then(|suffix| match suffix {
+            "~auto" | "~smart" => Some(MemberUse::Smart),
+            "~balance" => Some(MemberUse::Balance),
+            "~fastest" => Some(MemberUse::Fastest),
+            _ => None,
+        });
+    mode.or_else(|| {
+        g.members
+            .iter()
+            .any(|m| m == pick)
+            .then(|| MemberUse::Line(pick.to_owned()))
+    })
+}
+
+/// The member of `members` that is `want` in group `user`: `want` itself
+/// or `user`'s own copy of it.
+fn offered(user: &str, members: &[String], want: &str) -> Option<String> {
+    members
+        .iter()
+        .find(|m| *m == want || copy_origin(user, m) == Some(want))
+        .cloned()
 }
 
 impl Layers {
@@ -649,9 +753,75 @@ impl Layers {
             .collect()
     }
 
+    /// Group `user`'s own copy of shared group `g` over only `lines` (those
+    /// of `g`'s it does not refuse): `<user>@<g>~auto|~balance|~fastest`
+    /// in the mode it uses `g` in (`use_`, else `g`'s own pick, else
+    /// 智能选择) over the enabled ones; with a line chosen or fewer than two
+    /// on, `<user>@<g>` on one line (only when `lines_ok`: ♻️ 自动选择 has
+    /// no line to pick, none then). None without lines.
+    fn narrowed(
+        &mut self,
+        user: &str,
+        g: &GroupSpec,
+        lines: &[String],
+        use_: Option<MemberUse>,
+        lines_ok: bool,
+    ) -> Option<String> {
+        if lines.is_empty() {
+            return None;
+        }
+        let on = self.enabled(lines);
+        let want = use_.or_else(|| own_use(g)).unwrap_or(MemberUse::Smart);
+        let base = format!("{user}{COPY_MARK}{}", g.tag);
+        let mode = match &want {
+            MemberUse::Smart => Some((group_child::AUTO, GroupKind::Smart, SMART_CHILD_NAME)),
+            MemberUse::Balance => Some((
+                group_child::BALANCE,
+                GroupKind::Balance,
+                child_name(group_child::BALANCE),
+            )),
+            MemberUse::Fastest => Some((
+                group_child::FASTEST,
+                GroupKind::Fastest,
+                child_name(group_child::FASTEST),
+            )),
+            MemberUse::Line(_) => None,
+        };
+        let mut copy = match mode {
+            Some((suffix, kind, name)) if on.len() >= 2 => GroupSpec::new(
+                &format!("{base}{suffix}"),
+                &format!("{} · {name}", g.label),
+                kind,
+                on,
+            ),
+            _ if !lines_ok => return None,
+            _ => {
+                let pick = match &want {
+                    MemberUse::Line(l) if lines.contains(l) => l.clone(),
+                    _ => on.first().unwrap_or(&lines[0]).clone(),
+                };
+                let mut c = GroupSpec::new(
+                    &base,
+                    &format!("{} · {pick}", g.label),
+                    GroupKind::Select,
+                    lines.to_vec(),
+                );
+                c.pick = Some(pick);
+                c
+            }
+        };
+        copy.card = false;
+        copy.origin = Some(g.tag.clone());
+        let tag = copy.tag.clone();
+        self.children.push(copy);
+        Some(tag)
+    }
+
     /// A built-in service group: 拦截 / 直连 for a blockable one; else
-    /// over the regions it serves (its own children when it leaves some
-    /// out).
+    /// 直连, 拦截, 节点选择, 自动选择, the regions and kinds; one that
+    /// refuses some regions has no 节点选择 or kind (they may lead there)
+    /// and its own copies of 自动选择 and of a region holding lines it
+    /// refuses (其他地区), over the rest ([`Layers::narrowed`]).
     fn policy_group(&mut self, p: &Policy, s: &ProxySettings, c: &PolicyContext<'_>) -> GroupSpec {
         let tag = p.tag();
         let label = p.label();
@@ -664,77 +834,96 @@ impl Layers {
             spec.badge = badge;
             return spec;
         }
-        // `g.tag.substring(7)`: the code after `region:`.
-        let allowed: Vec<String> = c
-            .region_groups
-            .iter()
-            .filter(|g| !p.avoid_regions.contains(&&g.tag[7..]))
-            .map(|g| g.tag.clone())
-            .collect();
-        let lines_of = |tags: &[String]| -> Vec<String> {
-            c.region_groups
-                .iter()
-                .filter(|g| tags.contains(&g.tag))
-                .flat_map(|g| g.members.iter().cloned())
-                .collect()
+        let refused = |l: &String| {
+            c.line_region
+                .get(l)
+                .is_some_and(|code| p.avoid_regions.contains(&code.as_str()))
         };
+        let restricted = c.all_lines.iter().any(refused);
         let mut members = strings(&["DIRECT", "REJECT"]);
-        if allowed.len() == c.region_tags.len() {
-            members.push(outbound_tags::PROXY.into());
-            members.extend(c.over_all.iter().cloned());
+        // Each region member with the lines it goes over.
+        let mut regions: Vec<(String, Vec<String>)> = Vec::new();
+        if restricted {
+            let usable: Vec<String> = c
+                .all_lines
+                .iter()
+                .filter(|l| !refused(l))
+                .cloned()
+                .collect();
+            if let Some(auto) = c.shared.get(outbound_tags::AUTO) {
+                let use_ = use_of(s, &tag, outbound_tags::AUTO);
+                members.extend(self.narrowed(&tag, auto, &usable, use_, false));
+            }
+            for g in c.region_groups {
+                let lines: Vec<String> =
+                    g.members.iter().filter(|l| !refused(l)).cloned().collect();
+                if lines.len() == g.members.len() {
+                    members.push(g.tag.clone());
+                    regions.push((g.tag.clone(), lines));
+                    continue;
+                }
+                let Some(spec) = c.shared.get(&g.tag) else {
+                    continue;
+                };
+                let use_ = s.member_use(&tag, &g.tag).cloned();
+                if let Some(t) = self.narrowed(&tag, spec, &lines, use_, true) {
+                    members.push(t.clone());
+                    regions.push((t, lines));
+                }
+            }
+        } else {
+            members.extend(strings(&[outbound_tags::PROXY, outbound_tags::AUTO]));
             members.extend(c.region_tags.iter().cloned());
             members.extend(c.kind_tags.iter().cloned());
-        } else {
-            members.extend(self.children_of(&tag, &label, &lines_of(&allowed), true, None));
-            members.push(outbound_tags::PROXY.into());
-            members.extend(allowed.iter().cloned());
+            regions.extend(
+                c.region_groups
+                    .iter()
+                    .map(|g| (g.tag.clone(), g.members.clone())),
+            );
         }
         members.extend(c.extras.iter().cloned());
-        // 分组默认 naming a region it has lines in (and does not refuse) is
-        // its preferred region.
-        let in_allowed = |code: &str| {
+        // 分组默认 naming a region it has a group of its own for (and does
+        // not refuse) is its preferred region.
+        let in_members = |code: &str| {
             let t = format!("region:{code}");
-            allowed.iter().find(|a| **a == t).cloned()
+            members.iter().find(|m| **m == t).cloned()
         };
         let chosen_region = s
             .group_defaults
             .get(&tag)
             .filter(|d| d.region.is_some() && d.allowed_for(p))
-            .and_then(|d| in_allowed(d.region.as_deref().unwrap_or_default()));
-        let preferred = chosen_region.or_else(|| p.prefer_region.and_then(in_allowed));
-        let own_auto = format!("{tag}{}", group_child::AUTO);
-        // 固定出口 (a sticky policy) over its own lines when no region is
-        // preferred: what decides them all ([`with_group_use`] keeps it
+            .and_then(|d| in_members(d.region.as_deref().unwrap_or_default()));
+        let preferred = chosen_region.or_else(|| p.prefer_region.and_then(in_members));
+        let auto_member = offered(&tag, &members, outbound_tags::AUTO);
+        // 固定出口 (a sticky policy) over all its lines when no region is
+        // preferred: 自动选择 decides them all ([`with_group_use`] keeps it
         // on one).
-        let all_lines_auto = || {
-            [own_auto.as_str(), outbound_tags::AUTO]
-                .into_iter()
-                .find(|t| p.sticky_exit && members.iter().any(|m| m == t))
-                .map(str::to_owned)
-        };
+        let all_lines_auto = || auto_member.clone().filter(|_| p.sticky_exit);
         let fallback = if p.fallback == outbound_tags::PROXY {
             p.prefer_pick
-                .filter(|pp| members.iter().any(|m| m == pp))
-                .map(str::to_owned)
+                .and_then(|pp| offered(&tag, &members, pp))
                 .or_else(|| preferred.clone())
                 .or_else(all_lines_auto)
                 .unwrap_or_else(|| {
-                    if allowed.len() == c.region_tags.len() {
+                    if !restricted {
                         return p.fallback.to_owned();
                     }
-                    // Serving only some regions: its own 自动选择 over them;
-                    // without one (fewer than two lines on), the region of
-                    // the first line on there; else 节点选择. Dart named the
-                    // missing 自动选择, so the pick fell to the first member,
-                    // DIRECT: Google / AI went direct unseen (B22).
-                    if members.contains(&own_auto) {
-                        return own_auto.clone();
+                    // Refusing some regions: its own 自动选择 over the rest;
+                    // without one (fewer than two lines on), the first region
+                    // with a line on there, else any of its regions, else an
+                    // outlet, else 直连 — never 节点选择, which may lead to a
+                    // refused region (B22: Google / AI went direct unseen
+                    // when Dart named a missing 自动选择).
+                    if let Some(a) = &auto_member {
+                        return a.clone();
                     }
-                    allowed
+                    regions
                         .iter()
-                        .find(|r| !self.enabled(&lines_of(std::slice::from_ref(r))).is_empty())
-                        .cloned()
-                        .unwrap_or_else(|| outbound_tags::PROXY.to_owned())
+                        .find(|(_, lines)| !self.enabled(lines).is_empty())
+                        .or(regions.first())
+                        .map(|(t, _)| t.clone())
+                        .or_else(|| c.extras.first().cloned())
+                        .unwrap_or_else(|| "DIRECT".to_owned())
                 })
         } else {
             p.fallback.to_owned()
@@ -770,9 +959,6 @@ impl Layers {
 /// the picks down, see what that member really uses. Without any, the
 /// groups are as they were.
 fn with_group_use(s: &ProxySettings, mut groups: Vec<GroupSpec>) -> Vec<GroupSpec> {
-    if s.group_use.is_empty() && !groups.iter().any(|g| s.sticky_of(&g.tag)) {
-        return groups;
-    }
     let mut by_tag: HashMap<String, GroupSpec> =
         groups.iter().map(|g| (g.tag.clone(), g.clone())).collect();
     let mut copies = Vec::new();
@@ -782,17 +968,24 @@ fn with_group_use(s: &ProxySettings, mut groups: Vec<GroupSpec>) -> Vec<GroupSpe
             continue;
         }
         let sticky = s.sticky_of(&g.tag);
-        if !sticky && !s.group_use.contains_key(&g.tag) {
-            continue;
-        }
         for k in 0..g.members.len() {
             let m = g.members[k].clone();
             let Some(member) = by_tag.get(&m) else {
                 continue;
             };
             let picked = g.pick.as_deref() == Some(m.as_str());
-            let use_ = s.member_use(&g.tag, &m);
-            let Some(copy) = member_copy(&g.tag, member, use_, sticky && picked, &by_tag) else {
+            // The group's own copy (one leaving regions out) already is
+            // how it uses the member.
+            let use_ = if member.origin.is_some() {
+                None
+            } else {
+                use_of(s, &g.tag, &m)
+            };
+            if use_.is_none() && !(sticky && picked) {
+                continue;
+            }
+            let Some(copy) = member_copy(&g.tag, member, use_.as_ref(), sticky && picked, &by_tag)
+            else {
                 continue;
             };
             if picked {
@@ -805,6 +998,9 @@ fn with_group_use(s: &ProxySettings, mut groups: Vec<GroupSpec>) -> Vec<GroupSpe
         by_tag.insert(g.tag.clone(), g.clone());
     }
     groups.extend(copies);
+    // A copy another one replaced is used by nobody.
+    let used: HashSet<String> = groups.iter().flat_map(|g| g.choices()).cloned().collect();
+    groups.retain(|g| g.origin.is_none() || used.contains(&g.tag));
     groups
 }
 
@@ -822,7 +1018,7 @@ fn members_first(groups: &[GroupSpec]) -> Vec<usize> {
             return;
         }
         seen[i] = true;
-        for m in &groups[i].members {
+        for m in groups[i].choices() {
             if let Some(&j) = index.get(m.as_str()) {
                 visit(j, groups, index, seen, out);
             }
@@ -857,7 +1053,7 @@ fn mode_child<'a>(
     };
     tags.iter()
         .map(|t| format!("{}{t}", group.tag))
-        .find(|t| group.members.contains(t))
+        .find(|t| group.modes.contains(t))
         .and_then(|t| by_tag.get(&t))
         .map(|c| (suffix, c))
 }
@@ -894,7 +1090,9 @@ fn member_copy(
     sticky: bool,
     by_tag: &HashMap<String, GroupSpec>,
 ) -> Option<GroupSpec> {
-    let base = format!("{user}{COPY_MARK}{}", member.tag);
+    // A copy of `user`'s own copy stands for the same member.
+    let origin = member.origin.as_deref().unwrap_or(&member.tag);
+    let base = format!("{user}{COPY_MARK}{origin}");
     let copy = |suffix: &str, kind: GroupKind, members: &[String], name: &str| {
         let mut c = GroupSpec::new(
             &format!("{base}{suffix}"),
@@ -903,7 +1101,7 @@ fn member_copy(
             members.to_vec(),
         );
         c.card = false;
-        c.origin = Some(member.tag.clone());
+        c.origin = Some(origin.to_owned());
         c
     };
     let sticky_name = child_name(group_child::STICKY);
@@ -927,7 +1125,9 @@ fn member_copy(
         return None;
     }
     // Modes and lines of its own only in a shared group; 固定出口 anywhere.
-    let shared = !is_policy_tag(&member.tag) && member.tag != outbound_tags::PROXY;
+    let shared = !is_policy_tag(&member.tag)
+        && member.tag != outbound_tags::PROXY
+        && member.origin.is_none();
     let short = |c: &GroupSpec| c.short.clone().unwrap_or_else(|| c.label.clone());
     let chosen = use_.filter(|_| shared).and_then(|u| match u {
         MemberUse::Line(l) => member
@@ -972,6 +1172,7 @@ fn member_copy(
         Ok((suffix, c)) => Some(copy(suffix, c.kind, &c.members, &short(c))),
         Err(line) => {
             let mut c = copy("", GroupKind::Select, &member.members, line);
+            c.modes = member.modes.clone();
             c.pick = Some(line.clone());
             Some(c)
         }
@@ -1012,25 +1213,16 @@ fn clash_name(tag: &str) -> &str {
     }
 }
 
-/// [`clash_name`] when offered, else the first member.
-fn clash(tag: &str, members: &[String]) -> String {
-    let t = clash_name(tag);
-    if members.iter().any(|m| m == t) {
-        t.to_owned()
-    } else {
-        members.first().cloned().unwrap_or_default()
-    }
-}
-
 /// A built-in group's pick: the user's own (proxies page, `policies`) >
 /// its 分组默认 > `built_in`; each only when the group offers it.
 fn policy_pick(p: &Policy, s: &ProxySettings, members: &[String], built_in: &str) -> String {
     let tag = p.tag();
-    if let Some(manual) = s.policies.get(&tag) {
-        let t = clash(manual, members);
-        if t == clash_name(manual) {
-            return t;
-        }
+    if let Some(t) = s
+        .policies
+        .get(&tag)
+        .and_then(|manual| offered(&tag, members, clash_name(manual)))
+    {
+        return t;
     }
     if let Some(d) = s
         .group_defaults
@@ -1039,7 +1231,9 @@ fn policy_pick(p: &Policy, s: &ProxySettings, members: &[String], built_in: &str
     {
         return d;
     }
-    clash(built_in, members)
+    offered(&tag, members, clash_name(built_in))
+        .or_else(|| members.first().cloned())
+        .unwrap_or_default()
 }
 
 /// The groups with the user's edits (`group_edits`) applied to the ones
@@ -1075,7 +1269,7 @@ fn edited(
                 .map(|p| clash_name(p).to_owned())
                 .into_iter()
                 .chain(s.group_picks.get(&g.tag).cloned())
-                .find(|c| members.contains(c));
+                .find_map(|c| offered(&g.tag, &members, &c));
             g.members = members;
             if chosen.is_some() {
                 g.pick = chosen;
@@ -1144,7 +1338,7 @@ fn tree_without_loops(groups: Vec<GroupSpec>) -> GroupTree {
         }
         let Some(g) = by_tag.get(tag) else { return };
         path.push(tag);
-        for m in &g.members {
+        for m in g.choices() {
             if path.contains(&m.as_str()) {
                 cut.entry(tag.to_owned()).or_default().insert(m.clone());
                 loops.push((tag.to_owned(), m.clone()));
@@ -1175,19 +1369,21 @@ fn tree_without_loops(groups: Vec<GroupSpec>) -> GroupTree {
             let Some(drop) = cut.get(&g.tag) else {
                 return g;
             };
+            g.modes.retain(|m| !drop.contains(m));
             let mut kept: Vec<String> = g
                 .members
                 .iter()
                 .filter(|m| !drop.contains(*m))
                 .cloned()
                 .collect();
-            if kept.is_empty() {
+            if kept.is_empty() && g.modes.is_empty() {
                 kept.push("DIRECT".into());
             }
-            if g.pick.as_ref().is_some_and(|p| drop.contains(p)) {
-                g.pick = Some(kept[0].clone());
-            }
             g.members = kept;
+            if g.pick.as_ref().is_some_and(|p| drop.contains(p)) {
+                let first = g.choices().next().cloned();
+                g.pick = first;
+            }
             g
         })
         .collect();

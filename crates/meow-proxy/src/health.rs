@@ -218,6 +218,47 @@ fn named_probe_future(
     .boxed()
 }
 
+/// The last background probe of each line that keeps no record of its own
+/// (a smart group's: its [`ProxyHealth`] is left alone, so the probe never
+/// marks the line dead for the other groups), by line name. Read with the
+/// lines' own histories (`GET /paopao/line-health`).
+fn line_probes(
+) -> &'static parking_lot::Mutex<std::collections::HashMap<String, meow_common::DelayHistory>> {
+    static PROBES: std::sync::OnceLock<
+        parking_lot::Mutex<std::collections::HashMap<String, meow_common::DelayHistory>>,
+    > = std::sync::OnceLock::new();
+    PROBES.get_or_init(Default::default)
+}
+
+/// Lines kept at most in [`line_probes`] (the oldest go first).
+const LINE_PROBES_MAX: usize = 8192;
+
+/// Notes a background probe of `line`: `delay` ms, 0 = no answer.
+pub fn note_line_probe(line: &str, delay: u16) {
+    let mut probes = line_probes().lock();
+    if probes.len() >= LINE_PROBES_MAX && !probes.contains_key(line) {
+        if let Some(oldest) = probes
+            .iter()
+            .min_by_key(|(_, h)| h.time)
+            .map(|(k, _)| k.clone())
+        {
+            probes.remove(&oldest);
+        }
+    }
+    probes.insert(
+        line.to_owned(),
+        meow_common::DelayHistory {
+            time: std::time::SystemTime::now(),
+            delay,
+        },
+    );
+}
+
+/// The last background probe of `line` noted with [`note_line_probe`].
+pub fn line_probe(line: &str) -> Option<meow_common::DelayHistory> {
+    line_probes().lock().get(line).cloned()
+}
+
 fn global_delay_probe_limiter() -> &'static Semaphore {
     static LIMITER: std::sync::OnceLock<Semaphore> = std::sync::OnceLock::new();
     LIMITER.get_or_init(|| Semaphore::new(GLOBAL_DELAY_PROBE_CONCURRENCY))
@@ -616,6 +657,18 @@ fn parse_expected(spec: Option<&str>) -> Result<Vec<(u16, u16)>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_line_probe_is_kept_by_name_the_newest_wins() {
+        assert!(super::line_probe("probe-test-line").is_none());
+        super::note_line_probe("probe-test-line", 120);
+        let first = super::line_probe("probe-test-line").expect("noted");
+        assert_eq!(first.delay, 120);
+        super::note_line_probe("probe-test-line", 0);
+        let second = super::line_probe("probe-test-line").expect("noted");
+        assert_eq!(second.delay, 0, "no answer is kept too");
+        assert!(second.time >= first.time);
+    }
+
     use super::*;
 
     /// A loopback server sends 3 MB with headers; the probe reads only up

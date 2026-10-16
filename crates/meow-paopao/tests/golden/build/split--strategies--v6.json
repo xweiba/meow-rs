@@ -179,10 +179,7 @@
         "rule:<routekey>",
         "proxy:<routekey>",
         "direct:<routekey>",
-        "hk:<routekey>",
-        "jp:<routekey>",
-        "sg:<routekey>",
-        "us:<routekey>",
+        "other:<routekey>",
         "youtube:<routekey>",
         "google:<routekey>",
         "ai:<routekey>",
@@ -302,13 +299,7 @@
           "type": "select",
           "proxies": [
             "auto",
-            "DIRECT",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
@@ -317,11 +308,7 @@
           "proxies": [
             "auto~smart",
             "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "auto~fastest"
           ]
         },
         {
@@ -336,46 +323,31 @@
           "name": "policy:youtube",
           "type": "select",
           "proxies": [
-            "auto~fastest",
+            "policy:youtube@auto~fastest",
             "DIRECT",
             "REJECT",
             "proxy",
-            "auto",
-            "auto~balance",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
           "name": "policy:google",
           "type": "select",
           "proxies": [
-            "policy:google~auto",
+            "policy:google@auto~auto",
             "DIRECT",
             "REJECT",
-            "policy:google~balance",
-            "policy:google~fastest",
-            "proxy",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "policy:google@region:other~auto"
           ]
         },
         {
           "name": "policy:ai",
           "type": "select",
           "proxies": [
-            "region:US",
+            "policy:ai@auto~sticky",
             "DIRECT",
             "REJECT",
-            "policy:ai~auto",
-            "policy:ai~balance",
-            "policy:ai~fastest",
-            "proxy",
-            "region:JP",
-            "region:SG"
+            "policy:ai@region:other~auto"
           ]
         },
         {
@@ -386,12 +358,7 @@
             "DIRECT",
             "REJECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
@@ -402,12 +369,7 @@
             "DIRECT",
             "REJECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
@@ -418,28 +380,18 @@
             "DIRECT",
             "REJECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
           "name": "policy:games",
           "type": "select",
           "proxies": [
-            "proxy",
             "DIRECT",
             "REJECT",
+            "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
@@ -450,12 +402,7 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
@@ -466,12 +413,7 @@
             "DIRECT",
             "REJECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
@@ -482,12 +424,7 @@
             "DIRECT",
             "REJECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
@@ -498,12 +435,7 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
@@ -514,12 +446,7 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
@@ -530,12 +457,7 @@
             "DIRECT",
             "REJECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
@@ -546,12 +468,7 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
@@ -562,12 +479,7 @@
             "DIRECT",
             "REJECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ]
         },
         {
@@ -579,32 +491,56 @@
           ]
         },
         {
-          "name": "region:HK",
+          "name": "region:other",
           "type": "select",
           "proxies": [
-            "HK 01"
-          ]
-        },
-        {
-          "name": "region:JP",
-          "type": "select",
-          "proxies": [
-            "JP 01"
-          ]
-        },
-        {
-          "name": "region:SG",
-          "type": "select",
-          "proxies": [
+            "region:other~auto",
+            "region:other~balance",
+            "region:other~fastest",
+            "HK 01",
+            "JP 01",
+            "US 01",
             "🎥 奈飞 SG"
           ]
         },
         {
-          "name": "region:US",
-          "type": "select",
+          "name": "region:other~auto",
+          "type": "url-test",
           "proxies": [
-            "US 01"
-          ]
+            "HK 01",
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
+          ],
+          "url": "https://www.gstatic.com/generate_204",
+          "interval": 300,
+          "tolerance": 50
+        },
+        {
+          "name": "region:other~balance",
+          "type": "load-balance",
+          "proxies": [
+            "HK 01",
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
+          ],
+          "strategy": "consistent-hashing",
+          "url": "https://www.gstatic.com/generate_204",
+          "interval": 300
+        },
+        {
+          "name": "region:other~fastest",
+          "type": "url-test",
+          "proxies": [
+            "HK 01",
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
+          ],
+          "url": "https://www.gstatic.com/generate_204",
+          "interval": 300,
+          "tolerance": 50
         },
         {
           "name": "auto~smart",
@@ -612,8 +548,8 @@
           "proxies": [
             "HK 01",
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
           "url": "https://www.gstatic.com/generate_204",
           "interval": 300,
@@ -625,8 +561,8 @@
           "proxies": [
             "HK 01",
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
           "strategy": "consistent-hashing",
           "url": "https://www.gstatic.com/generate_204",
@@ -638,84 +574,72 @@
           "proxies": [
             "HK 01",
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
           "url": "https://www.gstatic.com/generate_204",
           "interval": 300,
           "tolerance": 50
         },
         {
-          "name": "policy:google~auto",
+          "name": "policy:google@auto~auto",
           "type": "url-test",
           "proxies": [
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
           "url": "https://www.gstatic.com/generate_204",
           "interval": 300,
           "tolerance": 50
         },
         {
-          "name": "policy:google~balance",
-          "type": "load-balance",
+          "name": "policy:google@region:other~auto",
+          "type": "url-test",
           "proxies": [
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
-          "strategy": "consistent-hashing",
+          "url": "https://www.gstatic.com/generate_204",
+          "interval": 300,
+          "tolerance": 50
+        },
+        {
+          "name": "policy:ai@region:other~auto",
+          "type": "url-test",
+          "proxies": [
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
+          ],
+          "url": "https://www.gstatic.com/generate_204",
+          "interval": 300,
+          "tolerance": 50
+        },
+        {
+          "name": "policy:youtube@auto~fastest",
+          "type": "url-test",
+          "proxies": [
+            "HK 01",
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
+          ],
+          "url": "https://www.gstatic.com/generate_204",
+          "interval": 300,
+          "tolerance": 50
+        },
+        {
+          "name": "policy:ai@auto~sticky",
+          "type": "fallback",
+          "proxies": [
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
+          ],
           "url": "https://www.gstatic.com/generate_204",
           "interval": 300
-        },
-        {
-          "name": "policy:google~fastest",
-          "type": "url-test",
-          "proxies": [
-            "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
-          ],
-          "url": "https://www.gstatic.com/generate_204",
-          "interval": 300,
-          "tolerance": 50
-        },
-        {
-          "name": "policy:ai~auto",
-          "type": "url-test",
-          "proxies": [
-            "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
-          ],
-          "url": "https://www.gstatic.com/generate_204",
-          "interval": 300,
-          "tolerance": 50
-        },
-        {
-          "name": "policy:ai~balance",
-          "type": "load-balance",
-          "proxies": [
-            "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
-          ],
-          "strategy": "consistent-hashing",
-          "url": "https://www.gstatic.com/generate_204",
-          "interval": 300
-        },
-        {
-          "name": "policy:ai~fastest",
-          "type": "url-test",
-          "proxies": [
-            "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
-          ],
-          "url": "https://www.gstatic.com/generate_204",
-          "interval": 300,
-          "tolerance": 50
         },
         {
           "name": "speedtest",
@@ -734,10 +658,7 @@
         "IN-USER,fastest,auto~fastest",
         "IN-USER,proxy,proxy",
         "IN-USER,direct,DIRECT",
-        "IN-USER,hk,region:HK",
-        "IN-USER,jp,region:JP",
-        "IN-USER,sg,region:SG",
-        "IN-USER,us,region:US",
+        "IN-USER,other,region:other",
         "IN-USER,youtube,policy:youtube",
         "IN-USER,google,policy:google",
         "IN-USER,ai,policy:ai",
@@ -837,6 +758,7 @@
         "GEOSITE,whatsapp,policy:social",
         "GEOSITE,line,policy:social",
         "GEOSITE,netflix,policy:netflix",
+        "GEOSITE,category-games@cn,policy:china",
         "GEOSITE,steam,policy:games",
         "GEOSITE,epicgames,policy:games",
         "GEOSITE,playstation,policy:games",
@@ -861,7 +783,7 @@
         "DOMAIN-SUFFIX,netflix.com,policy:netflix",
         "DOMAIN-SUFFIX,hbo.com,sub:Media",
         "DOMAIN-KEYWORD,google,proxy",
-        "DOMAIN,hk.example.com,region:HK",
+        "DOMAIN,hk.example.com,region:other",
         "IP-CIDR,8.8.8.8/32,proxy,no-resolve",
         "PROCESS-NAME,Telegram,sub:Media",
         "DOMAIN-SUFFIX,ads.example.com,REJECT",
@@ -967,14 +889,8 @@
           "label": "🚀 节点选择",
           "kind": "select",
           "members": [
-            "DIRECT",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ],
           "pick": "auto",
           "card": true
@@ -983,14 +899,11 @@
           "tag": "auto",
           "label": "♻️ 自动选择",
           "kind": "select",
-          "members": [
+          "members": [],
+          "modes": [
             "auto~smart",
             "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "auto~fastest"
           ],
           "pick": "auto~smart",
           "card": true
@@ -1015,15 +928,10 @@
             "DIRECT",
             "REJECT",
             "proxy",
-            "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "policy:youtube@auto~fastest",
+            "region:other"
           ],
-          "pick": "auto~fastest",
+          "pick": "policy:youtube@auto~fastest",
           "card": true,
           "badge": "内置"
         },
@@ -1034,15 +942,10 @@
           "members": [
             "DIRECT",
             "REJECT",
-            "policy:google~auto",
-            "policy:google~balance",
-            "policy:google~fastest",
-            "proxy",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "policy:google@auto~auto",
+            "policy:google@region:other~auto"
           ],
-          "pick": "policy:google~auto",
+          "pick": "policy:google@auto~auto",
           "card": true,
           "badge": "内置"
         },
@@ -1053,33 +956,23 @@
           "members": [
             "DIRECT",
             "REJECT",
-            "policy:ai~auto",
-            "policy:ai~balance",
-            "policy:ai~fastest",
-            "proxy",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "policy:ai@auto~sticky",
+            "policy:ai@region:other~auto"
           ],
-          "pick": "region:US",
+          "pick": "policy:ai@auto~sticky",
           "card": true,
           "badge": "内置"
         },
         {
           "tag": "policy:telegram",
-          "label": "📲 电报信息",
+          "label": "📲 Telegram",
           "kind": "select",
           "members": [
             "DIRECT",
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ],
           "pick": "proxy",
           "card": true,
@@ -1094,12 +987,7 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ],
           "pick": "proxy",
           "card": true,
@@ -1107,19 +995,14 @@
         },
         {
           "tag": "policy:netflix",
-          "label": "🎥 NETFLIX",
+          "label": "🎥 Netflix",
           "kind": "select",
           "members": [
             "DIRECT",
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ],
           "pick": "proxy",
           "card": true,
@@ -1134,14 +1017,9 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ],
-          "pick": "proxy",
+          "pick": "DIRECT",
           "card": true,
           "badge": "内置"
         },
@@ -1154,12 +1032,7 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ],
           "pick": "DIRECT",
           "card": true,
@@ -1174,12 +1047,7 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ],
           "pick": "proxy",
           "card": true,
@@ -1194,12 +1062,7 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ],
           "pick": "proxy",
           "card": true,
@@ -1214,12 +1077,7 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ],
           "pick": "DIRECT",
           "card": true,
@@ -1234,12 +1092,7 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ],
           "pick": "DIRECT",
           "card": true,
@@ -1254,12 +1107,7 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ],
           "pick": "proxy",
           "card": true
@@ -1273,12 +1121,7 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ],
           "pick": "DIRECT",
           "card": true
@@ -1292,12 +1135,7 @@
             "REJECT",
             "proxy",
             "auto",
-            "auto~balance",
-            "auto~fastest",
-            "region:HK",
-            "region:JP",
-            "region:SG",
-            "region:US"
+            "region:other"
           ],
           "pick": "proxy",
           "card": true
@@ -1315,44 +1153,61 @@
           "badge": "订阅"
         },
         {
-          "tag": "region:HK",
-          "label": "🇭🇰 香港",
+          "tag": "region:other",
+          "label": "🌐 其他地区",
           "kind": "select",
           "members": [
-            "HK 01"
-          ],
-          "pick": "HK 01",
-          "card": true
-        },
-        {
-          "tag": "region:JP",
-          "label": "🇯🇵 日本",
-          "kind": "select",
-          "members": [
-            "JP 01"
-          ],
-          "pick": "JP 01",
-          "card": true
-        },
-        {
-          "tag": "region:SG",
-          "label": "🇸🇬 新加坡",
-          "kind": "select",
-          "members": [
+            "HK 01",
+            "JP 01",
+            "US 01",
             "🎥 奈飞 SG"
           ],
-          "pick": "🎥 奈飞 SG",
+          "modes": [
+            "region:other~auto",
+            "region:other~balance",
+            "region:other~fastest"
+          ],
+          "pick": "region:other~auto",
           "card": true
         },
         {
-          "tag": "region:US",
-          "label": "🇺🇸 美国",
-          "kind": "select",
+          "tag": "region:other~auto",
+          "label": "🌐 其他地区 · 智能选择",
+          "short": "智能选择",
+          "kind": "smart",
           "members": [
-            "US 01"
+            "HK 01",
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
           ],
-          "pick": "US 01",
-          "card": true
+          "card": false
+        },
+        {
+          "tag": "region:other~balance",
+          "label": "🌐 其他地区 · 负载均衡",
+          "short": "负载均衡",
+          "kind": "balance",
+          "members": [
+            "HK 01",
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
+          ],
+          "card": false
+        },
+        {
+          "tag": "region:other~fastest",
+          "label": "🌐 其他地区 · 速度最快",
+          "short": "速度最快",
+          "kind": "fastest",
+          "members": [
+            "HK 01",
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
+          ],
+          "card": false
         },
         {
           "tag": "auto~smart",
@@ -1362,8 +1217,8 @@
           "members": [
             "HK 01",
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
           "card": false
         },
@@ -1375,8 +1230,8 @@
           "members": [
             "HK 01",
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
           "card": false
         },
@@ -1388,82 +1243,71 @@
           "members": [
             "HK 01",
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
           "card": false
         },
         {
-          "tag": "policy:google~auto",
-          "label": "💡 Google + Gemini · 自动选择",
-          "short": "自动选择",
+          "tag": "policy:google@auto~auto",
+          "label": "♻️ 自动选择 · 智能选择",
           "kind": "smart",
           "members": [
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
-          "card": false
+          "card": false,
+          "origin": "auto"
         },
         {
-          "tag": "policy:google~balance",
-          "label": "💡 Google + Gemini · 负载均衡",
-          "short": "负载均衡",
-          "kind": "balance",
-          "members": [
-            "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
-          ],
-          "card": false
-        },
-        {
-          "tag": "policy:google~fastest",
-          "label": "💡 Google + Gemini · 速度最快",
-          "short": "速度最快",
-          "kind": "fastest",
-          "members": [
-            "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
-          ],
-          "card": false
-        },
-        {
-          "tag": "policy:ai~auto",
-          "label": "🤖 AI 服务 · 自动选择",
-          "short": "自动选择",
+          "tag": "policy:google@region:other~auto",
+          "label": "🌐 其他地区 · 智能选择",
           "kind": "smart",
           "members": [
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
-          "card": false
+          "card": false,
+          "origin": "region:other"
         },
         {
-          "tag": "policy:ai~balance",
-          "label": "🤖 AI 服务 · 负载均衡",
-          "short": "负载均衡",
-          "kind": "balance",
+          "tag": "policy:ai@region:other~auto",
+          "label": "🌐 其他地区 · 智能选择",
+          "kind": "smart",
           "members": [
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
-          "card": false
+          "card": false,
+          "origin": "region:other"
         },
         {
-          "tag": "policy:ai~fastest",
-          "label": "🤖 AI 服务 · 速度最快",
-          "short": "速度最快",
+          "tag": "policy:youtube@auto~fastest",
+          "label": "♻️ 自动选择 · 速度最快",
           "kind": "fastest",
           "members": [
+            "HK 01",
             "JP 01",
-            "🎥 奈飞 SG",
-            "US 01"
+            "US 01",
+            "🎥 奈飞 SG"
           ],
-          "card": false
+          "card": false,
+          "origin": "auto"
+        },
+        {
+          "tag": "policy:ai@auto~sticky",
+          "label": "♻️ 自动选择 · 智能选择 · 固定节点",
+          "kind": "sticky",
+          "members": [
+            "JP 01",
+            "US 01",
+            "🎥 奈飞 SG"
+          ],
+          "card": false,
+          "origin": "auto"
         }
       ]
     },

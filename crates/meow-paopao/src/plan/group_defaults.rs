@@ -2,8 +2,7 @@
 //! which of its members it picks, whether it may have it, how it is named.
 //! The data type itself is [`GroupDefault`] in the settings model.
 
-use crate::model::settings::{GroupDefault, GroupDefaultKind};
-use crate::plan::group_tree::group_child;
+use crate::model::settings::{copy_origin, GroupDefault, GroupDefaultKind, MemberUse};
 use crate::plan::outbound_tags;
 use crate::plan::policies::Policy;
 use crate::pool::region_for_code;
@@ -53,14 +52,6 @@ impl GroupDefault {
             return None;
         }
         let has = |t: &str| members.iter().any(|m| m == t);
-        let own = |suffix: &str| format!("{}{suffix}", p.tag());
-        let either = |shared: &str, suffix: &str| {
-            if has(shared) {
-                Some(shared.to_owned())
-            } else {
-                Some(own(suffix)).filter(|t| has(t))
-            }
-        };
         let t = match self.kind {
             // A sticky policy's 固定出口 goes over it ([`ProxySettings::sticky_of`]).
             //
@@ -69,14 +60,34 @@ impl GroupDefault {
                 "region:{}",
                 self.region.as_deref().unwrap_or_default()
             )),
-            GroupDefaultKind::Fastest => either(outbound_tags::FASTEST, group_child::FASTEST),
-            GroupDefaultKind::Auto => either(outbound_tags::AUTO, group_child::AUTO),
-            GroupDefaultKind::Balance => either(outbound_tags::BALANCE, group_child::BALANCE),
+            // ♻️ 自动选择 (the group's own copy of it where it leaves
+            // regions out), used in that mode ([`Self::auto_use`]).
+            GroupDefaultKind::Fastest | GroupDefaultKind::Auto | GroupDefaultKind::Balance => {
+                let tag = p.tag();
+                members
+                    .iter()
+                    .find(|m| {
+                        *m == outbound_tags::AUTO
+                            || copy_origin(&tag, m) == Some(outbound_tags::AUTO)
+                    })
+                    .cloned()
+            }
             GroupDefaultKind::Select => Some(outbound_tags::PROXY.to_owned()),
             GroupDefaultKind::Direct => Some("DIRECT".to_owned()),
             GroupDefaultKind::Block => Some("REJECT".to_owned()),
         };
         t.filter(|t| has(t))
+    }
+
+    /// How a default of this kind uses ♻️ 自动选择: 速度最快 / 负载均衡 a
+    /// mode of its own; anything else (自动选择 itself, a region …) as
+    /// 自动选择 decides.
+    pub fn auto_use(kind: GroupDefaultKind) -> Option<MemberUse> {
+        match kind {
+            GroupDefaultKind::Fastest => Some(MemberUse::Fastest),
+            GroupDefaultKind::Balance => Some(MemberUse::Balance),
+            _ => None,
+        }
     }
 
     /// As the screen names it ("🇯🇵 日本", "速度最快"); 固定出口 is a switch

@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::dart::to_lower_case;
 use crate::model::settings::SshChain;
-use crate::plan::group_tree::GroupTree;
+use crate::plan::group_tree::{GroupTree, OTHER_REGION_LABEL, OTHER_REGION_TAG};
 use crate::plan::outbound_tags;
 use crate::plan::policies::POLICIES;
 use crate::pool::NodeGroup;
@@ -79,10 +79,18 @@ pub fn offered_route_policies(
         .collect()
 }
 
+/// 其他地区 (the lines of regions too small for a group of their own,
+/// and of none), after the regions.
+fn other_region() -> RoutePolicy {
+    RoutePolicy::new("other", OTHER_REGION_LABEL, OTHER_REGION_TAG, "region")
+}
+
 /// The policies on offer now (Dart: `routeCatalog`, as
 /// `ProxyController.routePolicies` calls it: no device exits). Regions and
 /// kinds come from the pool's `groups`, so the list follows the
-/// subscriptions; the automatic ones only when there are lines.
+/// subscriptions; the automatic ones only when there are lines. Regions
+/// with one line and 其他地区 may have no group in the tree:
+/// [`offered_route_policies`] leaves them out then.
 pub fn route_catalog(
     groups: &[NodeGroup],
     has_lines: bool,
@@ -116,7 +124,14 @@ pub fn route_catalog(
         outbound_tags::DIRECT,
         "direct",
     ));
-    for g in groups {
+    let regions = groups
+        .iter()
+        .filter(|g| g.tag.starts_with("region:"))
+        .count();
+    for (i, g) in groups.iter().enumerate() {
+        if i == regions {
+            out.push(other_region());
+        }
         // `tag.split(':').last.toLowerCase()`.
         let id = to_lower_case(g.tag.rsplit(':').next().unwrap_or_default());
         let kind = if g.tag.starts_with("region:") {
@@ -125,6 +140,9 @@ pub fn route_catalog(
             "kind"
         };
         out.push(RoutePolicy::new(&id, &g.label, &g.tag, kind));
+    }
+    if regions == groups.len() {
+        out.push(other_region());
     }
     for p in POLICIES.iter().filter(|p| !p.blockable && p.id != "final") {
         out.push(RoutePolicy::new(p.id, &p.label(), &p.tag(), "policy"));

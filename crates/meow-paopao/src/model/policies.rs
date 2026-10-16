@@ -5,6 +5,7 @@
 
 use crate::dart::find_ignore_ascii_case;
 use crate::model::outbound_tags;
+use crate::model::settings::GroupDefaultKind;
 
 /// One alternative of a policy's aliases: how a provider's group name
 /// (`🎥 Netflix`) is recognised as meaning one of ours (B20, B21).
@@ -103,8 +104,13 @@ pub struct Policy {
     pub base: bool,
     /// Region code it uses by default when there are lines there (AI: US).
     pub prefer_region: Option<&'static str>,
-    /// Its default pick when the group has it (YouTube: `auto~fastest`).
+    /// Its default pick when the group has it (YouTube: `auto`).
     pub prefer_pick: Option<&'static str>,
+    /// How it uses ♻️ 自动选择 by default (YouTube: 速度最快; only
+    /// [`GroupDefaultKind::Fastest`] / [`GroupDefaultKind::Balance`] mean
+    /// a mode of its own, anything else follows 自动选择's own). A 分组默认
+    /// of the user's replaces it.
+    pub auto_mode: Option<GroupDefaultKind>,
     /// QUIC (UDP 443) to its sites refused so they fall back to TCP.
     pub block_quic: bool,
     /// 固定出口 as its default: the whole service on one line.
@@ -113,6 +119,10 @@ pub struct Policy {
     pub domains: &'static [&'static str],
     /// Programs whose every connection goes here (`PROCESS-NAME`).
     pub processes: &'static [&'static str],
+    /// Rule sets matched just before its own and sent to 🇨🇳 国内网站
+    /// (直连 without that group): the domestic part of what its own rule
+    /// sets cover (游戏平台: `geosite-category-games@cn`).
+    pub domestic_first: &'static [&'static str],
 }
 
 impl Policy {
@@ -152,10 +162,12 @@ impl Policy {
             base: false,
             prefer_region: None,
             prefer_pick: None,
+            auto_mode: None,
             block_quic: false,
             sticky_exit: false,
             domains: &[],
             processes: &[],
+            domestic_first: &[],
         }
     }
 }
@@ -284,7 +296,8 @@ pub static POLICIES: [Policy; 16] = [
     // Before Google: geosite-google includes YouTube.
     Policy {
         rule_sets: &["geosite-youtube"],
-        prefer_pick: Some(outbound_tags::FASTEST),
+        prefer_pick: Some(outbound_tags::AUTO),
+        auto_mode: Some(GroupDefaultKind::Fastest),
         block_quic: true,
         aliases: Some("youtube|油管"),
         alias_terms: &[Word("youtube"), Text("油管")],
@@ -328,7 +341,7 @@ pub static POLICIES: [Policy; 16] = [
         ip_cidrs: &TELEGRAM_IPS,
         aliases: Some(r"telegram|电报|\btg\b"),
         alias_terms: &[Word("telegram"), Text("电报"), Word("tg")],
-        ..Policy::new("telegram", "电报信息", "📲", outbound_tags::PROXY)
+        ..Policy::new("telegram", "Telegram", "📲", outbound_tags::PROXY)
     },
     Policy {
         rule_sets: &[
@@ -356,7 +369,7 @@ pub static POLICIES: [Policy; 16] = [
         rule_sets: &["geosite-netflix"],
         aliases: Some("netflix|奈飞|网飞"),
         alias_terms: &[Word("netflix"), Text("奈飞"), Text("网飞")],
-        ..Policy::new("netflix", "NETFLIX", "🎥", outbound_tags::PROXY)
+        ..Policy::new("netflix", "Netflix", "🎥", outbound_tags::PROXY)
     },
     Policy {
         rule_sets: &[
@@ -377,7 +390,10 @@ pub static POLICIES: [Policy; 16] = [
             Word("nintendo"),
             Word("switch"),
         ],
-        ..Policy::new("games", "游戏平台", "🎮", outbound_tags::PROXY)
+        // Domestic game downloads (Steam's China CDN …) are matched first
+        // and go as 国内网站 does.
+        domestic_first: &["geosite-category-games@cn"],
+        ..Policy::new("games", "游戏平台", "🎮", outbound_tags::DIRECT)
     },
     Policy {
         rule_sets: &[

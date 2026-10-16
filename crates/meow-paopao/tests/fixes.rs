@@ -84,7 +84,8 @@ fn b1_one_tag_scheme() {
             }
         }
     }
-    let hk = out.tree.by_tag("region:HK").expect("HK group");
+    // One line in 香港 (and in 日本): both in 其他地区.
+    let hk = out.tree.by_tag("region:other").expect("其他地区");
     assert!(hk.members.contains(&"HK".to_owned()));
     // The subscription's rule survives.
     assert!(
@@ -206,7 +207,8 @@ fn b28_rules_are_the_configs() {
 
 /// B29: in global mode there is no 🤖 AI 服务 group; Dart still let
 /// `ai:<key>` authenticate (no IN-USER line: the normal rules decided).
-/// With one line there is no 速度最快 either.
+/// With one line there is no 速度最快 either, and its region (美国) is in
+/// 其他地区.
 #[test]
 fn b29_only_policies_the_config_has() {
     let mut v = input(
@@ -217,14 +219,14 @@ fn b29_only_policies_the_config_has() {
     v["runtime"]["route"] = json!({"key": "k"});
     let out = run(&v);
     let ids: Vec<&str> = out.route_policies.iter().map(|p| p.id.as_str()).collect();
-    assert_eq!(ids, ["auto", "rule", "proxy", "direct", "us"]);
+    assert_eq!(ids, ["auto", "rule", "proxy", "direct", "other"]);
     let auth: Vec<&str> = out.config["authentication"]
         .as_array()
         .expect("auth")
         .iter()
         .filter_map(|a| a.as_str())
         .collect();
-    assert_eq!(auth, ["auto:k", "rule:k", "proxy:k", "direct:k", "us:k"]);
+    assert_eq!(auth, ["auto:k", "rule:k", "proxy:k", "direct:k", "other:k"]);
     // Every policy but `rule` has its IN-USER line.
     let users: Vec<String> = config_rules(&out)
         .into_iter()
@@ -236,7 +238,7 @@ fn b29_only_policies_the_config_has() {
             "IN-USER,auto,auto",
             "IN-USER,proxy,proxy",
             "IN-USER,direct,DIRECT",
-            "IN-USER,us,region:US"
+            "IN-USER,other,region:other"
         ]
     );
 
@@ -284,27 +286,33 @@ fn b20_download_is_not_ads() {
     assert!(out.tree.by_tag("sub:Downloads").is_some());
 }
 
-/// B22: Google refuses HK. Lines: two in HK, one in US, one in JP with the
-/// JP one switched off: Google's own 自动选择 needs two lines on, so there
-/// is none; Dart still named it, and the pick fell to DIRECT. Now: the US
-/// region (the first allowed line on); with US off too, 节点选择.
+/// B22: Google refuses HK. Lines: two in HK, two in US, one in JP (in
+/// 其他地区), all but one US line switched off: Google's own 自动选择
+/// needs two lines on, so there is none; Dart still named it, and the pick
+/// fell to DIRECT. Now: the US region (the first allowed line on); with
+/// none on, still one of its regions — never 节点选择, which may go to HK.
 #[test]
 fn b22_no_auto_child_never_direct() {
     let nodes = json!([
         vless("HK 01", "a"),
         vless("HK 02", "b"),
         vless("US 01", "c"),
+        vless("US 02", "e"),
         vless("JP 01", "d")
     ]);
     let pick = |off: &[&str]| {
         let v = input(&nodes, &json!({}), &json!({"disabled_lines": off}));
         let out = run(&v);
         let g = out.tree.by_tag("policy:google").expect("google").clone();
-        assert!(!g.members.contains(&"policy:google~auto".to_owned()));
+        assert!(!g
+            .members
+            .iter()
+            .any(|m| m.starts_with("policy:google@auto")));
+        assert!(!g.members.contains(&"proxy".to_owned()));
         g.pick.expect("pick")
     };
-    assert_eq!(pick(&["JP 01"]), "region:US");
-    assert_eq!(pick(&["JP 01", "US 01"]), "proxy");
+    assert_eq!(pick(&["JP 01", "US 02"]), "region:US");
+    assert_eq!(pick(&["JP 01", "US 01", "US 02"]), "region:US");
     // Two lines on: its own 自动选择, as before.
     let v = input(&nodes, &json!({}), &json!({}));
     let g = run(&v)
@@ -312,7 +320,7 @@ fn b22_no_auto_child_never_direct() {
         .by_tag("policy:google")
         .cloned()
         .expect("google");
-    assert_eq!(g.pick.as_deref(), Some("policy:google~auto"));
+    assert_eq!(g.pick.as_deref(), Some("policy:google@auto~auto"));
 }
 
 /// B5 / D6: `explain` walks the config's real rules. Dart's `_roughMatch`

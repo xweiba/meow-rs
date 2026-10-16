@@ -463,29 +463,35 @@ impl Shared {
                     return;
                 };
                 let start = Instant::now();
-                // Where the line exits (and how fast it answers), in one go.
-                match tokio::time::timeout(PROBE_TIMEOUT, probe_exit(p.as_ref())).await {
+                // Where the line exits (and how fast it answers), and its
+                // delay measured as every delay test measures it (shown on
+                // the line), side by side.
+                let exit = async {
+                    let r = tokio::time::timeout(PROBE_TIMEOUT, probe_exit(p.as_ref())).await;
+                    (r, start.elapsed())
+                };
+                let delay = crate::health::url_test(p.as_ref(), &me.test_url, None, PROBE_TIMEOUT);
+                let ((exit, took), delay) = tokio::join!(exit, delay);
+                crate::health::note_line_probe(&line, *delay.as_ref().unwrap_or(&0));
+                match exit {
                     Ok(Ok(exit)) => {
                         me.store.set_exit(&line, exit);
                         me.store.report(
                             "",
                             &line,
                             &Outcome {
-                                first_ms: start.elapsed().as_secs_f64() * 1000.0,
+                                first_ms: took.as_secs_f64() * 1000.0,
                                 ..Outcome::default()
                             },
                         );
                     }
                     _ => {
-                        let r =
-                            crate::health::url_test(p.as_ref(), &me.test_url, None, PROBE_TIMEOUT)
-                                .await;
                         me.store.report(
                             "",
                             &line,
                             &Outcome {
-                                failed: r.is_err(),
-                                first_ms: r.map_or(0.0, f64::from),
+                                failed: delay.is_err(),
+                                first_ms: delay.map_or(0.0, f64::from),
                                 ..Outcome::default()
                             },
                         );

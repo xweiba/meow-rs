@@ -23,7 +23,8 @@ fn head(name: &str, kind: &str, members: Vec<String>) -> Map<String, Value> {
 /// One group of the tree as meow writes it (Dart: `clashGroup`):
 ///
 /// - 完全按订阅 (a raw type, not a selector): the provider's type as is;
-/// - a selector: its pick first (the core starts on the first member);
+/// - a selector: its pick first (the core starts on the first member),
+///   then its modes and members;
 /// - 智能选择: [`clash_auto_group`];
 /// - 负载均衡 / 速度最快 / 固定出口: meow's `smart` in its
 ///   `consistent-hashing` / `throughput` / `sticky` mode with the
@@ -54,12 +55,7 @@ pub fn clash_group(g: &GroupSpec, strategy: AutoStrategy) -> Map<String, Value> 
     match g.kind {
         GroupKind::Select => {
             let mut proxies: Vec<String> = g.pick.iter().cloned().collect();
-            proxies.extend(
-                g.members
-                    .iter()
-                    .filter(|m| Some(*m) != g.pick.as_ref())
-                    .cloned(),
-            );
+            proxies.extend(g.choices().filter(|m| Some(*m) != g.pick.as_ref()).cloned());
             head(&g.tag, "select", proxies)
         }
         GroupKind::Smart => clash_auto_group(&g.tag, &g.members, strategy),

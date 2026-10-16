@@ -118,23 +118,29 @@ fn the_users_two_examples() {
     assert_eq!(
         tree(&out, "policy:ai@region:US"),
         json!({"tag": "policy:ai@region:US", "label": "🇺🇸 美国 · 美国 1", "kind": "select",
-            "members": ["region:US~auto", "region:US~balance", "region:US~fastest",
-                "美国 1", "美国 2", "美国 3"],
+            "members": ["美国 1", "美国 2", "美国 3"],
+            "modes": ["region:US~auto", "region:US~balance", "region:US~fastest"],
             "pick": "美国 1", "card": false, "origin": US})
     );
     assert_eq!(
         tree(&out, "policy:youtube@region:US~fastest")["label"],
         "🇺🇸 美国 · 速度最快"
     );
-    assert_eq!(out.tree.plain_members("policy:ai"), {
-        let mut m = out.tree.by_tag("policy:ai").unwrap().members.clone();
-        for x in &mut m {
-            if x == "policy:ai@region:US" {
-                *x = US.into();
-            }
-        }
-        m
-    });
+    // AI's own 自动选择 (without 香港, in 其他地区 here) shows as 自动选择.
+    assert_eq!(
+        out.tree.by_tag("policy:ai").unwrap().members,
+        [
+            "DIRECT",
+            "REJECT",
+            "policy:ai@auto~auto",
+            "region:JP",
+            "policy:ai@region:US"
+        ]
+    );
+    assert_eq!(
+        out.tree.plain_members("policy:ai"),
+        ["DIRECT", "REJECT", "auto", "region:JP", US]
+    );
 }
 
 #[test]
@@ -176,7 +182,7 @@ fn sticky_goes_with_the_mode_the_group_uses() {
     );
     assert_eq!(
         tree(&out, "policy:ai@region:US~sticky")["label"],
-        "🇺🇸 美国 · 速度最快 · 固定出口"
+        "🇺🇸 美国 · 速度最快 · 固定节点"
     );
     // One line chosen: nothing for 固定出口 to choose.
     let out = run(&json!({"group_use": {"policy:ai": {"sticky": true,
@@ -189,27 +195,28 @@ fn sticky_goes_with_the_mode_the_group_uses() {
     // 美国's own default is one line: AI follows it, no 固定出口 either.
     let out = run(&json!({"group_pick": {US: "美国 3"}}));
     assert_eq!(group(&out, "policy:ai")["proxies"][0], US);
-    // YouTube on its built-in 速度最快 of every line, switched on.
+    // YouTube on 自动选择, its built-in 速度最快 there, switched on.
     let out = run(&json!({"group_use": {"policy:youtube": {"sticky": true}}}));
-    let t = "policy:youtube@auto~fastest~sticky";
+    let t = "policy:youtube@auto~sticky";
     assert_eq!(group(&out, "policy:youtube")["proxies"][0], t);
     assert_eq!(group(&out, t)["proxies"].as_array().unwrap().len(), 6);
-    assert_eq!(tree(&out, t)["short"], "速度最快 · 固定出口");
-    assert_eq!(tree(&out, t)["origin"], "auto~fastest");
+    assert_eq!(tree(&out, t)["label"], "♻️ 自动选择 · 速度最快 · 固定节点");
+    assert_eq!(tree(&out, t)["origin"], "auto");
+    assert!(!has_group(&out, "policy:youtube@auto~fastest"));
 }
 
 #[test]
 fn what_the_group_does_not_offer_is_its_default() {
     let out = run(&json!({
-        "policies": {"policy:netflix": "region:HK"},
+        "policies": {"policy:netflix": "region:other"},
         "group_use": {"policy:netflix": {"members": {
-            // One line: no modes.
-            "region:HK": {"use": "balance"},
+            // One line (香港's, in 其他地区): no modes.
+            "region:other": {"use": "balance"},
             // Not one of 日本's lines.
             "region:JP": {"use": "line", "line": "美国 1"},
         }}},
     }));
-    assert_eq!(group(&out, "policy:netflix")["proxies"][0], "region:HK");
+    assert_eq!(group(&out, "policy:netflix")["proxies"][0], "region:other");
     assert!(!out
         .tree
         .groups
@@ -222,7 +229,24 @@ fn without_any_use_the_config_is_as_before() {
     let plain = run(&json!({"group_use": {"policy:ai": {"sticky": false}}}));
     let same = run(&json!({"policies": {"policy:ai": US}}));
     assert_eq!(plain.config, same.config);
-    assert!(!plain.tree.groups.iter().any(|g| g.origin.is_some()));
+    // Only the built-in copies: YouTube's 自动选择 on 速度最快, AI's and
+    // Google's own 自动选择 without 香港.
+    let mut copies: Vec<&str> = plain
+        .tree
+        .groups
+        .iter()
+        .filter(|g| g.origin.is_some())
+        .map(|g| g.tag.as_str())
+        .collect();
+    copies.sort_unstable();
+    assert_eq!(
+        copies,
+        [
+            "policy:ai@auto~auto",
+            "policy:google@auto~auto",
+            "policy:youtube@auto~fastest"
+        ]
+    );
 }
 
 #[test]
@@ -269,7 +293,7 @@ fn sticky_follows_the_selectors_down_to_the_automatic_group_in_use() {
     assert_eq!(tree(&out, t)["origin"], "proxy");
     assert_eq!(
         tree(&out, t)["label"],
-        "🚀 节点选择 · ♻️ 自动选择 · 智能选择 · 固定出口"
+        "🚀 节点选择 · ♻️ 自动选择 · 智能选择 · 固定节点"
     );
     // 节点选择 and every other policy as they were.
     assert_eq!(
@@ -296,20 +320,13 @@ fn sticky_follows_the_selectors_down_to_the_automatic_group_in_use() {
     assert_eq!(group(&out, t)["strategy"], "sticky");
     assert_eq!(
         tree(&out, t)["label"],
-        "🚀 节点选择 · 🇺🇸 美国 · 速度最快 · 固定出口"
+        "🚀 节点选择 · 🇺🇸 美国 · 速度最快 · 固定节点"
     );
 }
 
 #[test]
 fn sticky_has_nothing_to_keep_on_one_line_or_direct() {
-    for (settings, why) in [
-        (json!({"selected": "美国 2"}), "节点选择 on one line"),
-        (json!({"selected": "DIRECT"}), "节点选择 直连"),
-        (
-            json!({"group_pick": {"auto": "region:HK"}}),
-            "自动选择 on 香港's one line",
-        ),
-    ] {
+    for (settings, why) in [(json!({"selected": "美国 2"}), "节点选择 on one line")] {
         let mut s = settings;
         s["policies"] = json!({"policy:youtube": "proxy"});
         s["group_use"] = json!({"policy:youtube": {"sticky": true}});
@@ -319,13 +336,7 @@ fn sticky_has_nothing_to_keep_on_one_line_or_direct() {
             "proxy",
             "{why}"
         );
-        assert!(
-            !out.tree
-                .groups
-                .iter()
-                .any(|g| g.tag.starts_with("policy:youtube@")),
-            "{why}"
-        );
+        assert!(!has_group(&out, "policy:youtube@proxy~sticky"), "{why}");
     }
 }
 
@@ -351,63 +362,26 @@ fn the_users_own_group_follows_the_selectors_too() {
 const HK: &str = "region:HK";
 
 #[test]
-fn auto_uses_hong_kong_on_one_line_or_its_fastest() {
-    // 自动选择 on 香港, used there on line 2 only.
+fn auto_offers_its_modes_only_never_a_region_or_a_line() {
+    // A region picked and used on one line, saved by hand: neither is read.
     let out = run_hk2(&json!({
         "group_pick": {"auto": HK},
         "group_use": {"auto": {"members": {HK: {"use": "line", "line": "香港 2"}}}},
     }));
-    let copy = "auto@region:HK";
-    let auto = group(&out, "auto");
-    assert_eq!(auto["proxies"][0], copy, "the pick first");
-    assert!(!auto["proxies"].as_array().unwrap().contains(&json!(HK)));
     assert_eq!(
-        group(&out, copy),
-        json!({"name": copy, "type": "select", "proxies": [
-            "香港 2", "region:HK~auto", "region:HK~balance", "region:HK~fastest", "香港 1"]})
+        group(&out, "auto")["proxies"],
+        json!(["auto~smart", "auto~balance", "auto~fastest"])
     );
-    assert_eq!(
-        tree(&out, copy),
-        json!({"tag": copy, "label": "🇭🇰 香港 · 香港 2", "kind": "select",
-            "members": ["region:HK~auto", "region:HK~balance", "region:HK~fastest",
-                "香港 1", "香港 2"],
-            "pick": "香港 2", "card": false, "origin": HK})
-    );
+    assert!(!out.tree.groups.iter().any(|g| g.tag.starts_with("auto@")));
+    // Its mode is its one choice.
+    let out = run_hk2(&json!({"group_pick": {"auto": "auto~fastest"}}));
+    assert_eq!(group(&out, "auto")["proxies"][0], "auto~fastest");
     // 香港 itself, 节点选择 and the policies keep 香港 as it decides.
     assert_eq!(group(&out, HK)["proxies"][0], "region:HK~auto");
     assert!(group(&out, "proxy")["proxies"]
         .as_array()
         .unwrap()
         .contains(&json!(HK)));
-    assert!(group(&out, "policy:netflix")["proxies"]
-        .as_array()
-        .unwrap()
-        .contains(&json!(HK)));
-    assert_eq!(out.tree.plain_members("auto"), {
-        let mut m = out.tree.by_tag("auto").unwrap().members.clone();
-        for x in &mut m {
-            if x == copy {
-                *x = HK.into();
-            }
-        }
-        m
-    });
-
-    // 速度最快 there instead, 自动选择 still on its own 智能选择.
-    let out = run_hk2(&json!({
-        "group_use": {"auto": {"members": {HK: {"use": "fastest"}}}},
-    }));
-    let copy = "auto@region:HK~fastest";
-    assert_eq!(group(&out, "auto")["proxies"][0], "auto~smart");
-    assert!(group(&out, "auto")["proxies"]
-        .as_array()
-        .unwrap()
-        .contains(&json!(copy)));
-    assert_eq!(group(&out, copy)["type"], "smart");
-    assert_eq!(group(&out, copy)["strategy"], "throughput");
-    assert_eq!(group(&out, copy)["proxies"], json!(["香港 1", "香港 2"]));
-    assert_eq!(tree(&out, copy)["label"], "🇭🇰 香港 · 速度最快");
-    assert_eq!(tree(&out, copy)["origin"], HK);
 }
 
 #[test]
@@ -449,14 +423,13 @@ fn proxy_uses_its_members_its_own_way_too() {
 
 #[test]
 fn nested_uses_each_see_what_the_member_really_uses() {
-    // 节点选择 on 自动选择, which is on 香港 used on line 2; YouTube on
-    // 节点选择 with 固定出口; Netflix on 自动选择's 速度最快 of its own.
+    // 节点选择 on 自动选择 (速度最快), 香港 used its own way there; YouTube
+    // on 节点选择 with 固定出口; Netflix on 自动选择's 速度最快 of its own.
     let settings = json!({
         "selected": "auto",
-        "group_pick": {"auto": HK},
+        "group_pick": {"auto": "auto~smart"},
         "policies": {"policy:youtube": "proxy", "policy:netflix": "auto"},
         "group_use": {
-            "auto": {"members": {HK: {"use": "line", "line": "香港 2"}}},
             "proxy": {"members": {HK: {"use": "fastest"}}},
             "policy:youtube": {"sticky": true},
             "policy:netflix": {"members": {"auto": {"use": "fastest"}}},
@@ -464,16 +437,17 @@ fn nested_uses_each_see_what_the_member_really_uses() {
     });
     let out = run_hk2(&settings);
     // Each user its own copy, none of another's.
-    assert_eq!(group(&out, "auto")["proxies"][0], "auto@region:HK");
+    assert_eq!(group(&out, "auto")["proxies"][0], "auto~smart");
     assert!(group(&out, "proxy")["proxies"]
         .as_array()
         .unwrap()
         .contains(&json!("proxy@region:HK~fastest")));
     assert_eq!(group(&out, "proxy")["proxies"][0], "auto");
-    // YouTube follows 节点选择 → 自动选择 → its 香港 copy, one line: no
-    // 固定出口 to keep.
-    assert_eq!(group(&out, "policy:youtube")["proxies"][0], "proxy");
-    assert!(!has_group(&out, "policy:youtube@proxy~sticky"));
+    // YouTube follows 节点选择 → 自动选择 → 智能选择: 固定出口 over every line.
+    let t = "policy:youtube@proxy~sticky";
+    assert_eq!(group(&out, "policy:youtube")["proxies"][0], t);
+    assert_eq!(group(&out, t)["strategy"], "sticky");
+    assert_eq!(group(&out, t)["proxies"].as_array().unwrap().len(), 7);
     // Netflix: 自动选择's 速度最快, over every line.
     assert_eq!(
         group(&out, "policy:netflix")["proxies"][0],
@@ -486,22 +460,9 @@ fn nested_uses_each_see_what_the_member_really_uses() {
             .len(),
         7
     );
-    // 自动选择 on 香港's 速度最快 instead: YouTube's 固定出口 now goes over
-    // 香港's lines, named by the way down.
-    let mut s = settings;
-    s["group_use"]["auto"] = json!({"members": {HK: {"use": "fastest"}}});
-    let out = run_hk2(&s);
-    let t = "policy:youtube@proxy~sticky";
-    assert_eq!(group(&out, "policy:youtube")["proxies"][0], t);
-    assert_eq!(group(&out, t)["proxies"], json!(["香港 1", "香港 2"]));
-    assert_eq!(group(&out, t)["strategy"], "sticky");
-    assert_eq!(
-        tree(&out, t)["label"],
-        "🚀 节点选择 · ♻️ 自动选择 · 🇭🇰 香港 · 速度最快 · 固定出口"
-    );
     // The same settings, the same config; every copy a known group, and
     // no loop cut.
-    assert_eq!(run_hk2(&s).config, out.config);
+    assert_eq!(run_hk2(&settings).config, out.config);
     assert!(out.tree.loops.is_empty());
     for g in out.tree.groups.iter().filter(|g| g.origin.is_some()) {
         for m in &g.members {
