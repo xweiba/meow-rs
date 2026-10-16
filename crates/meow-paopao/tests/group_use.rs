@@ -326,18 +326,13 @@ fn sticky_follows_the_selectors_down_to_the_automatic_group_in_use() {
 
 #[test]
 fn sticky_has_nothing_to_keep_on_one_line_or_direct() {
-    for (settings, why) in [(json!({"selected": "美国 2"}), "节点选择 on one line")] {
-        let mut s = settings;
-        s["policies"] = json!({"policy:youtube": "proxy"});
-        s["group_use"] = json!({"policy:youtube": {"sticky": true}});
-        let out = run(&s);
-        assert_eq!(
-            group(&out, "policy:youtube")["proxies"][0],
-            "proxy",
-            "{why}"
-        );
-        assert!(!has_group(&out, "policy:youtube@proxy~sticky"), "{why}");
-    }
+    // 节点选择 on one line.
+    let mut s = json!({"selected": "美国 2"});
+    s["policies"] = json!({"policy:youtube": "proxy"});
+    s["group_use"] = json!({"policy:youtube": {"sticky": true}});
+    let out = run(&s);
+    assert_eq!(group(&out, "policy:youtube")["proxies"][0], "proxy");
+    assert!(!has_group(&out, "policy:youtube@proxy~sticky"));
 }
 
 #[test]

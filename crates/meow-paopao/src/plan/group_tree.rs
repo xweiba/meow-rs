@@ -999,7 +999,11 @@ fn with_group_use(s: &ProxySettings, mut groups: Vec<GroupSpec>) -> Vec<GroupSpe
     }
     groups.extend(copies);
     // A copy another one replaced is used by nobody.
-    let used: HashSet<String> = groups.iter().flat_map(GroupSpec::choices).cloned().collect();
+    let used: HashSet<String> = groups
+        .iter()
+        .flat_map(GroupSpec::choices)
+        .cloned()
+        .collect();
     groups.retain(|g| g.origin.is_none() || used.contains(&g.tag));
     groups
 }
