@@ -26,16 +26,17 @@
 //!   `meow_paopao::ingest::module`); once all of it arrived the scripts
 //!   are written beside the core (`<home>/modules/<id>/<i>.js`, `home` the
 //!   store's parent) and its record to the store. Answers `{id, error}`.
-//! - `apply`: `{dir, ids, modules?, set?, config?, now, build?, keep?}` →
-//!   the records of `ids` (subscriptions) and `modules` merged into the
-//!   stored input, the top-level keys of `set` (measured exits, the
+//! - `apply`: `{dir, ids, modules?, set?, config?, now, build?, keep?,
+//!   picks?}` → the records of `ids` (subscriptions) and `modules` merged
+//!   into the stored input, the top-level keys of `set` (measured exits, the
 //!   network …) put in as they are, the input written back when that
 //!   changed it; when what the config is built from changed (or `build`),
 //!   the config built at `now`, its keys in `keep` (the running core's API
 //!   and port) set as `keep` has them, and, when it differs from the one
 //!   in `config`, written to the store's `config.next.yaml`; the build's
 //!   route policies go to `policies.json`. Answers `{input_changed,
-//!   rebuilt, next}`.
+//!   rebuilt, next}`. `picks` (`[{group, member}]`, made in the running
+//!   core) go into the input's settings and build nothing.
 //!
 //! The exit code says what the answer is ([`meow_api::paopao::EXIT_OK`],
 //! `EXIT_INVALID`, `EXIT_UPSTREAM`); an error answer is `{"error": ...}`.
@@ -69,7 +70,7 @@ pub enum Op {
     Refresh,
     /// `{dir, id, url, values?, proxy?}` on stdin → the module refreshed into the store
     Module,
-    /// `{dir, ids, modules?, set?, config?, now, build?, keep?}` on stdin → refreshes merged, the config rebuilt
+    /// `{dir, ids, modules?, set?, config?, now, build?, keep?, picks?}` on stdin → refreshes merged, the config rebuilt
     Apply,
 }
 
@@ -278,6 +279,17 @@ struct ApplyRequest {
     /// Top-level keys the config keeps as the running core has them.
     #[serde(default)]
     keep: serde_json::Map<String, Value>,
+    /// Picks made in the running core (`{group, member}`), into the
+    /// input's settings ([`meow_paopao::model::settings::record_pick`]):
+    /// the core runs them already, nothing is built for them.
+    #[serde(default)]
+    picks: Vec<Pick>,
+}
+
+#[derive(serde::Deserialize)]
+struct Pick {
+    group: String,
+    member: String,
 }
 
 fn apply(input: &str) -> (Value, i32) {
@@ -310,6 +322,11 @@ fn apply(input: &str) -> (Value, i32) {
     for id in &req.modules {
         if merge_module(&mut input, &store, id) {
             (changed, lines) = (true, true);
+        }
+    }
+    if let Some(settings) = input.get_mut("settings").and_then(Value::as_object_mut) {
+        for p in &req.picks {
+            changed |= meow_paopao::model::settings::record_pick(settings, &p.group, &p.member);
         }
     }
     if let Some(m) = input.as_object_mut() {

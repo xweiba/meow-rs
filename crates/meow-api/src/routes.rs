@@ -245,6 +245,15 @@ pub fn create_router_with(
     web: Option<Arc<crate::checkin::WebRoute>>,
     paopao: Option<Arc<crate::paopao::Service>>,
 ) -> Router {
+    let paopao = paopao.unwrap_or_else(|| {
+        Arc::new(crate::paopao::Service::new(
+            None,
+            Arc::clone(&state.raw_config),
+            meow_common::resolved_home_dir().join("paopao"),
+            state.config_path.as_ref().map(std::path::PathBuf::from),
+            paopao_reload(Arc::clone(&state)),
+        ))
+    });
     // WS routes — accept header or ?token= query param for browser dashboard compat.
     // REST API routes gated behind the Bearer middleware (header-only).
     let api = Router::new()
@@ -256,7 +265,12 @@ pub fn create_router_with(
         .route("/proxies", get(get_proxies))
         .route(
             "/proxies/{name}",
-            get(get_proxy).put(update_proxy).delete(unfix_proxy),
+            get(get_proxy)
+                .put({
+                    let paopao = Arc::clone(&paopao);
+                    move |state, group, body| update_proxy(state, group, body, paopao)
+                })
+                .delete(unfix_proxy),
         )
         .route("/proxies/{name}/delay", get(get_proxy_delay))
         .route("/group", get(get_groups))
@@ -352,15 +366,6 @@ pub fn create_router_with(
         )),
         None => api,
     };
-    let paopao = paopao.unwrap_or_else(|| {
-        Arc::new(crate::paopao::Service::new(
-            None,
-            Arc::clone(&state.raw_config),
-            meow_common::resolved_home_dir().join("paopao"),
-            state.config_path.as_ref().map(std::path::PathBuf::from),
-            paopao_reload(Arc::clone(&state)),
-        ))
-    });
     let api = api.merge(crate::paopao::router(paopao));
     let api = api.route_layer(middleware::from_fn_with_state(
         Arc::clone(&state),
@@ -657,10 +662,14 @@ struct UpdateProxyRequest {
     name: String,
 }
 
+/// The pick is also kept in PaoPao's stored input, when there is one
+/// ([`crate::paopao::Service::record_pick`]): a config the core builds
+/// later must not undo it.
 async fn update_proxy(
     State(state): State<Arc<AppState>>,
     Path(group_name): Path<String>,
     Json(body): Json<UpdateProxyRequest>,
+    paopao: Arc<crate::paopao::Service>,
 ) -> Response {
     let route = state.tunnel.route_snapshot();
     let Some(proxy) = route.proxies.get(group_name.as_str()).cloned() else {
@@ -672,6 +681,7 @@ async fn update_proxy(
     match selection.set(&body.name).await {
         Ok(()) => {
             info!("Proxy group '{}' switched to '{}'", group_name, body.name);
+            paopao.record_pick(&group_name, &body.name);
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => (

@@ -531,6 +531,36 @@ impl Service {
         Ok(report)
     }
 
+    /// A pick made in the running core (`PUT /proxies/{group}`) kept in the
+    /// stored input's settings, so the configs built from it later keep it
+    /// (`meow_paopao::model::settings::record_pick`). Off the request path:
+    /// an `apply` child reads, changes and writes `input.json` (the core
+    /// holds none of it), after any write under way. Nothing without an
+    /// input or without children.
+    pub fn record_pick(self: &Arc<Self>, group: &str, member: &str) {
+        let Some(runner) = self.runner.clone() else {
+            return;
+        };
+        if !self.store.input().exists() {
+            return;
+        }
+        let svc = Arc::clone(self);
+        let req = json!({
+            "dir": self.store.dir(),
+            "picks": [{ "group": group, "member": member }],
+            "now": now_ms(),
+        });
+        tokio::spawn(async move {
+            let _input = svc.input.lock().await;
+            if !svc.store.input().exists() {
+                return;
+            }
+            if let Err(why) = small(&runner, "apply", req, APPLY_TIMEOUT).await {
+                tracing::warn!("paopao: the pick is not kept: {why}");
+            }
+        });
+    }
+
     /// One subscription refreshed by a child, which writes its record; the
     /// subscription's problem (None: it worked), or why no record was
     /// written.

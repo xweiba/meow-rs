@@ -245,7 +245,7 @@ async fn api_call(
     let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     let auth = secret.map_or(String::new(), |s| format!("Authorization: Bearer {s}\r\n"));
     let req = format!(
-        "{method} {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{auth}Content-Length: {}\r\n\r\n{body}",
+        "{method} {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
     s.write_all(req.as_bytes()).await.unwrap();
@@ -591,6 +591,110 @@ async fn the_core_refreshes_rebuilds_and_reloads_itself() {
         v["subscriptions"][0]["refreshed"]["last_error"],
         Value::Null
     );
+}
+
+/// The selector `group`'s member in use and its members.
+async fn group_of(api_port: u16, group: &str) -> (String, Vec<String>) {
+    let (status, body) = api_call(
+        api_port,
+        "GET",
+        &format!("/proxies/{group}"),
+        Some("s3cret"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    let all = v["all"].as_array().unwrap();
+    (
+        v["now"].as_str().unwrap().to_owned(),
+        all.iter().map(|m| m.as_str().unwrap().to_owned()).collect(),
+    )
+}
+
+/// The stored input's settings once `ok` holds for them (the pick is kept
+/// off the request path).
+async fn kept_settings(home: &std::path::Path, ok: impl Fn(&Value) -> bool) -> Value {
+    let mut last = Value::Null;
+    for _ in 0..200 {
+        if let Ok(b) = std::fs::read(home.join("paopao/input.json")) {
+            last = serde_json::from_slice::<Value>(&b).unwrap()["settings"].clone();
+            if ok(&last) {
+                return last;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("not kept: {last}");
+}
+
+#[tokio::test]
+async fn a_pick_in_the_running_core_is_kept_for_its_next_build() {
+    let base = subscription_server().await;
+    let (api_port, mixed_port) = (free_port(), free_port());
+    let home = tempfile::tempdir().unwrap();
+    let _core = start_core(api_port, mixed_port, home.path()).await;
+    let call = |method: &'static str, path: String, body: String| async move {
+        let (status, body) = api_call(api_port, method, &path, Some("s3cret"), &body).await;
+        (
+            status,
+            serde_json::from_str::<Value>(&body).unwrap_or(Value::Null),
+        )
+    };
+    let pick = |group: &'static str, member: String| {
+        call(
+            "PUT",
+            format!("/proxies/{group}"),
+            json!({ "name": member }).to_string(),
+        )
+    };
+
+    // No input kept: a pick is the running selector's alone, nothing written.
+    assert_eq!(pick("d1", "d1".into()).await.0, 400);
+    let (_, members) = group_of(api_port, "GLOBAL").await;
+    assert_eq!(pick("GLOBAL", members[0].clone()).await.0, 204);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!home.path().join("paopao/input.json").exists());
+
+    let input = handed_over(&format!("{base}/sub"), api_port, mixed_port);
+    assert_eq!(
+        call("PUT", "/paopao/input".into(), input.to_string())
+            .await
+            .0,
+        200
+    );
+    let (status, v) = call(
+        "POST",
+        "/paopao/subscriptions/refresh?id=a1".into(),
+        String::new(),
+    )
+    .await;
+    assert_eq!((status, v["reloaded"].clone()), (200, json!(true)), "{v}");
+
+    // 🚀 节点选择 picked in the core (as PaoPao Menu / paopao-tray pick).
+    let (now, members) = group_of(api_port, "proxy").await;
+    let other = members.iter().find(|m| **m != now).unwrap().clone();
+    assert_eq!(pick("proxy", other.clone()).await.0, 204);
+    let settings = kept_settings(home.path(), |s| s["selected"] == other.as_str()).await;
+    // The rest of the settings as handed over.
+    assert_eq!(settings["mode"], "global");
+    assert_eq!(settings["mixed_port"], mixed_port);
+
+    // A rebuild from the kept input (the tray's 模式: the kept input, its
+    // mode changed, applied): the pick stays.
+    let (_, mut kept) = call("GET", "/paopao/input".into(), String::new()).await;
+    kept["settings"]["mode"] = "direct".into();
+    let (status, v) = call("PUT", "/paopao/input?apply=true".into(), kept.to_string()).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["apply"]["error"], Value::Null, "{v}");
+    kept["settings"]["mode"] = "global".into();
+    let (status, v) = call("PUT", "/paopao/input?apply=true".into(), kept.to_string()).await;
+    assert_eq!(
+        (status, v["apply"]["reloaded"].clone()),
+        (200, json!(true)),
+        "{v}"
+    );
+    assert_eq!(group_of(api_port, "proxy").await.0, other);
 }
 
 #[tokio::test]

@@ -939,6 +939,59 @@ fn string_map(m: &IndexMap<String, String>) -> Value {
     )
 }
 
+/// A pick made in the running core (`PUT /proxies/{group}`: PaoPao Menu,
+/// paopao-tray) put into the settings (the app's JSON, `settings` of the
+/// build input) the way the app's `pickGroup` puts it, so a config built
+/// from them later keeps it: 🚀 节点选择's in `selected`, a built-in
+/// policy's in `policies` (`DIRECT` / `REJECT` as `direct` / `block`), any
+/// other group's in `group_pick` (its old region strategy dropped). The
+/// speed test's selector, Clash's `GLOBAL` and the groups' own children are
+/// no settings. True when the settings changed.
+pub fn record_pick(settings: &mut Map<String, Value>, group: &str, member: &str) -> bool {
+    use crate::model::outbound_tags as tags;
+    if group == tags::SPEED_TEST || group == "GLOBAL" || group.contains('~') {
+        return false;
+    }
+    let keyed = |settings: &mut Map<String, Value>, key: &str, value: &str| {
+        let map = settings
+            .entry(key)
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !map.is_object() {
+            *map = Value::Object(Map::new());
+        }
+        let map = map.as_object_mut().expect("an object");
+        if map.get(group).and_then(Value::as_str) == Some(value) {
+            return false;
+        }
+        map.insert(group.to_owned(), value.into());
+        true
+    };
+    if group == tags::PROXY {
+        // ♻️ 自动选择 is AUTO_SELECT, the same name.
+        if settings.get("selected").and_then(Value::as_str) == Some(member) {
+            return false;
+        }
+        settings.insert("selected".into(), member.into());
+        return true;
+    }
+    if policy_by_tag(group).is_some() {
+        let target = match member {
+            "DIRECT" => tags::DIRECT,
+            "REJECT" => tags::BLOCK,
+            m => m,
+        };
+        return keyed(settings, "policies", target);
+    }
+    let mut changed = keyed(settings, "group_pick", member);
+    if let Some(Value::Object(strategies)) = settings.get_mut("group_strategy") {
+        changed |= strategies.shift_remove(group).is_some();
+        if strategies.is_empty() {
+            settings.remove("group_strategy");
+        }
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1049,5 +1102,34 @@ mod tests {
             s.to_json()["group_edits"],
             json!({"policy:google": {"exclude": ["a.example"]}})
         );
+    }
+
+    #[test]
+    fn picks_land_where_the_apps_pick_group_puts_them() {
+        let mut s = json!({"mode": "smart", "selected": "auto",
+            "group_strategy": {"region:HK": "fastest"}})
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(record_pick(&mut s, "proxy", "HK 01"));
+        assert!(!record_pick(&mut s, "proxy", "HK 01"));
+        assert!(record_pick(&mut s, "policy:ai", "REJECT"));
+        assert!(record_pick(&mut s, "policy:google", "region:US"));
+        assert!(record_pick(&mut s, "region:HK", "HK 02"));
+        for not in ["speedtest", "GLOBAL", "region:HK~fastest"] {
+            assert!(!record_pick(&mut s, not, "HK 01"), "{not}");
+        }
+        assert_eq!(
+            Value::Object(s.clone()),
+            json!({"mode": "smart", "selected": "HK 01",
+                "policies": {"policy:ai": "block", "policy:google": "region:US"},
+                "group_pick": {"region:HK": "HK 02"}})
+        );
+        // Read back as the app reads them.
+        let p = ProxySettings::from_json(&Value::Object(s));
+        assert_eq!(p.selected, "HK 01");
+        assert_eq!(p.group_picks["region:HK"], "HK 02");
+        assert_eq!(p.policies["policy:ai"], "block");
+        assert!(p.group_strategies.is_empty());
     }
 }
