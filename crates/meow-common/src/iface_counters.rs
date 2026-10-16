@@ -418,7 +418,11 @@ enp0s31f6: 4038717103 5147487    0 6980    0     0          0    155727 31084187
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn reads_this_hosts_counters() {
-        let loopback = if cfg!(target_os = "macos") { "lo0" } else { "lo" };
+        let loopback = if cfg!(target_os = "macos") {
+            "lo0"
+        } else {
+            "lo"
+        };
         let all = read_iface_bytes();
         assert!(all.contains_key(loopback), "{all:?}");
     }

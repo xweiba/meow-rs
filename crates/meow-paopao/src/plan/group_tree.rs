@@ -504,7 +504,7 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
             outbound_tags::SMART,
             &format!("{} · {SMART_CHILD_NAME}", group_names::AUTO),
             GroupKind::Smart,
-            auto_lines.clone(),
+            auto_lines,
         );
         smart.short = Some(SMART_CHILD_NAME.into());
         smart.card = false;
@@ -999,7 +999,7 @@ fn with_group_use(s: &ProxySettings, mut groups: Vec<GroupSpec>) -> Vec<GroupSpe
     }
     groups.extend(copies);
     // A copy another one replaced is used by nobody.
-    let used: HashSet<String> = groups.iter().flat_map(|g| g.choices()).cloned().collect();
+    let used: HashSet<String> = groups.iter().flat_map(GroupSpec::choices).cloned().collect();
     groups.retain(|g| g.origin.is_none() || used.contains(&g.tag));
     groups
 }

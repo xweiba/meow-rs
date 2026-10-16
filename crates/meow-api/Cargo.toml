@@ -60,5 +60,9 @@ tokio-tungstenite = { workspace = true }
 # checkin_web_test runs the listener the app binary starts for the page.
 meow-listener = { workspace = true, default-features = false, features = ["listener-mixed"] }
 
+# The tests check a child process by its pid.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 [lints]
 workspace = true
