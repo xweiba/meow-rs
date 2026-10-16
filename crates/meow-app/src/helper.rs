@@ -8,7 +8,13 @@
 //!
 //! - `{"op":"start","config":"/abs/config.json","dir":"/abs/dir"}` runs
 //!   this binary as the core (`-f config -d dir`), replacing a running one;
-//! - `{"op":"stop"}`; `{"op":"status"}` (`running`);
+//!   with `"core":"/abs/meow"` (the app's own core) that one instead, once
+//!   it passes [`trusted_core`] — so an update of the app runs its new core
+//!   without installing the helper again (no new password prompt);
+//! - `{"op":"stop"}`; `{"op":"status"}` (`running`, `version`: [`VERSION`],
+//!   `signed`: this helper carries a developer team's signature, so the
+//!   app's core is taken by its signature — unsigned, only a core that is
+//!   byte for byte the helper's own);
 //! - `{"op":"relocate"}` (macOS): restarts `locationd`, so the system asks
 //!   for its location again (virtual location takes effect at once);
 //! - `{"op":"wifi"}` (macOS): the current Wi-Fi network name, read as root
@@ -83,6 +89,112 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// What this helper understands: 2 = `start` takes the app's `core`.
+pub const VERSION: u32 = 2;
+
+/// Where the helper keeps the app's core it checked (root's, not the
+/// user's to change between the check and the start).
+fn trusted_dir() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("core")))
+        .unwrap_or_else(|| "/Library/Application Support/PaoPao/core".into())
+}
+
+/// The app's core at `path`, made root's own copy and checked: the copy
+/// (which the user cannot change any more) must be signed by the same
+/// developer team as this helper (macOS `codesign`: Developer ID, the
+/// team in the leaf certificate); an unsigned helper (a development
+/// build) only takes a copy that is byte for byte itself. The copy's path,
+/// to run; why not, otherwise.
+fn trusted_core(path: &str) -> Result<std::path::PathBuf, String> {
+    let src = Path::new(path);
+    if !src.is_absolute() {
+        return Err("core must be an absolute path".into());
+    }
+    let dir = trusted_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let copy = dir.join("meow");
+    let tmp = dir.join("meow.check");
+    let _ = std::fs::remove_file(&tmp);
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut from = std::fs::File::open(src).map_err(|e| format!("{path}: {e}"))?;
+        if !from.metadata().is_ok_and(|m| m.is_file()) {
+            return Err(format!("{path}: not a file"));
+        }
+        // Root's alone until it passed (whatever was named is not shown).
+        let mut to = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&tmp)
+            .map_err(|e| e.to_string())?;
+        std::io::copy(&mut from, &mut to).map_err(|e| e.to_string())?;
+    }
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    let ok = match team_of(&me) {
+        Some(team) => signed_by(&tmp, &team),
+        None => std::fs::read(&me).ok() == std::fs::read(&tmp).ok(),
+    };
+    if !ok {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("the core is not signed as this helper is".into());
+    }
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+        .map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &copy).map_err(|e| e.to_string())?;
+    Ok(copy)
+}
+
+/// Whether this helper is signed by a developer team (looked up once).
+fn signed() -> bool {
+    static SIGNED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SIGNED.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| team_of(&e))
+            .is_some()
+    })
+}
+
+/// The developer team that signed `exe` (`TeamIdentifier=` of `codesign
+/// -dv`); None unsigned, ad-hoc, or not macOS.
+fn team_of(exe: &Path) -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let out = Command::new("/usr/bin/codesign")
+        .args(["-dv", "--verbose=2"])
+        .arg(exe)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    // codesign describes on stderr.
+    let text = String::from_utf8_lossy(&out.stderr);
+    text.lines()
+        .find_map(|l| l.strip_prefix("TeamIdentifier="))
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && *t != "not set")
+        .map(str::to_owned)
+}
+
+/// `exe` has a valid signature by Apple-issued certificates of `team`.
+fn signed_by(exe: &Path, team: &str) -> bool {
+    if !team.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let req = format!("=anchor apple generic and certificate leaf[subject.OU] = \"{team}\"");
+    Command::new("/usr/bin/codesign")
+        .args(["--verify", "--strict", "-R", &req])
+        .arg(exe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 struct Core {
     child: Option<Child>,
 }
@@ -115,14 +227,20 @@ impl Core {
         }
     }
 
-    fn start(&mut self, config: &str, dir: &str) -> Value {
+    fn start(&mut self, config: &str, dir: &str, core: Option<&str>) -> Value {
         if !Path::new(config).is_absolute() || !Path::new(dir).is_absolute() {
             return json!({"ok": false, "error": "config and dir must be absolute paths"});
         }
         self.stop();
-        let exe = match std::env::current_exe() {
-            Ok(e) => e,
-            Err(e) => return json!({"ok": false, "error": e.to_string()}),
+        let exe = match core {
+            Some(c) => match trusted_core(c) {
+                Ok(e) => e,
+                Err(e) => return json!({"ok": false, "error": e}),
+            },
+            None => match std::env::current_exe() {
+                Ok(e) => e,
+                Err(e) => return json!({"ok": false, "error": e.to_string()}),
+            },
         };
         let log_path = Path::new(dir).join("core.log");
         let log = match std::fs::File::create(&log_path) {
@@ -172,12 +290,24 @@ fn handle(core: &mut Core, stream: UnixStream, uid: u32) -> Result<()> {
             .to_string()
     };
     let reply = match text("op").as_str() {
-        "start" => core.start(&text("config"), &text("dir")),
+        "start" => {
+            let c = text("core");
+            core.start(
+                &text("config"),
+                &text("dir"),
+                (!c.is_empty()).then_some(c.as_str()),
+            )
+        }
         "stop" => {
             core.stop();
             json!({"ok": true})
         }
-        "status" => json!({"ok": true, "running": core.running()}),
+        "status" => json!({
+            "ok": true,
+            "running": core.running(),
+            "version": VERSION,
+            "signed": signed(),
+        }),
         "relocate" => relocate(),
         "wifi" => wifi(),
         other => json!({"ok": false, "error": format!("unknown op '{other}'")}),
@@ -383,8 +513,16 @@ BLUETOOTH
         };
         assert_eq!(
             ask(r#"{"op":"status"}"#),
-            json!({"ok": true, "running": false})
+            json!({"ok": true, "running": false, "version": VERSION, "signed": false})
         );
+        // Another binary than the helper itself (unsigned here): refused.
+        let other = dir.path().join("other");
+        std::fs::write(&other, b"not the core").unwrap();
+        let r = ask(&format!(
+            r#"{{"op":"start","config":"/tmp/c.json","dir":"/tmp","core":"{}"}}"#,
+            other.display()
+        ));
+        assert_eq!(r["ok"], json!(false), "{r}");
         assert_eq!(
             ask(r#"{"op":"start","config":"rel.json","dir":"/tmp"}"#)["ok"],
             json!(false),

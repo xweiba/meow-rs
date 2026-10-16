@@ -3079,6 +3079,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "meow-manager"
+version = "0.22.0"
+dependencies = [
+ "axum",
+ "libc",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "meow-manager-ffi"
+version = "0.22.0"
+dependencies = [
+ "meow-manager",
+ "serde_json",
+]
+
+[[package]]
 name = "meow-mobile"
 version = "0.22.0"
 dependencies = [

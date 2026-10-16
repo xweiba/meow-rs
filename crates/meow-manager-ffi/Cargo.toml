@@ -1,0 +1,20 @@
+[package]
+name = "meow-manager-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The manager (meow-manager, desktop parts) as a C library: PaoPao Menu (macOS) links it"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+meow-manager = { path = "../meow-manager", features = ["desktop"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

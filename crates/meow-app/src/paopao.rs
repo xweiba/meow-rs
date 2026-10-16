@@ -284,6 +284,11 @@ struct ApplyRequest {
     /// the core runs them already, nothing is built for them.
     #[serde(default)]
     picks: Vec<Pick>,
+    /// Keys of the input's settings replaced as they are (the manager's
+    /// switches: `tun`, `system_proxy`, `launch_at_login`). Built only
+    /// with `build`: what needs a new config says so.
+    #[serde(default)]
+    settings: serde_json::Map<String, Value>,
 }
 
 #[derive(serde::Deserialize)]
@@ -327,6 +332,21 @@ fn apply(input: &str) -> (Value, i32) {
     if let Some(settings) = input.get_mut("settings").and_then(Value::as_object_mut) {
         for p in &req.picks {
             changed |= meow_paopao::model::settings::record_pick(settings, &p.group, &p.member);
+        }
+    }
+    if !req.settings.is_empty() {
+        if let Some(m) = input.as_object_mut() {
+            let settings = m
+                .entry("settings")
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Some(settings) = settings.as_object_mut() {
+                for (k, v) in req.settings {
+                    if settings.get(&k) != Some(&v) {
+                        settings.insert(k, v);
+                        changed = true;
+                    }
+                }
+            }
         }
     }
     if let Some(m) = input.as_object_mut() {
@@ -661,4 +681,37 @@ fn http_proxy(addr: &str) -> Option<Arc<dyn meow_common::Proxy>> {
     Some(Arc::new(meow_config::proxy_parser::WrappedProxy::new(
         Box::new(adapter),
     )))
+}
+
+#[cfg(test)]
+mod apply_settings_tests {
+    use super::*;
+
+    #[test]
+    fn the_manager_s_switches_go_into_the_input_s_settings() {
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::new(d.path());
+        std::fs::write(
+            store.input(),
+            r#"{"settings":{"mode":"smart","tun":false},"subscriptions":[]}"#,
+        )
+        .unwrap();
+        let req = json!({
+            "dir": d.path(),
+            "settings": {"tun": true, "system_proxy": true},
+            "now": 1,
+        });
+        let (v, code) = answer(&Op::Apply, &req.to_string());
+        assert_eq!(code, EXIT_OK, "{v}");
+        assert_eq!(v["input_changed"], true);
+        assert_eq!(v["rebuilt"], false);
+        let kept: Value = serde_json::from_slice(&std::fs::read(store.input()).unwrap()).unwrap();
+        assert_eq!(
+            kept["settings"],
+            json!({"mode": "smart", "tun": true, "system_proxy": true})
+        );
+        // The same again: nothing changed.
+        let (v, _) = answer(&Op::Apply, &req.to_string());
+        assert_eq!(v["input_changed"], false);
+    }
 }

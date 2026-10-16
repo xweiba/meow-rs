@@ -20,6 +20,8 @@ members = [
     "crates/meow-script",
     "crates/meow-paopao",
     "crates/meow-box",
+    "crates/meow-manager",
+    "crates/meow-manager-ffi",
 ]
 
 [profile.release]

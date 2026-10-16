@@ -1,0 +1,31 @@
+[package]
+name = "meow-manager"
+version = "0.22.0"
+edition = "2021"
+rust-version = "1.89"
+description = "PaoPao's manager: the user's owner of the core, its switches and the OS system proxy; transport-agnostic, with an HTTP+JSON API"
+license = "MIT"
+publish = false
+# Self-contained (no workspace inheritance): the tray program
+# (paopao-proxy apps/proxy_dev_shell/tray_helper) depends on it by path.
+
+[features]
+# The desktop parts the tray program embeds (child processes, the
+# privileged helper's socket, OS commands): src/desktop.rs.
+desktop = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tracing = "0.1"
+rand = "0.9"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "test-util"] }
+tower = { version = "0.5", features = ["util"] }
