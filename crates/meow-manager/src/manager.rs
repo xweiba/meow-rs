@@ -189,6 +189,38 @@ pub struct Manager {
     can_tun: Box<dyn Fn() -> bool + Send>,
     /// The OS proxy points at the running core.
     proxy_on: bool,
+    /// The running config's few keys ([`Manager::config`]), as last read,
+    /// with the file's size and time then: read again only when it changed
+    /// (status is asked every second; a config with its lines is MBs).
+    keys: std::cell::RefCell<Option<KeysRead>>,
+    /// 虚拟网卡 could be had, as last asked for the status (a socket call
+    /// on macOS): asked again after [`CAN_TUN_FOR`].
+    can_tun_seen: Option<(std::time::Instant, bool)>,
+}
+
+/// The config file's keys and what the file was when they were read.
+struct KeysRead {
+    path: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    keys: Map<String, Value>,
+}
+
+/// How long the status's `can_tun` is taken as last asked.
+const CAN_TUN_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The keys of the running config the manager uses (the rest, the lines
+/// and rules, skipped as read: never held).
+#[derive(Deserialize)]
+struct ConfigKeys {
+    #[serde(default)]
+    tun: Option<Value>,
+    #[serde(default, rename = "external-controller")]
+    controller: Option<Value>,
+    #[serde(default)]
+    secret: Option<Value>,
+    #[serde(default, rename = "mixed-port")]
+    mixed_port: Option<Value>,
 }
 
 /// What a [`Manager`] is given.
@@ -225,6 +257,8 @@ impl Manager {
             login,
             can_tun,
             proxy_on: false,
+            keys: std::cell::RefCell::new(None),
+            can_tun_seen: None,
         }
     }
 
@@ -260,18 +294,67 @@ impl Manager {
         }
     }
 
-    /// The config the core runs (JSON; YAML only when a client gave one).
+    /// The keys of the config the core runs that the manager uses (`tun`,
+    /// `external-controller`, `secret`, `mixed-port`; JSON — YAML only when
+    /// a client gave one: none then). Read again only when the file changed.
     fn config(&self) -> Map<String, Value> {
-        self.saved
-            .run
-            .as_ref()
-            .and_then(|r| std::fs::read(&r.config).ok())
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            .and_then(|v| match v {
-                Value::Object(m) => Some(m),
-                _ => None,
-            })
-            .unwrap_or_default()
+        let Some(run) = self.saved.run.as_ref() else {
+            return Map::new();
+        };
+        let meta = std::fs::metadata(&run.config).ok();
+        let len = meta.as_ref().map_or(0, std::fs::Metadata::len);
+        let modified = meta.as_ref().and_then(|m| m.modified().ok());
+        let mut cache = self.keys.borrow_mut();
+        if let Some(c) = cache.as_ref() {
+            if c.path == run.config && c.len == len && c.modified == modified {
+                return c.keys.clone();
+            }
+        }
+        let keys = Self::read_keys(&run.config);
+        *cache = Some(KeysRead {
+            path: run.config.clone(),
+            len,
+            modified,
+            keys: keys.clone(),
+        });
+        keys
+    }
+
+    /// [`ConfigKeys`] of the config at `path`, streamed (a small buffer,
+    /// not the file whole).
+    fn read_keys(path: &Path) -> Map<String, Value> {
+        let Ok(f) = std::fs::File::open(path) else {
+            return Map::new();
+        };
+        let Ok(k) = serde_json::from_reader::<_, ConfigKeys>(std::io::BufReader::new(f)) else {
+            return Map::new();
+        };
+        let mut m = Map::new();
+        for (key, v) in [
+            ("tun", k.tun),
+            ("external-controller", k.controller),
+            ("secret", k.secret),
+            ("mixed-port", k.mixed_port),
+        ] {
+            if let Some(v) = v {
+                m.insert(key.into(), v);
+            }
+        }
+        m
+    }
+
+    /// 虚拟网卡 can be had, for the status: as last asked within
+    /// [`CAN_TUN_FOR`].
+    fn can_tun_now(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if let Some((at, v)) = self.can_tun_seen {
+            if now.duration_since(at) < CAN_TUN_FOR {
+                return v;
+            }
+        }
+        let v = (self.can_tun)();
+        self.can_tun_seen = Some((now, v));
+        v
     }
 
     fn tun_in(config: &Map<String, Value>) -> bool {
@@ -294,6 +377,7 @@ impl Manager {
     /// can_tun, config, dir, controller, secret, mixed_port}`.
     pub fn status(&mut self) -> Value {
         let running = self.core.running();
+        let can_tun = self.can_tun_now();
         let config = self.config();
         let run = self.saved.run.as_ref();
         json!({
@@ -303,7 +387,7 @@ impl Manager {
             "system_proxy": self.saved.system_proxy,
             "launch_at_login": self.login.registered(),
             "tun": Self::tun_in(&config),
-            "can_tun": (self.can_tun)(),
+            "can_tun": can_tun,
             "config": run.map(|r| r.config.display().to_string()),
             "dir": run.map(|r| r.dir.display().to_string()),
             "controller": config.get("external-controller"),
@@ -401,6 +485,8 @@ impl Manager {
 
     /// The switches changed (`patch`); the new status.
     pub fn set(&mut self, patch: Patch) -> Result<Value, Refusal> {
+        // Asked afresh after a switch (the authorization may be new).
+        self.can_tun_seen = None;
         let mut mirror = Map::new();
         if let Some(on) = patch.tun {
             self.set_tun(on)?;
@@ -807,6 +893,51 @@ pub(crate) mod tests {
         // The user removed the login item: status says so.
         *rig.login.lock().unwrap() = false;
         assert_eq!(m.status()["launch_at_login"], false);
+    }
+
+    #[test]
+    fn the_status_reads_the_config_keys_again_only_when_it_changed() {
+        let rig = Rig::new();
+        let mut m = rig.manager();
+        let run = rig.run();
+        // A config with its lines: only the four keys are taken.
+        let lines: Vec<String> = (0..2000)
+            .map(|i| format!(r#"{{"name":"n{i}","type":"ss","server":"s{i}","port":443}}"#))
+            .collect();
+        std::fs::write(
+            &run.config,
+            format!(
+                r#"{{"proxies":[{}],"external-controller":"127.0.0.1:9090","secret":"s3","mixed-port":7890,"tun":{{"enable":false}},"rules":["MATCH,DIRECT"]}}"#,
+                lines.join(",")
+            ),
+        )
+        .unwrap();
+        m.start(Some(run.clone()), Some(false)).unwrap();
+        let s = m.status();
+        assert_eq!(
+            (&s["mixed_port"], &s["secret"], &s["tun"]),
+            (&json!(7890), &json!("s3"), &json!(false))
+        );
+        assert_eq!(m.config().len(), 4);
+        // Rewritten (another port, 虚拟网卡 on): read again.
+        std::fs::write(
+            &run.config,
+            r#"{"external-controller":"127.0.0.1:9091","secret":"s4","mixed-port":7891,"tun":{"enable":true}}"#,
+        )
+        .unwrap();
+        let s = m.status();
+        assert_eq!(
+            (&s["mixed_port"], &s["controller"], &s["tun"]),
+            (&json!(7891), &json!("127.0.0.1:9091"), &json!(true))
+        );
+        // Not JSON (a client's YAML): none of them.
+        std::fs::write(&run.config, "mixed-port: 7892\n").unwrap();
+        assert_eq!(m.status()["mixed_port"], Value::Null);
+        // can_tun as last asked for a moment, afresh after a switch.
+        *rig.can_tun.lock().unwrap() = false;
+        assert_eq!(m.status()["can_tun"], true);
+        m.set(Patch::default()).unwrap();
+        assert_eq!(m.status()["can_tun"], false);
     }
 
     #[test]

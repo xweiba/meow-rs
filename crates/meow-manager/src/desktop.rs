@@ -540,8 +540,14 @@ impl Embedded {
         let thread = std::thread::Builder::new()
             .name("manager".into())
             .spawn(move || {
+                // One thread for the API, one for the manager's work (each
+                // request takes the manager's lock in turn anyway): no
+                // thread per request piling up behind a slow start, no
+                // allocator arena per thread.
                 let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
+                    .max_blocking_threads(1)
+                    .thread_keep_alive(Duration::from_secs(60))
                     .build()
                 {
                     Ok(rt) => rt,
