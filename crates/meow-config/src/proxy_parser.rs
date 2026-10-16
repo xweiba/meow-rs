@@ -2517,6 +2517,11 @@ fn network_layer(
 }
 }
 
+// Only the trojan, vless and vmess parsers use it (a build may have none).
+#[cfg_attr(
+    not(any(feature = "trojan", feature = "vless", feature = "vmess")),
+    allow(dead_code)
+)]
 fn default_transport_alpn(network: &str, alpn: Vec<String>) -> Vec<String> {
     if !alpn.is_empty() {
         return alpn;
