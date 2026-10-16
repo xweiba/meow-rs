@@ -58,6 +58,12 @@ pub trait Core: Send {
     fn stop(&mut self);
     fn running(&mut self) -> bool;
 
+    /// Whether the running core runs the build a start would run now (not
+    /// one the app shipped before an update). None: it cannot be told.
+    fn same_build(&mut self) -> Option<bool> {
+        None
+    }
+
     /// Where the core runs with 虚拟网卡 `tun` or without: its config and
     /// home (macOS: the privileged helper's core has its own, so root's
     /// files never land in the user core's). None: wherever a client says.
@@ -373,16 +379,20 @@ impl Manager {
             .filter(|&p| p != 0)
     }
 
-    /// `{manager, running, core, system_proxy, launch_at_login, tun,
-    /// can_tun, config, dir, controller, secret, mixed_port}`.
+    /// `{manager, running, same_core, core, system_proxy, launch_at_login,
+    /// tun, can_tun, config, dir, controller, secret, mixed_port}`.
+    /// `same_core`: the running core runs the build a start would run
+    /// ([`Core::same_build`]); true when it cannot be told or none runs.
     pub fn status(&mut self) -> Value {
         let running = self.core.running();
+        let same_core = !running || self.core.same_build() != Some(false);
         let can_tun = self.can_tun_now();
         let config = self.config();
         let run = self.saved.run.as_ref();
         json!({
             "manager": VERSION,
             "running": running,
+            "same_core": same_core,
             "core": self.saved.core,
             "system_proxy": self.saved.system_proxy,
             "launch_at_login": self.login.registered(),
@@ -664,6 +674,8 @@ pub(crate) mod tests {
         /// Starts refused while the config contains this.
         pub refuse: Arc<Mutex<Option<String>>>,
         pub root: PathBuf,
+        /// What [`Core::same_build`] says.
+        pub same: Arc<Mutex<Option<bool>>>,
     }
 
     impl Core for FakeCore {
@@ -685,6 +697,9 @@ pub(crate) mod tests {
         }
         fn running(&mut self) -> bool {
             *self.up.lock().unwrap()
+        }
+        fn same_build(&mut self) -> Option<bool> {
+            *self.same.lock().unwrap()
         }
         fn place(&self, tun: bool) -> Option<Run> {
             let dir = self.root.join(if tun { "core-service" } else { "meow" });
@@ -765,6 +780,7 @@ pub(crate) mod tests {
         pub proxy: Arc<Log>,
         pub up: Arc<Mutex<bool>>,
         pub refuse: Arc<Mutex<Option<String>>>,
+        pub same: Arc<Mutex<Option<bool>>>,
         pub can_tun: Arc<Mutex<bool>>,
         pub login: Arc<Mutex<bool>>,
     }
@@ -778,6 +794,7 @@ pub(crate) mod tests {
                 proxy: Arc::default(),
                 up: Arc::default(),
                 refuse: Arc::default(),
+                same: Arc::default(),
                 can_tun: Arc::new(Mutex::new(true)),
                 login: Arc::default(),
             }
@@ -793,6 +810,7 @@ pub(crate) mod tests {
                         up: Arc::clone(&self.up),
                         refuse: Arc::clone(&self.refuse),
                         root: self.dir.path().to_owned(),
+                        same: Arc::clone(&self.same),
                     }),
                     builder: Box::new(FakeBuilder {
                         log: Arc::clone(&self.build),
@@ -820,6 +838,22 @@ pub(crate) mod tests {
             .unwrap();
             Run { config, dir }
         }
+    }
+
+    #[test]
+    fn same_core_as_the_core_says() {
+        let rig = Rig::new();
+        let mut m = rig.manager();
+        // None running: nothing to restart.
+        *rig.same.lock().unwrap() = Some(false);
+        assert_eq!(m.status()["same_core"], true);
+        m.start(Some(rig.run()), None).unwrap();
+        assert_eq!(m.status()["same_core"], false);
+        *rig.same.lock().unwrap() = Some(true);
+        assert_eq!(m.status()["same_core"], true);
+        // Cannot be told: the same (no restart on doubt).
+        *rig.same.lock().unwrap() = None;
+        assert_eq!(m.status()["same_core"], true);
     }
 
     #[test]

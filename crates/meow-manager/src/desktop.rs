@@ -26,6 +26,17 @@ use crate::proxy::{Commands, Os, SystemProxy};
 /// The privileged helper's socket (macOS).
 pub const HELPER_SOCKET: &str = "/var/run/paopao-core.sock";
 
+/// The build a core runs, in its run directory: the digest (sha256, hex)
+/// of the binary it was started from, written once it runs.
+const BUILD_FILE: &str = "core.build";
+
+/// The privileged helper's own copy of the app's core, which it runs
+/// (macOS; refreshed at each start).
+#[cfg(target_os = "macos")]
+const HELPER_CORE: Option<&str> = Some("/Library/Application Support/PaoPao/core/meow");
+#[cfg(not(target_os = "macos"))]
+const HELPER_CORE: Option<&str> = None;
+
 /// The manager's API: where it listens (`{port, token, pid}`).
 pub fn token_file(data: &Path) -> PathBuf {
     data.join("manager-api.json")
@@ -90,6 +101,51 @@ pub struct DesktopCore {
     /// A core of an earlier tray found running (its pid), not our child.
     adopted: Option<u32>,
     on_helper: bool,
+    /// The running core's run directory (its [`BUILD_FILE`]).
+    run_dir: Option<PathBuf>,
+    digests: Digests,
+}
+
+/// A binary's digest as last read, with the size and time it had then.
+struct Seen {
+    path: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    hex: String,
+}
+
+/// Digests of binaries (tens of MB), read again only when a file's size or
+/// time changed.
+#[derive(Default)]
+struct Digests(Vec<Seen>);
+
+impl Digests {
+    fn of(&mut self, path: &Path) -> Option<String> {
+        let meta = std::fs::metadata(path).ok()?;
+        let (len, modified) = (meta.len(), meta.modified().ok());
+        if let Some(d) = self.0.iter().find(|d| d.path == path) {
+            if d.len == len && d.modified == modified {
+                return Some(d.hex.clone());
+            }
+        }
+        let hex = sha256_of(path)?;
+        self.0.retain(|d| d.path != path);
+        self.0.push(Seen {
+            path: path.to_owned(),
+            len,
+            modified,
+            hex: hex.clone(),
+        });
+        Some(hex)
+    }
+}
+
+fn sha256_of(path: &Path) -> Option<String> {
+    use sha2::{Digest as _, Sha256};
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut h = Sha256::new();
+    std::io::copy(&mut f, &mut h).ok()?;
+    Some(format!("{:x}", h.finalize()))
 }
 
 impl DesktopCore {
@@ -102,6 +158,8 @@ impl DesktopCore {
             child: None,
             adopted: None,
             on_helper: false,
+            run_dir: None,
+            digests: Digests::default(),
         };
         core.adopt();
         core
@@ -128,6 +186,7 @@ impl DesktopCore {
     fn adopt(&mut self) {
         if self.helper.as_ref().is_some_and(HelperClient::running) {
             self.on_helper = true;
+            self.run_dir = Some(self.helper_run().dir);
             return;
         }
         let pid_file = self.user_run().dir.join("core.pid");
@@ -136,7 +195,23 @@ impl DesktopCore {
             .and_then(|t| t.trim().parse::<u32>().ok());
         if let Some(pid) = pid.filter(|&p| is_core(p, &self.meow)) {
             self.adopted = Some(pid);
+            self.run_dir = Some(self.user_run().dir);
         }
+    }
+
+    /// The build of the core just started on `dir` noted there
+    /// ([`BUILD_FILE`]).
+    fn note_build(&mut self, dir: &Path) {
+        let file = dir.join(BUILD_FILE);
+        match self.digests.of(&self.meow) {
+            Some(hex) => {
+                let _ = std::fs::write(file, hex);
+            }
+            None => {
+                let _ = std::fs::remove_file(file);
+            }
+        }
+        self.run_dir = Some(dir.to_owned());
     }
 
     fn stop_child(&mut self) {
@@ -206,6 +281,7 @@ impl DesktopCore {
         }
         let _ = std::fs::write(run.dir.join("core.pid"), child.id().to_string());
         self.child = Some(child);
+        self.note_build(&run.dir);
         Ok(())
     }
 }
@@ -221,6 +297,8 @@ impl Core for DesktopCore {
         // One core at a time: the other one goes first.
         self.stop_child();
         self.stop_helper();
+        self.run_dir = None;
+        let _ = std::fs::remove_file(run.dir.join(BUILD_FILE));
         if !helper {
             return self.start_child(run);
         }
@@ -236,6 +314,8 @@ impl Core for DesktopCore {
         match reply {
             Some(v) if v["ok"] == true => {
                 self.on_helper = true;
+                // The helper runs its copy of `self.meow`, made at this start.
+                self.note_build(&run.dir);
                 Ok(())
             }
             Some(v) => Err(Failure {
@@ -252,6 +332,22 @@ impl Core for DesktopCore {
     fn stop(&mut self) {
         self.stop_child();
         self.stop_helper();
+        self.run_dir = None;
+    }
+
+    /// The build noted at its start against `self.meow` now (an update of
+    /// the app replaced it meanwhile: not the same). A core started by a
+    /// tray that noted none: the helper's copy is what the helper runs;
+    /// a user core's cannot be told.
+    fn same_build(&mut self) -> Option<bool> {
+        let dir = self.run_dir.clone()?;
+        let mine = self.digests.of(&self.meow)?;
+        let theirs = match std::fs::read_to_string(dir.join(BUILD_FILE)) {
+            Ok(t) => t.trim().to_owned(),
+            Err(_) if self.on_helper => self.digests.of(Path::new(HELPER_CORE?))?,
+            Err(_) => return None,
+        };
+        Some(theirs == mine)
     }
 
     fn running(&mut self) -> bool {
@@ -691,6 +787,41 @@ echo \"$@\" > \"$4/args\"; exec \"$(dirname \"$0\")/meow-sleep\" 30\n",
         std::fs::write(&run.config, "refuse").unwrap();
         let f = core.start(&run).unwrap_err();
         assert!(f.log.unwrap().contains("bad config"), "{}", f.error);
+        assert_eq!(core.same_build(), None);
+    }
+
+    #[test]
+    fn the_core_build_against_the_apps() {
+        let d = tempfile::tempdir().unwrap();
+        let meow = fake_meow(d.path());
+        let data = d.path().join("data");
+        let mut core = DesktopCore::new(meow.clone(), data.clone(), None);
+        // None running: nothing to tell.
+        assert_eq!(core.same_build(), None);
+        let run = core.place(false).unwrap();
+        std::fs::create_dir_all(&run.dir).unwrap();
+        std::fs::write(&run.config, "{}").unwrap();
+        core.start(&run).unwrap();
+        assert_eq!(core.same_build(), Some(true));
+        // A tray started again (the app the same) takes it on as the same.
+        let mut again = DesktopCore::new(meow.clone(), data.clone(), None);
+        assert!(again.adopted.is_some());
+        assert_eq!(again.same_build(), Some(true));
+        // The app updated: its core binary another one.
+        let mut text = std::fs::read_to_string(&meow).unwrap();
+        text.push_str("# another build\n");
+        std::fs::write(&meow, text).unwrap();
+        assert_eq!(again.same_build(), Some(false));
+        let mut updated = DesktopCore::new(meow.clone(), data.clone(), None);
+        assert_eq!(updated.same_build(), Some(false));
+        // Started by a tray that noted no build: cannot be told.
+        std::fs::remove_file(run.dir.join(BUILD_FILE)).unwrap();
+        assert_eq!(updated.same_build(), None);
+        // Started again: the app's build.
+        updated.start(&run).unwrap();
+        assert_eq!(updated.same_build(), Some(true));
+        updated.stop();
+        assert_eq!(updated.same_build(), None);
     }
 
     #[test]

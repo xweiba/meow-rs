@@ -21,6 +21,8 @@ tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 tracing = "0.1"
 rand = "0.9"
+# The core binary's digest (`same_core`: the running core is the app's build).
+sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

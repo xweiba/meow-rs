@@ -3,9 +3,9 @@
 //! writes where in its token file (`{port, token, pid}`, readable by the
 //! user alone); a router build may listen on the LAN with the same API.
 //!
-//! - `GET /manager/status` → `{manager, running, core, system_proxy,
-//!   launch_at_login, tun, can_tun, config, dir, controller, secret,
-//!   mixed_port}` ([`crate::Manager::status`]).
+//! - `GET /manager/status` → `{manager, running, same_core, core,
+//!   system_proxy, launch_at_login, tun, can_tun, config, dir, controller,
+//!   secret, mixed_port}` ([`crate::Manager::status`]).
 //! - `POST /manager/core/start` `{config?, dir?, system_proxy?}`: `config`
 //!   the config itself (an object: written where the core runs it, with or
 //!   without 虚拟网卡), or its path with `dir`; neither: what it ran last →
