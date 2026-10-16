@@ -322,7 +322,7 @@ impl Manager {
 
     /// [`ConfigKeys`] of the config at `path`, streamed (a small buffer,
     /// not the file whole).
-    fn read_keys(path: &Path) -> Map<String, Value> {
+    pub(crate) fn read_keys(path: &Path) -> Map<String, Value> {
         let Ok(f) = std::fs::File::open(path) else {
             return Map::new();
         };

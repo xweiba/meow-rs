@@ -212,10 +212,11 @@ impl DesktopCore {
 
 impl Core for DesktopCore {
     fn start(&mut self, run: &Run) -> Result<(), Failure> {
-        let tun = std::fs::read(&run.config)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            .is_some_and(|v| v["tun"]["enable"] == true);
+        // Only the key needed, streamed: the config with its lines is MBs
+        // (whole, as a Value, many times that for a moment).
+        let tun = Manager::read_keys(&run.config)
+            .get("tun")
+            .is_some_and(|t| t["enable"] == true);
         let helper = tun && self.helper.as_ref().is_some_and(HelperClient::installed);
         // One core at a time: the other one goes first.
         self.stop_child();
