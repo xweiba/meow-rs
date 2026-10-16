@@ -3955,7 +3955,9 @@ async fn get_smart_events(State(state): State<Arc<AppState>>) -> Response {
             all.push(v);
         }
     }
-    all.sort_by_key(|v| std::cmp::Reverse(v.get("at").and_then(|a| a.as_i64()).unwrap_or(0)));
+    all.sort_by_key(|v| {
+        std::cmp::Reverse(v.get("at").and_then(serde_json::Value::as_i64).unwrap_or(0))
+    });
     Json(all).into_response()
 }
 
