@@ -531,25 +531,36 @@ fn ai_leaves_out_regions_it_does_not_serve() {
     let t = build_with(&ProxySettings::default());
     let ai = g(&t, "policy:ai");
     assert!(!ai.members.contains(&"region:HK".into()));
+    // 固定出口 is no member of its own any more.
     assert_eq!(
-        ai.members[..6],
+        ai.members[..5],
         s(&[
             "DIRECT",
             "REJECT",
-            "policy:ai~sticky",
             "policy:ai~auto",
             "policy:ai~balance",
             "policy:ai~fastest"
         ])
     );
+    assert!(t.by_tag("policy:ai~sticky").is_none());
     assert_eq!(
         g(&t, "policy:ai~auto").members,
         s(&["US 1", "US 2", "JP 1", "X 1"])
     );
-    let sticky = g(&t, "policy:ai~sticky");
+    // Its built-in default: 美国, 智能选择 there, with 固定出口 on — the
+    // same lines and the same behaviour as the member it had.
+    let sticky = g(&t, "policy:ai@region:US~sticky");
     assert_eq!(sticky.kind, GroupKind::Sticky);
     assert_eq!(sticky.members, s(&["US 1", "US 2"]));
-    assert_eq!(ai.pick.as_deref(), Some("policy:ai~sticky"));
+    assert_eq!(sticky.origin.as_deref(), Some("region:US"));
+    assert!(!sticky.card);
+    assert_eq!(sticky.label, "🇺🇸 美国 · 智能选择 · 固定出口");
+    assert_eq!(ai.pick.as_deref(), Some("policy:ai@region:US~sticky"));
+    assert!(ai.members.contains(&"policy:ai@region:US~sticky".into()));
+    assert!(!ai.members.contains(&"region:US".into()));
+    assert!(t.plain_members("policy:ai").contains(&"region:US".into()));
+    // The region itself is as it was.
+    assert_eq!(pick(&t, "region:US"), "region:US~auto");
 }
 
 #[test]
@@ -591,14 +602,15 @@ fn ai_default_region_moves_the_sticky_exit() {
         group_defaults: defaults(&[("policy:ai", GroupDefault::region("JP"))]),
         ..ProxySettings::default()
     });
-    assert_eq!(g(&t, "policy:ai~sticky").members, s(&["JP 1"]));
-    assert_eq!(pick(&t, "policy:ai"), "policy:ai~sticky");
+    // One line there: nothing to choose, no copy.
+    assert_eq!(pick(&t, "policy:ai"), "region:JP");
     let t = build_with(&ProxySettings {
         group_defaults: defaults(&[("policy:ai", GroupDefault::of(GroupDefaultKind::Fastest))]),
         ..ProxySettings::default()
     });
-    assert_eq!(g(&t, "policy:ai~sticky").members, s(&["US 1", "US 2"]));
+    // Another default ran without 固定出口 and still does.
     assert_eq!(pick(&t, "policy:ai"), "policy:ai~fastest");
+    assert!(!t.groups.iter().any(|g| g.origin.is_some()));
 }
 
 #[test]
@@ -609,8 +621,11 @@ fn a_refused_region_or_one_without_lines_keeps_the_built_in_default() {
         group_defaults: defaults(&[("policy:ai", GroupDefault::region("HK"))]),
         ..ProxySettings::default()
     });
-    assert_eq!(g(&t, "policy:ai~sticky").members, s(&["US 1", "US 2"]));
-    assert_eq!(pick(&t, "policy:ai"), "policy:ai~sticky");
+    assert_eq!(
+        g(&t, "policy:ai@region:US~sticky").members,
+        s(&["US 1", "US 2"])
+    );
+    assert_eq!(pick(&t, "policy:ai"), "policy:ai@region:US~sticky");
     let t = build_with(&ProxySettings {
         group_defaults: defaults(&[
             ("policy:ai", GroupDefault::region("SG")),
@@ -618,8 +633,11 @@ fn a_refused_region_or_one_without_lines_keeps_the_built_in_default() {
         ]),
         ..ProxySettings::default()
     });
-    assert_eq!(g(&t, "policy:ai~sticky").members, s(&["US 1", "US 2"]));
-    assert_eq!(pick(&t, "policy:ai"), "policy:ai~sticky");
+    assert_eq!(
+        g(&t, "policy:ai@region:US~sticky").members,
+        s(&["US 1", "US 2"])
+    );
+    assert_eq!(pick(&t, "policy:ai"), "policy:ai@region:US~sticky");
     assert_eq!(pick(&t, "policy:youtube"), outbound_tags::FASTEST);
 }
 
@@ -628,7 +646,7 @@ fn group_default_choices_regions_first() {
     let t = build_with(&ProxySettings::default());
     let choices = |tag: &str| -> Vec<String> {
         let p = policy_by_tag(tag).expect("policy");
-        group_default_choices_in(p, &g(&t, tag).members)
+        group_default_choices_in(p, &t.plain_members(tag))
             .iter()
             .map(|d| d.name_for(p))
             .collect()
@@ -636,8 +654,8 @@ fn group_default_choices_regions_first() {
     assert_eq!(
         choices("policy:ai"),
         s(&[
-            "固定出口 · 美国",
-            "固定出口 · 日本",
+            "🇺🇸 美国",
+            "🇯🇵 日本",
             "速度最快",
             "自动选择",
             "负载均衡",

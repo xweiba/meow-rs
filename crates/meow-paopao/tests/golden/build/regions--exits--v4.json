@@ -680,7 +680,7 @@
           "name": "policy:ai",
           "type": "select",
           "proxies": [
-            "policy:ai~sticky",
+            "policy:ai@region:US~sticky",
             "DIRECT",
             "REJECT",
             "policy:ai~auto",
@@ -690,7 +690,6 @@
             "region:TW",
             "region:JP",
             "region:SG",
-            "region:US",
             "region:KR",
             "region:GB",
             "region:DE",
@@ -1524,7 +1523,7 @@
           "url": "https://www.gstatic.com/generate_204"
         },
         {
-          "name": "policy:ai~sticky",
+          "name": "policy:ai@region:US~sticky",
           "type": "smart",
           "proxies": [
             "美国 01",
@@ -2177,7 +2176,6 @@
           "members": [
             "DIRECT",
             "REJECT",
-            "policy:ai~sticky",
             "policy:ai~auto",
             "policy:ai~balance",
             "policy:ai~fastest",
@@ -2185,7 +2183,7 @@
             "region:TW",
             "region:JP",
             "region:SG",
-            "region:US",
+            "policy:ai@region:US~sticky",
             "region:KR",
             "region:GB",
             "region:DE",
@@ -2193,7 +2191,7 @@
             "region:VN",
             "region:TR"
           ],
-          "pick": "policy:ai~sticky",
+          "pick": "policy:ai@region:US~sticky",
           "card": true,
           "badge": "内置"
         },
@@ -3139,15 +3137,15 @@
           "card": false
         },
         {
-          "tag": "policy:ai~sticky",
-          "label": "🤖 AI 服务 · 固定出口",
-          "short": "固定出口",
+          "tag": "policy:ai@region:US~sticky",
+          "label": "🇺🇸 美国 · 智能选择 · 固定出口",
           "kind": "sticky",
           "members": [
             "美国 01",
             "🇺🇸 美国 02 0.5x"
           ],
-          "card": false
+          "card": false,
+          "origin": "region:US"
         }
       ]
     },

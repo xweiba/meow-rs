@@ -6,7 +6,7 @@ use crate::model::settings::{GroupDefault, GroupDefaultKind};
 use crate::plan::group_tree::group_child;
 use crate::plan::outbound_tags;
 use crate::plan::policies::Policy;
-use crate::pool::{region_for_code, Region};
+use crate::pool::region_for_code;
 
 /// The non-region choices, in the order the picker lists them.
 pub const GROUP_DEFAULT_MODES: [GroupDefaultKind; 6] = [
@@ -62,17 +62,13 @@ impl GroupDefault {
             }
         };
         let t = match self.kind {
-            GroupDefaultKind::Region => {
-                let region = format!("region:{}", self.region.as_deref().unwrap_or_default());
-                let sticky = own(group_child::STICKY);
-                if !has(&region) {
-                    None
-                } else if p.sticky_exit && has(&sticky) {
-                    Some(sticky)
-                } else {
-                    Some(region)
-                }
-            }
+            // A sticky policy's 固定出口 goes over it ([`ProxySettings::sticky_of`]).
+            //
+            // [`ProxySettings::sticky_of`]: crate::model::settings::ProxySettings::sticky_of
+            GroupDefaultKind::Region => Some(format!(
+                "region:{}",
+                self.region.as_deref().unwrap_or_default()
+            )),
             GroupDefaultKind::Fastest => either(outbound_tags::FASTEST, group_child::FASTEST),
             GroupDefaultKind::Auto => either(outbound_tags::AUTO, group_child::AUTO),
             GroupDefaultKind::Balance => either(outbound_tags::BALANCE, group_child::BALANCE),
@@ -83,19 +79,13 @@ impl GroupDefault {
         t.filter(|t| has(t))
     }
 
-    /// As the screen names it for `p` ("固定出口 · 美国", "🇯🇵 日本",
-    /// "速度最快").
-    pub fn name_for(&self, p: &Policy) -> String {
+    /// As the screen names it ("🇯🇵 日本", "速度最快"); 固定出口 is a switch
+    /// of the policy's, not part of its default.
+    pub fn name_for(&self, _p: &Policy) -> String {
         match self.kind {
             GroupDefaultKind::Region => {
                 let code = self.region.as_deref().unwrap_or_default();
-                let r = region_for_code(Some(code));
-                let name = r.as_ref().map_or(code, |r| &r.name);
-                if p.sticky_exit {
-                    format!("固定出口 · {name}")
-                } else {
-                    r.as_ref().map_or_else(|| name.to_owned(), Region::label)
-                }
+                region_for_code(Some(code)).map_or_else(|| code.to_owned(), |r| r.label())
             }
             GroupDefaultKind::Fastest => "速度最快".into(),
             GroupDefaultKind::Auto => "自动选择".into(),

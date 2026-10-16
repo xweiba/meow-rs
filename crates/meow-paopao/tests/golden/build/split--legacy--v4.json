@@ -373,7 +373,6 @@
           "proxies": [
             "DIRECT",
             "REJECT",
-            "policy:ai~sticky",
             "policy:ai~auto",
             "policy:ai~balance",
             "policy:ai~fastest",
@@ -708,15 +707,6 @@
             "US 01"
           ],
           "strategy": "throughput",
-          "url": "https://www.gstatic.com/generate_204"
-        },
-        {
-          "name": "policy:ai~sticky",
-          "type": "smart",
-          "proxies": [
-            "US 01"
-          ],
-          "strategy": "sticky",
           "url": "https://www.gstatic.com/generate_204"
         },
         {
@@ -1056,7 +1046,6 @@
           "members": [
             "DIRECT",
             "REJECT",
-            "policy:ai~sticky",
             "policy:ai~auto",
             "policy:ai~balance",
             "policy:ai~fastest",
@@ -1465,16 +1454,6 @@
           "members": [
             "JP 01",
             "🎥 奈飞 SG",
-            "US 01"
-          ],
-          "card": false
-        },
-        {
-          "tag": "policy:ai~sticky",
-          "label": "🤖 AI 服务 · 固定出口",
-          "short": "固定出口",
-          "kind": "sticky",
-          "members": [
             "US 01"
           ],
           "card": false

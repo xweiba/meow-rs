@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 
-use crate::model::settings::{GroupEdit, GroupMode, GroupStrategy, ProxySettings};
+use crate::model::settings::{
+    is_policy_tag, GroupEdit, GroupMode, GroupStrategy, GroupUse, ProxySettings, COPY_MARK,
+};
 use crate::plan::outbound_tags;
 use crate::plan::policies::{Policy, POLICIES};
 use crate::plan::sub_rules::ImportedSplit;
@@ -23,7 +25,8 @@ pub enum GroupKind {
     Balance,
     /// The lowest latency member (`url-test`).
     Fastest,
-    /// One member for every site, kept until it fails or slows (固定出口).
+    /// One member for every site, kept until it fails or slows (a
+    /// policy's 固定出口, see [`with_policy_use`]).
     Sticky,
 }
 
@@ -59,7 +62,7 @@ pub mod group_child {
     pub const BALANCE: &str = "~balance";
     /// 速度最快.
     pub const FASTEST: &str = "~fastest";
-    /// 固定出口.
+    /// 固定出口 (a policy's copy only, [`super::with_policy_use`]).
     pub const STICKY: &str = "~sticky";
 
     /// Whether `tag` is an automatic child (it has a `~`).
@@ -120,6 +123,9 @@ pub struct GroupSpec {
     pub raw_type: Option<String>,
     /// A built-in policy the user changed (`ProxySettings::group_edits`).
     pub edited: bool,
+    /// A policy's own copy of a member ([`with_policy_use`]): the member
+    /// it stands for in that policy.
+    pub origin: Option<String>,
 }
 
 impl GroupSpec {
@@ -136,12 +142,13 @@ impl GroupSpec {
             badge: None,
             raw_type: None,
             edited: false,
+            origin: None,
         }
     }
 
     /// The golden corpus' shape (Dart `treeJson`): `tag`, `label`,
     /// `short?`, `kind`, `members`, `pick?`, `card`, `badge?`, `rawType?`,
-    /// `edited?` (only when true).
+    /// `edited?` (only when true), `origin?`.
     pub fn to_json(&self) -> Value {
         let mut m = Map::new();
         m.insert("tag".into(), self.tag.clone().into());
@@ -163,6 +170,9 @@ impl GroupSpec {
         }
         if self.edited {
             m.insert("edited".into(), true.into());
+        }
+        if let Some(o) = &self.origin {
+            m.insert("origin".into(), o.clone().into());
         }
         Value::Object(m)
     }
@@ -233,6 +243,21 @@ impl GroupTree {
             }
         }
         out
+    }
+
+    /// `tag`'s members as the policy offers them: its copies
+    /// ([`GroupSpec::origin`]) as the members they stand for.
+    pub fn plain_members(&self, tag: &str) -> Vec<String> {
+        self.by_tag(tag).map_or_else(Vec::new, |g| {
+            g.members
+                .iter()
+                .map(|m| {
+                    self.by_tag(m)
+                        .and_then(|c| c.origin.clone())
+                        .unwrap_or_else(|| m.clone())
+                })
+                .collect()
+        })
     }
 
     /// `{"groups": [...]}` as [`GroupSpec::to_json`].
@@ -331,7 +356,7 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
         select.pick = Some(pick);
         let mut all = vec![select];
         all.extend(custom_groups(s, &own_base(extras), &outlet_there));
-        return tree_without_loops(all);
+        return tree_without_loops(with_policy_use(s, all));
     }
 
     // Exactly as the subscriptions wrote it (when they wrote any groups).
@@ -361,7 +386,7 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
             })
             .collect();
         all.extend(custom_groups(s, &own_base(extras), &outlet_there));
-        return tree_without_loops(all);
+        return tree_without_loops(with_policy_use(s, all));
     }
 
     let mut b = Layers {
@@ -551,7 +576,7 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
     let mut all = built;
     all.extend(own);
     all.extend(b.children);
-    tree_without_loops(all)
+    tree_without_loops(with_policy_use(s, all))
 }
 
 /// The layered build's shared state: lines switched off, and the automatic
@@ -626,7 +651,7 @@ impl Layers {
 
     /// A built-in service group: 拦截 / 直连 for a blockable one; else
     /// over the regions it serves (its own children when it leaves some
-    /// out), 固定出口 for a sticky one.
+    /// out).
     fn policy_group(&mut self, p: &Policy, s: &ProxySettings, c: &PolicyContext<'_>) -> GroupSpec {
         let tag = p.tag();
         let label = p.label();
@@ -666,7 +691,7 @@ impl Layers {
         }
         members.extend(c.extras.iter().cloned());
         // 分组默认 naming a region it has lines in (and does not refuse) is
-        // its preferred region: 固定出口 goes over that region's lines.
+        // its preferred region.
         let in_allowed = |code: &str| {
             let t = format!("region:{code}");
             allowed.iter().find(|a| **a == t).cloned()
@@ -677,35 +702,22 @@ impl Layers {
             .filter(|d| d.region.is_some() && d.allowed_for(p))
             .and_then(|d| in_allowed(d.region.as_deref().unwrap_or_default()));
         let preferred = chosen_region.or_else(|| p.prefer_region.and_then(in_allowed));
-        // 固定出口: one line for all of the service, first among the members
-        // and the default.
-        let mut sticky = None;
-        if p.sticky_exit {
-            let over = match &preferred {
-                Some(r) => std::slice::from_ref(r).to_vec(),
-                None => allowed.clone(),
-            };
-            let lines = self.enabled(&lines_of(&over));
-            if !lines.is_empty() {
-                let t = format!("{tag}{}", group_child::STICKY);
-                let name = child_name(group_child::STICKY);
-                let mut spec =
-                    GroupSpec::new(&t, &format!("{label} · {name}"), GroupKind::Sticky, lines);
-                spec.short = Some(name.into());
-                spec.card = false;
-                self.children.push(spec);
-                members.insert(2, t.clone());
-                sticky = Some(t);
-            }
-        }
+        let own_auto = format!("{tag}{}", group_child::AUTO);
+        // 固定出口 (a sticky policy) over its own lines when no region is
+        // preferred: what decides them all ([`with_policy_use`] keeps it
+        // on one).
+        let all_lines_auto = || {
+            [own_auto.as_str(), outbound_tags::AUTO]
+                .into_iter()
+                .find(|t| p.sticky_exit && members.iter().any(|m| m == t))
+                .map(str::to_owned)
+        };
         let fallback = if p.fallback == outbound_tags::PROXY {
-            sticky
-                .or_else(|| {
-                    p.prefer_pick
-                        .filter(|pp| members.iter().any(|m| m == pp))
-                        .map(str::to_owned)
-                })
+            p.prefer_pick
+                .filter(|pp| members.iter().any(|m| m == pp))
+                .map(str::to_owned)
                 .or_else(|| preferred.clone())
+                .or_else(all_lines_auto)
                 .unwrap_or_else(|| {
                     if allowed.len() == c.region_tags.len() {
                         return p.fallback.to_owned();
@@ -715,9 +727,8 @@ impl Layers {
                     // the first line on there; else 节点选择. Dart named the
                     // missing 自动选择, so the pick fell to the first member,
                     // DIRECT: Google / AI went direct unseen (B22).
-                    let auto = format!("{tag}{}", group_child::AUTO);
-                    if members.contains(&auto) {
-                        return auto;
+                    if members.contains(&own_auto) {
+                        return own_auto.clone();
                     }
                     allowed
                         .iter()
@@ -728,11 +739,186 @@ impl Layers {
         } else {
             p.fallback.to_owned()
         };
-        let pick = policy_pick(p, s, &members, &fallback);
+        // 固定出口 picked when it was a member of its own: the lines it
+        // went over, the switch keeping it (`built_in_sticky`).
+        let old_sticky = format!("{tag}{}", group_child::STICKY);
+        let pick = if s.policies.get(&tag) == Some(&old_sticky) {
+            preferred
+                .or_else(all_lines_auto)
+                .filter(|t| members.contains(t))
+                .unwrap_or_else(|| policy_pick(p, s, &members, &fallback))
+        } else {
+            policy_pick(p, s, &members, &fallback)
+        };
         let mut spec = GroupSpec::new(&tag, &label, GroupKind::Select, members);
         spec.pick = Some(pick);
         spec.badge = badge;
         spec
+    }
+}
+
+/// Each policy's own use of the groups among its members
+/// (`ProxySettings::policy_use`) and its 固定出口: a member it uses
+/// otherwise than as the member itself decides is replaced, in that policy
+/// only, by a copy of its own ([`policy_copy`]: tagged
+/// `<policy>@<member>…`, [`GroupSpec::origin`] naming the member, not a
+/// card); the pick follows. Without any, the groups are as they were.
+fn with_policy_use(s: &ProxySettings, mut groups: Vec<GroupSpec>) -> Vec<GroupSpec> {
+    if s.policy_use.is_empty() && !groups.iter().any(|g| s.sticky_of(&g.tag)) {
+        return groups;
+    }
+    let by_tag: HashMap<String, GroupSpec> =
+        groups.iter().map(|g| (g.tag.clone(), g.clone())).collect();
+    let mut copies = Vec::new();
+    for g in &mut groups {
+        if g.kind != GroupKind::Select || !is_policy_tag(&g.tag) {
+            continue;
+        }
+        let sticky = s.sticky_of(&g.tag);
+        for i in 0..g.members.len() {
+            let m = g.members[i].clone();
+            let Some(member) = by_tag.get(&m) else {
+                continue;
+            };
+            let picked = g.pick.as_deref() == Some(m.as_str());
+            let use_ = s.group_use(&g.tag, &m);
+            let Some(copy) = policy_copy(&g.tag, member, use_, sticky && picked, &by_tag) else {
+                continue;
+            };
+            if picked {
+                g.pick = Some(copy.tag.clone());
+            }
+            g.members[i] = copy.tag.clone();
+            copies.push(copy);
+        }
+    }
+    groups.extend(copies);
+    groups
+}
+
+/// The automatic modes a shared group offers, by its children: 智能选择
+/// (`~auto`, ♻️ 自动选择's `~smart`), 负载均衡, 速度最快.
+fn mode_child<'a>(
+    group: &GroupSpec,
+    use_: &GroupUse,
+    by_tag: &'a HashMap<String, GroupSpec>,
+) -> Option<(&'static str, &'a GroupSpec)> {
+    let (suffix, tags): (&str, &[&str]) = match use_ {
+        GroupUse::Smart => (group_child::AUTO, &["~auto", "~smart"]),
+        GroupUse::Balance => (group_child::BALANCE, &["~balance"]),
+        GroupUse::Fastest => (group_child::FASTEST, &["~fastest"]),
+        GroupUse::Line(_) => return None,
+    };
+    tags.iter()
+        .map(|t| format!("{}{t}", group.tag))
+        .find(|t| group.members.contains(t))
+        .and_then(|t| by_tag.get(&t))
+        .map(|c| (suffix, c))
+}
+
+fn is_auto_kind(k: GroupKind) -> bool {
+    matches!(
+        k,
+        GroupKind::Smart | GroupKind::Balance | GroupKind::Fastest
+    )
+}
+
+/// Policy `policy`'s copy of its member `member`, when it needs one:
+///
+/// - a shared group (a select over automatic children or lines, not a
+///   policy, not 🚀 节点选择) the policy uses in a mode of its own
+///   (`use_`): that child's kind over its lines (`@<group>~fastest` …), or
+///   a selector over the group's members on the line chosen (`@<group>`);
+///   a mode or line the group does not offer now: none (its default);
+/// - `sticky` (the policy picks this member and has 固定出口 on) and the
+///   member decides by itself — the mode chosen, the group's own default
+///   when that is one of its children, or an automatic group itself:
+///   meow's sticky smart group over the same lines (`…~sticky`). The core
+///   keeps one line for all of the policy's sites and moves it only when
+///   it fails or slows; it has no sticky 速度最快 / 负载均衡 (one
+///   `strategy`), so the mode chosen gives the lines, the smart group
+///   chooses among them.
+fn policy_copy(
+    policy: &str,
+    member: &GroupSpec,
+    use_: Option<&GroupUse>,
+    sticky: bool,
+    by_tag: &HashMap<String, GroupSpec>,
+) -> Option<GroupSpec> {
+    let base = format!("{policy}{COPY_MARK}{}", member.tag);
+    let copy = |suffix: &str, kind: GroupKind, members: &[String], name: &str| {
+        let mut c = GroupSpec::new(
+            &format!("{base}{suffix}"),
+            &format!("{} · {name}", member.label),
+            kind,
+            members.to_vec(),
+        );
+        c.card = false;
+        c.origin = Some(member.tag.clone());
+        c
+    };
+    let sticky_name = child_name(group_child::STICKY);
+    if is_auto_kind(member.kind) {
+        if !sticky {
+            return None;
+        }
+        let mut c = copy(
+            group_child::STICKY,
+            GroupKind::Sticky,
+            &member.members,
+            sticky_name,
+        );
+        c.short = member
+            .short
+            .as_ref()
+            .map(|n| format!("{n} · {sticky_name}"));
+        return Some(c);
+    }
+    if member.kind != GroupKind::Select
+        || is_policy_tag(&member.tag)
+        || member.tag == outbound_tags::PROXY
+    {
+        return None;
+    }
+    let short = |c: &GroupSpec| c.short.clone().unwrap_or_else(|| c.label.clone());
+    let chosen = use_.and_then(|u| match u {
+        GroupUse::Line(l) => member
+            .members
+            .iter()
+            .any(|m| m == l && !by_tag.contains_key(m) && m != "DIRECT" && m != "REJECT")
+            .then_some(Err(l)),
+        mode => mode_child(member, mode, by_tag).map(Ok),
+    });
+    // The mode in force: the one chosen, else the group's own default when
+    // it is one of its children.
+    let auto = match chosen {
+        Some(Ok((_, c))) => Some(c),
+        Some(Err(_)) => None,
+        None => member
+            .pick
+            .as_ref()
+            .filter(|p| group_child::parent_of(p) == member.tag)
+            .and_then(|p| by_tag.get(p))
+            .filter(|c| is_auto_kind(c.kind)),
+    };
+    if sticky {
+        if let Some(c) = auto {
+            let name = format!("{} · {sticky_name}", short(c));
+            return Some(copy(
+                group_child::STICKY,
+                GroupKind::Sticky,
+                &c.members,
+                &name,
+            ));
+        }
+    }
+    match chosen? {
+        Ok((suffix, c)) => Some(copy(suffix, c.kind, &c.members, &short(c))),
+        Err(line) => {
+            let mut c = copy("", GroupKind::Select, &member.members, line);
+            c.pick = Some(line.clone());
+            Some(c)
+        }
     }
 }
 

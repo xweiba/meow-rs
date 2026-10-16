@@ -420,7 +420,7 @@
           "name": "policy:ai",
           "type": "select",
           "proxies": [
-            "policy:ai~sticky",
+            "region:US",
             "DIRECT",
             "REJECT",
             "policy:ai~auto",
@@ -428,8 +428,7 @@
             "policy:ai~fastest",
             "proxy",
             "region:JP",
-            "region:SG",
-            "region:US"
+            "region:SG"
           ]
         },
         {
@@ -793,15 +792,6 @@
           "url": "https://www.gstatic.com/generate_204"
         },
         {
-          "name": "policy:ai~sticky",
-          "type": "smart",
-          "proxies": [
-            "US 01"
-          ],
-          "strategy": "sticky",
-          "url": "https://www.gstatic.com/generate_204"
-        },
-        {
           "name": "speedtest",
           "type": "select",
           "proxies": [
@@ -1141,7 +1131,6 @@
           "members": [
             "DIRECT",
             "REJECT",
-            "policy:ai~sticky",
             "policy:ai~auto",
             "policy:ai~balance",
             "policy:ai~fastest",
@@ -1150,7 +1139,7 @@
             "region:SG",
             "region:US"
           ],
-          "pick": "policy:ai~sticky",
+          "pick": "region:US",
           "card": true,
           "badge": "内置",
           "edited": true
@@ -1592,16 +1581,6 @@
           "members": [
             "JP 01",
             "🎥 奈飞 SG",
-            "US 01"
-          ],
-          "card": false
-        },
-        {
-          "tag": "policy:ai~sticky",
-          "label": "🤖 AI 服务 · 固定出口",
-          "short": "固定出口",
-          "kind": "sticky",
-          "members": [
             "US 01"
           ],
           "card": false
