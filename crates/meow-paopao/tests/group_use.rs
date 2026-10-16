@@ -1,6 +1,7 @@
-//! A policy's own use of a shared group (`policy_use`) and its 固定出口
-//! switch, on the whole build: the user's two examples (AI on 美国's line
-//! 1, YouTube on 美国 速度最快) and AI's 固定出口 from before.
+//! A 策略组's own use of a shared group among its members (`group_use`)
+//! and a policy's 固定出口 switch, on the whole build: the user's two
+//! examples (AI on 美国's line 1, YouTube on 美国 速度最快), AI's 固定出口
+//! from before, and 自动选择 / 节点选择 using 香港 their own way.
 
 use meow_paopao::{build, BuildInput, BuildOutput};
 use serde_json::{json, Value};
@@ -12,14 +13,20 @@ fn vless(name: &str, server: &str) -> Value {
 /// 美国 with three lines, 日本 with two, 香港 with one; `settings` merged
 /// over smart mode's defaults.
 fn input(settings: &Value) -> Value {
-    let nodes = json!([
+    input_over(&[], settings)
+}
+
+/// [`input`] with `more` lines too.
+fn input_over(more: &[(&str, &str)], settings: &Value) -> Value {
+    let mut nodes = vec![
         vless("美国 1", "u1"),
         vless("美国 2", "u2"),
         vless("美国 3", "u3"),
         vless("日本 1", "j1"),
         vless("日本 2", "j2"),
         vless("香港 1", "h1"),
-    ]);
+    ];
+    nodes.extend(more.iter().map(|(n, h)| vless(n, h)));
     let mut s = json!({"mode": "smart", "selected": "auto", "mixed_port": 7890, "rules": []});
     if let (Some(s), Some(extra)) = (s.as_object_mut(), settings.as_object()) {
         for (k, v) in extra {
@@ -37,6 +44,14 @@ fn input(settings: &Value) -> Value {
 
 fn run(settings: &Value) -> BuildOutput {
     build(&BuildInput::from_json(&input(settings)))
+}
+
+/// [`run`] with 香港 on two lines.
+fn run_hk2(settings: &Value) -> BuildOutput {
+    build(&BuildInput::from_json(&input_over(
+        &[("香港 2", "h2")],
+        settings,
+    )))
 }
 
 /// The config's `proxy-groups` entry named `name`.
@@ -72,9 +87,9 @@ const US: &str = "region:US";
 fn the_users_two_examples() {
     let out = run(&json!({
         "policies": {"policy:ai": US, "policy:youtube": US},
-        "policy_use": {
-            "policy:ai": {"groups": {US: {"use": "line", "line": "美国 1"}}},
-            "policy:youtube": {"groups": {US: {"use": "fastest"}}},
+        "group_use": {
+            "policy:ai": {"members": {US: {"use": "line", "line": "美国 1"}}},
+            "policy:youtube": {"members": {US: {"use": "fastest"}}},
         },
     }));
     // AI: a selector of its own over 美国's members, on line 1.
@@ -141,16 +156,16 @@ fn ai_keeps_its_sticky_exit_from_before_with_no_setting() {
     let old = run(&json!({"policies": {"policy:ai": "policy:ai~sticky"}}));
     assert_eq!(group(&old, "policy:ai"), group(&out, "policy:ai"));
     // Switched off: 美国 as it decides.
-    let off = run(&json!({"policy_use": {"policy:ai": {"sticky": false}}}));
+    let off = run(&json!({"group_use": {"policy:ai": {"sticky": false}}}));
     assert_eq!(group(&off, "policy:ai")["proxies"][0], US);
     assert!(!has_group(&off, "policy:ai@region:US~sticky"));
 }
 
 #[test]
-fn sticky_goes_with_the_mode_the_policy_uses() {
+fn sticky_goes_with_the_mode_the_group_uses() {
     // 速度最快 chosen with 固定出口 on: the sticky smart group over the
     // same lines (the core has no sticky 速度最快).
-    let out = run(&json!({"policy_use": {"policy:ai": {"groups": {US: {"use": "fastest"}}}}}));
+    let out = run(&json!({"group_use": {"policy:ai": {"members": {US: {"use": "fastest"}}}}}));
     assert_eq!(
         group(&out, "policy:ai")["proxies"][0],
         "policy:ai@region:US~sticky"
@@ -164,8 +179,8 @@ fn sticky_goes_with_the_mode_the_policy_uses() {
         "🇺🇸 美国 · 速度最快 · 固定出口"
     );
     // One line chosen: nothing for 固定出口 to choose.
-    let out = run(&json!({"policy_use": {"policy:ai": {"sticky": true,
-        "groups": {US: {"use": "line", "line": "美国 2"}}}}}));
+    let out = run(&json!({"group_use": {"policy:ai": {"sticky": true,
+        "members": {US: {"use": "line", "line": "美国 2"}}}}}));
     assert_eq!(
         group(&out, "policy:ai")["proxies"][0],
         "policy:ai@region:US"
@@ -175,7 +190,7 @@ fn sticky_goes_with_the_mode_the_policy_uses() {
     let out = run(&json!({"group_pick": {US: "美国 3"}}));
     assert_eq!(group(&out, "policy:ai")["proxies"][0], US);
     // YouTube on its built-in 速度最快 of every line, switched on.
-    let out = run(&json!({"policy_use": {"policy:youtube": {"sticky": true}}}));
+    let out = run(&json!({"group_use": {"policy:youtube": {"sticky": true}}}));
     let t = "policy:youtube@auto~fastest~sticky";
     assert_eq!(group(&out, "policy:youtube")["proxies"][0], t);
     assert_eq!(group(&out, t)["proxies"].as_array().unwrap().len(), 6);
@@ -187,7 +202,7 @@ fn sticky_goes_with_the_mode_the_policy_uses() {
 fn what_the_group_does_not_offer_is_its_default() {
     let out = run(&json!({
         "policies": {"policy:netflix": "region:HK"},
-        "policy_use": {"policy:netflix": {"groups": {
+        "group_use": {"policy:netflix": {"members": {
             // One line: no modes.
             "region:HK": {"use": "balance"},
             // Not one of 日本's lines.
@@ -204,7 +219,7 @@ fn what_the_group_does_not_offer_is_its_default() {
 
 #[test]
 fn without_any_use_the_config_is_as_before() {
-    let plain = run(&json!({"policy_use": {"policy:ai": {"sticky": false}}}));
+    let plain = run(&json!({"group_use": {"policy:ai": {"sticky": false}}}));
     let same = run(&json!({"policies": {"policy:ai": US}}));
     assert_eq!(plain.config, same.config);
     assert!(!plain.tree.groups.iter().any(|g| g.origin.is_some()));
@@ -214,7 +229,7 @@ fn without_any_use_the_config_is_as_before() {
 fn the_users_own_group_takes_a_use_too() {
     let out = run(&json!({
         "custom_groups": [{"id": "g1", "name": "工作", "pick": "region:JP"}],
-        "policy_use": {"group:g1": {"sticky": true, "groups": {"region:JP": {"use": "balance"}}}},
+        "group_use": {"group:g1": {"sticky": true, "members": {"region:JP": {"use": "balance"}}}},
     }));
     assert_eq!(
         group(&out, "group:g1")["proxies"][0],
@@ -222,7 +237,7 @@ fn the_users_own_group_takes_a_use_too() {
     );
     let off = run(&json!({
         "custom_groups": [{"id": "g1", "name": "工作", "pick": "region:JP"}],
-        "policy_use": {"group:g1": {"groups": {"region:JP": {"use": "balance"}}}},
+        "group_use": {"group:g1": {"members": {"region:JP": {"use": "balance"}}}},
     }));
     assert_eq!(
         group(&off, "group:g1")["proxies"][0],
@@ -240,7 +255,7 @@ fn sticky_follows_the_selectors_down_to_the_automatic_group_in_use() {
     // sticky copy goes over 智能选择's lines.
     let out = run(&json!({
         "policies": {"policy:youtube": "proxy"},
-        "policy_use": {"policy:youtube": {"sticky": true}},
+        "group_use": {"policy:youtube": {"sticky": true}},
     }));
     let t = "policy:youtube@proxy~sticky";
     assert_eq!(group(&out, "policy:youtube")["proxies"][0], t);
@@ -271,7 +286,7 @@ fn sticky_follows_the_selectors_down_to_the_automatic_group_in_use() {
         "selected": US,
         "group_pick": {US: "region:US~fastest"},
         "policies": {"policy:youtube": "proxy"},
-        "policy_use": {"policy:youtube": {"sticky": true}},
+        "group_use": {"policy:youtube": {"sticky": true}},
     }));
     assert_eq!(group(&out, "policy:youtube")["proxies"][0], t);
     assert_eq!(
@@ -297,7 +312,7 @@ fn sticky_has_nothing_to_keep_on_one_line_or_direct() {
     ] {
         let mut s = settings;
         s["policies"] = json!({"policy:youtube": "proxy"});
-        s["policy_use"] = json!({"policy:youtube": {"sticky": true}});
+        s["group_use"] = json!({"policy:youtube": {"sticky": true}});
         let out = run(&s);
         assert_eq!(
             group(&out, "policy:youtube")["proxies"][0],
@@ -318,7 +333,7 @@ fn sticky_has_nothing_to_keep_on_one_line_or_direct() {
 fn the_users_own_group_follows_the_selectors_too() {
     let on = json!({
         "custom_groups": [{"id": "g1", "name": "工作", "pick": "proxy"}],
-        "policy_use": {"group:g1": {"sticky": true}},
+        "group_use": {"group:g1": {"sticky": true}},
     });
     let out = run(&on);
     let t = "group:g1@proxy~sticky";
@@ -331,4 +346,204 @@ fn the_users_own_group_follows_the_selectors_too() {
     let out = run(&one);
     assert_eq!(group(&out, "group:g1")["proxies"][0], "proxy");
     assert!(!has_group(&out, t));
+}
+
+const HK: &str = "region:HK";
+
+#[test]
+fn auto_uses_hong_kong_on_one_line_or_its_fastest() {
+    // 自动选择 on 香港, used there on line 2 only.
+    let out = run_hk2(&json!({
+        "group_pick": {"auto": HK},
+        "group_use": {"auto": {"members": {HK: {"use": "line", "line": "香港 2"}}}},
+    }));
+    let copy = "auto@region:HK";
+    let auto = group(&out, "auto");
+    assert_eq!(auto["proxies"][0], copy, "the pick first");
+    assert!(!auto["proxies"].as_array().unwrap().contains(&json!(HK)));
+    assert_eq!(
+        group(&out, copy),
+        json!({"name": copy, "type": "select", "proxies": [
+            "香港 2", "region:HK~auto", "region:HK~balance", "region:HK~fastest", "香港 1"]})
+    );
+    assert_eq!(
+        tree(&out, copy),
+        json!({"tag": copy, "label": "🇭🇰 香港 · 香港 2", "kind": "select",
+            "members": ["region:HK~auto", "region:HK~balance", "region:HK~fastest",
+                "香港 1", "香港 2"],
+            "pick": "香港 2", "card": false, "origin": HK})
+    );
+    // 香港 itself, 节点选择 and the policies keep 香港 as it decides.
+    assert_eq!(group(&out, HK)["proxies"][0], "region:HK~auto");
+    assert!(group(&out, "proxy")["proxies"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(HK)));
+    assert!(group(&out, "policy:netflix")["proxies"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(HK)));
+    assert_eq!(out.tree.plain_members("auto"), {
+        let mut m = out.tree.by_tag("auto").unwrap().members.clone();
+        for x in &mut m {
+            if x == copy {
+                *x = HK.into();
+            }
+        }
+        m
+    });
+
+    // 速度最快 there instead, 自动选择 still on its own 智能选择.
+    let out = run_hk2(&json!({
+        "group_use": {"auto": {"members": {HK: {"use": "fastest"}}}},
+    }));
+    let copy = "auto@region:HK~fastest";
+    assert_eq!(group(&out, "auto")["proxies"][0], "auto~smart");
+    assert!(group(&out, "auto")["proxies"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(copy)));
+    assert_eq!(group(&out, copy)["type"], "smart");
+    assert_eq!(group(&out, copy)["strategy"], "throughput");
+    assert_eq!(group(&out, copy)["proxies"], json!(["香港 1", "香港 2"]));
+    assert_eq!(tree(&out, copy)["label"], "🇭🇰 香港 · 速度最快");
+    assert_eq!(tree(&out, copy)["origin"], HK);
+}
+
+#[test]
+fn proxy_uses_its_members_its_own_way_too() {
+    let out = run_hk2(&json!({
+        "selected": HK,
+        "group_use": {"proxy": {"members": {
+            HK: {"use": "balance"},
+            "auto": {"use": "fastest"},
+        }}},
+    }));
+    let proxy = group(&out, "proxy");
+    assert_eq!(proxy["proxies"][0], "proxy@region:HK~balance");
+    assert!(proxy["proxies"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("proxy@auto~fastest")));
+    assert_eq!(
+        group(&out, "proxy@auto~fastest")["proxies"],
+        group(&out, "auto~fastest")["proxies"]
+    );
+    assert_eq!(
+        tree(&out, "proxy@auto~fastest")["label"],
+        "♻️ 自动选择 · 速度最快"
+    );
+    assert_eq!(
+        group(&out, "proxy@region:HK~balance")["strategy"],
+        "consistent-hashing"
+    );
+    // 节点选择's pick is its copy of the member picked.
+    assert_eq!(
+        out.tree.by_tag("proxy").unwrap().pick.as_deref(),
+        Some("proxy@region:HK~balance")
+    );
+    // 节点选择 never gets a 固定出口 of its own.
+    let on = run_hk2(&json!({"group_use": {"proxy": {"sticky": true}}}));
+    assert!(!on.tree.groups.iter().any(|g| g.tag.starts_with("proxy@")));
+}
+
+#[test]
+fn nested_uses_each_see_what_the_member_really_uses() {
+    // 节点选择 on 自动选择, which is on 香港 used on line 2; YouTube on
+    // 节点选择 with 固定出口; Netflix on 自动选择's 速度最快 of its own.
+    let settings = json!({
+        "selected": "auto",
+        "group_pick": {"auto": HK},
+        "policies": {"policy:youtube": "proxy", "policy:netflix": "auto"},
+        "group_use": {
+            "auto": {"members": {HK: {"use": "line", "line": "香港 2"}}},
+            "proxy": {"members": {HK: {"use": "fastest"}}},
+            "policy:youtube": {"sticky": true},
+            "policy:netflix": {"members": {"auto": {"use": "fastest"}}},
+        },
+    });
+    let out = run_hk2(&settings);
+    // Each user its own copy, none of another's.
+    assert_eq!(group(&out, "auto")["proxies"][0], "auto@region:HK");
+    assert!(group(&out, "proxy")["proxies"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("proxy@region:HK~fastest")));
+    assert_eq!(group(&out, "proxy")["proxies"][0], "auto");
+    // YouTube follows 节点选择 → 自动选择 → its 香港 copy, one line: no
+    // 固定出口 to keep.
+    assert_eq!(group(&out, "policy:youtube")["proxies"][0], "proxy");
+    assert!(!has_group(&out, "policy:youtube@proxy~sticky"));
+    // Netflix: 自动选择's 速度最快, over every line.
+    assert_eq!(
+        group(&out, "policy:netflix")["proxies"][0],
+        "policy:netflix@auto~fastest"
+    );
+    assert_eq!(
+        group(&out, "policy:netflix@auto~fastest")["proxies"]
+            .as_array()
+            .unwrap()
+            .len(),
+        7
+    );
+    // 自动选择 on 香港's 速度最快 instead: YouTube's 固定出口 now goes over
+    // 香港's lines, named by the way down.
+    let mut s = settings;
+    s["group_use"]["auto"] = json!({"members": {HK: {"use": "fastest"}}});
+    let out = run_hk2(&s);
+    let t = "policy:youtube@proxy~sticky";
+    assert_eq!(group(&out, "policy:youtube")["proxies"][0], t);
+    assert_eq!(group(&out, t)["proxies"], json!(["香港 1", "香港 2"]));
+    assert_eq!(group(&out, t)["strategy"], "sticky");
+    assert_eq!(
+        tree(&out, t)["label"],
+        "🚀 节点选择 · ♻️ 自动选择 · 🇭🇰 香港 · 速度最快 · 固定出口"
+    );
+    // The same settings, the same config; every copy a known group, and
+    // no loop cut.
+    assert_eq!(run_hk2(&s).config, out.config);
+    assert!(out.tree.loops.is_empty());
+    for g in out.tree.groups.iter().filter(|g| g.origin.is_some()) {
+        for m in &g.members {
+            assert!(!m.starts_with(&g.tag), "{} in {}", m, g.tag);
+        }
+    }
+}
+
+#[test]
+fn a_subscription_group_uses_its_sub_groups() {
+    let split = json!({"groups": [
+        {"n": "Main", "t": "select", "m": ["Pick", "日本 1"]},
+        {"n": "Pick", "t": "select", "m": ["美国 1", "美国 2"]},
+    ], "rules": ["DOMAIN-SUFFIX,x.example,Main", "MATCH,DIRECT"]});
+    let settings = |uses: Value| {
+        let mut i = input(&json!({"group_use": uses}));
+        i["subscriptions"][0]["split"] = split.clone();
+        build(&BuildInput::from_json(&i))
+    };
+    let plain = settings(json!({}));
+    let main = plain
+        .tree
+        .groups
+        .iter()
+        .find(|g| g.label == "Main")
+        .expect("Main")
+        .tag
+        .clone();
+    let pick = plain
+        .tree
+        .groups
+        .iter()
+        .find(|g| g.label == "Pick")
+        .expect("Pick")
+        .tag
+        .clone();
+    let out = settings(json!({&main: {"members": {&pick: {"use": "line", "line": "美国 2"}}}}));
+    let copy = format!("{main}@{pick}");
+    assert!(group(&out, &main)["proxies"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(copy)));
+    assert_eq!(group(&out, &copy)["proxies"][0], "美国 2");
+    assert_eq!(tree(&out, &copy)["origin"], json!(pick));
 }

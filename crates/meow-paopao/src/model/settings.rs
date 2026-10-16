@@ -524,14 +524,14 @@ impl GroupEdit {
     }
 }
 
-/// How one policy uses a shared group it can point at (a region, a kind,
-/// ♻️ 自动选择, a subscription's group): one of the group's automatic
-/// children or one of its lines, for that policy only. The group's own
-/// pick stays the default for everyone else. Persisted as `{"use":
+/// How one 策略组 uses a shared group among its members (a region, a
+/// kind, ♻️ 自动选择, a subscription's group): one of that group's
+/// automatic children or one of its lines, inside the using group only.
+/// The shared group's own pick stays the default everywhere else. Persisted as `{"use":
 /// "smart" | "balance" | "fastest"}` or `{"use": "line", "line": <tag>}`;
 /// following the group's default is no entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum GroupUse {
+pub enum MemberUse {
     /// 智能选择.
     Smart,
     /// 负载均衡.
@@ -542,7 +542,7 @@ pub enum GroupUse {
     Line(String),
 }
 
-impl GroupUse {
+impl MemberUse {
     pub fn to_json(&self) -> Value {
         let mut m = Map::new();
         let name = match self {
@@ -571,36 +571,37 @@ impl GroupUse {
     }
 }
 
-/// A policy's own way of using the groups it points at
-/// ([`ProxySettings::policy_use`]).
+/// A 策略组's own way of using the shared groups among its members
+/// ([`ProxySettings::group_use`]), and a policy's 固定出口.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PolicyUse {
+pub struct GroupUse {
     /// 固定出口: every site of the policy on one line, chosen by the
     /// automatic mode it uses; None = its built-in
-    /// ([`ProxySettings::sticky_of`]).
+    /// ([`ProxySettings::sticky_of`]). Policies only ([`is_policy_tag`]):
+    /// elsewhere it is not read.
     pub sticky: Option<bool>,
-    /// Shared group tag → how this policy uses it.
-    pub groups: IndexMap<String, GroupUse>,
+    /// Member (a shared group's tag) → how this group uses it.
+    pub members: IndexMap<String, MemberUse>,
 }
 
-impl PolicyUse {
+impl GroupUse {
     pub fn is_empty(&self) -> bool {
-        self.sticky.is_none() && self.groups.is_empty()
+        self.sticky.is_none() && self.members.is_empty()
     }
 
-    /// `{"sticky"?, "groups"?}`, each only when set.
+    /// `{"sticky"?, "members"?}`, each only when set.
     pub fn to_json(&self) -> Value {
         let mut m = Map::new();
         if let Some(on) = self.sticky {
             m.insert("sticky".into(), on.into());
         }
-        if !self.groups.is_empty() {
+        if !self.members.is_empty() {
             let g = self
-                .groups
+                .members
                 .iter()
                 .map(|(k, u)| (k.clone(), u.to_json()))
                 .collect();
-            m.insert("groups".into(), Value::Object(g));
+            m.insert("members".into(), Value::Object(g));
         }
         Value::Object(m)
     }
@@ -612,8 +613,8 @@ impl PolicyUse {
         };
         Self {
             sticky: o.get("sticky").and_then(Value::as_bool),
-            groups: object(o.get("groups"))
-                .filter_map(|(k, u)| GroupUse::from_json(u).map(|u| (k.clone(), u)))
+            members: object(o.get("members"))
+                .filter_map(|(k, u)| MemberUse::from_json(u).map(|u| (k.clone(), u)))
                 .collect(),
         }
     }
@@ -633,19 +634,21 @@ pub fn built_in_sticky(tag: &str, manual: Option<&str>, default: Option<&GroupDe
         && default.is_none_or(|d| d.kind == GroupDefaultKind::Region)
 }
 
-/// A policy's own copy of a shared group is tagged
-/// `<policy>@<group><suffix>`: `~auto` / `~balance` / `~fastest` for a
-/// mode, `~sticky` for 固定出口, nothing for one line (a selector).
+/// A 策略组's own copy of a shared member group is tagged
+/// `<user>@<group><suffix>`: `~auto` / `~balance` / `~fastest` for a
+/// mode, `~sticky` for a policy's 固定出口, nothing for one line (a
+/// selector).
 pub const COPY_MARK: char = '@';
 
-/// The suffixes a policy's copy may end in.
+/// The suffixes a copy may end in.
 const COPY_SUFFIXES: [&str; 4] = ["~sticky", "~auto", "~balance", "~fastest"];
 
-/// The member `tag` stands for in policy `policy` when it is that
-/// policy's copy of it (`policy:ai@region:US~fastest` → `region:US`,
-/// `policy:ai@auto~fastest~sticky` → `auto~fastest`); None otherwise.
-pub fn copy_origin<'a>(policy: &str, tag: &'a str) -> Option<&'a str> {
-    let rest = tag.strip_prefix(policy)?.strip_prefix(COPY_MARK)?;
+/// The member `tag` stands for in group `user` when it is that group's
+/// copy of it (`policy:ai@region:US~fastest` → `region:US`,
+/// `auto@region:HK` → `region:HK`, `policy:ai@auto~fastest~sticky` →
+/// `auto~fastest`); None otherwise.
+pub fn copy_origin<'a>(user: &str, tag: &'a str) -> Option<&'a str> {
+    let rest = tag.strip_prefix(user)?.strip_prefix(COPY_MARK)?;
     let origin = COPY_SUFFIXES
         .iter()
         .find_map(|s| rest.strip_suffix(s))
@@ -653,9 +656,29 @@ pub fn copy_origin<'a>(policy: &str, tag: &'a str) -> Option<&'a str> {
     (!origin.is_empty()).then_some(origin)
 }
 
-/// Whether `tag` may have [`PolicyUse`]: a built-in policy or the user's.
+/// Whether `tag` is a business policy (built-in or the user's): the
+/// groups with a 固定出口 switch.
 pub fn is_policy_tag(tag: &str) -> bool {
     tag.starts_with(CUSTOM_GROUP_PREFIX) || policy_by_tag(tag).is_some()
+}
+
+/// Whether `tag` may be a shared group another group copies
+/// ([`COPY_MARK`]): a region, a kind, ♻️ 自动选择 or a subscription's
+/// group.
+fn is_shared_tag(tag: &str) -> bool {
+    tag == crate::model::outbound_tags::AUTO
+        || ["region:", "kind:", "sub:"]
+            .iter()
+            .any(|p| tag.starts_with(p))
+}
+
+/// `<user>@<group>` (a group's one-line copy of a shared member) as
+/// (user, group): the first `@` with a shared group after it.
+fn copy_parts(tag: &str) -> Option<(&str, &str)> {
+    tag.match_indices(COPY_MARK).find_map(|(i, _)| {
+        let (user, rest) = (&tag[..i], &tag[i + COPY_MARK.len_utf8()..]);
+        (!user.is_empty() && is_shared_tag(rest)).then_some((user, rest))
+    })
 }
 
 /// One SSH server in a chain. Its credential is not part of it: the app
@@ -801,9 +824,10 @@ pub struct ProxySettings {
     pub disabled_lines: Vec<String>,
     /// The interface direct traffic leaves by while TUN is on; None = auto.
     pub outbound_interface: Option<String>,
-    /// Policy tag (`policy:ai`, `group:<id>`) → how it uses the shared
-    /// groups it points at, and its 固定出口.
-    pub policy_use: IndexMap<String, PolicyUse>,
+    /// 策略组 tag (`policy:ai`, `group:<id>`, `auto`, `proxy` …) → how it
+    /// uses the shared groups among its members, and (policies only) its
+    /// 固定出口.
+    pub group_use: IndexMap<String, GroupUse>,
 }
 
 impl Default for ProxySettings {
@@ -833,7 +857,7 @@ impl Default for ProxySettings {
             group_edits: IndexMap::new(),
             disabled_lines: Vec::new(),
             outbound_interface: None,
-            policy_use: IndexMap::new(),
+            group_use: IndexMap::new(),
         }
     }
 }
@@ -934,21 +958,25 @@ impl ProxySettings {
             self.outbound_interface.as_ref(),
         );
         let uses: Map<String, Value> = self
-            .policy_use
+            .group_use
             .iter()
             .filter(|(_, u)| !u.is_empty())
             .map(|(k, u)| (k.clone(), u.to_json()))
             .collect();
         if !uses.is_empty() {
-            m.insert("policy_use".into(), Value::Object(uses));
+            m.insert("group_use".into(), Value::Object(uses));
         }
         Value::Object(m)
     }
 
     /// Whether policy `tag` runs with 固定出口 (where it uses an automatic
-    /// mode): its switch, else [`built_in_sticky`].
+    /// mode): its switch, else [`built_in_sticky`]. Never for a group that
+    /// is not a policy.
     pub fn sticky_of(&self, tag: &str) -> bool {
-        if let Some(on) = self.policy_use.get(tag).and_then(|u| u.sticky) {
+        if !is_policy_tag(tag) {
+            return false;
+        }
+        if let Some(on) = self.group_use.get(tag).and_then(|u| u.sticky) {
             return on;
         }
         built_in_sticky(
@@ -958,10 +986,10 @@ impl ProxySettings {
         )
     }
 
-    /// How policy `tag` uses shared group `group`; None = the group's
-    /// default.
-    pub fn group_use(&self, tag: &str, group: &str) -> Option<&GroupUse> {
-        self.policy_use.get(tag)?.groups.get(group)
+    /// How 策略组 `tag` uses its member `group` (a shared group); None =
+    /// the group's default.
+    pub fn member_use(&self, tag: &str, group: &str) -> Option<&MemberUse> {
+        self.group_use.get(tag)?.members.get(group)
     }
 
     /// Dart `fromJson` for the current format (see the module docs).
@@ -1032,8 +1060,8 @@ impl ProxySettings {
                 .collect(),
             disabled_lines: entries("disabled_lines").iter().map(dart_str).collect(),
             outbound_interface: string_field(o.get("outbound_interface")),
-            policy_use: object(o.get("policy_use"))
-                .map(|(k, v)| (k.clone(), PolicyUse::from_json(v)))
+            group_use: object(o.get("group_use"))
+                .map(|(k, v)| (k.clone(), GroupUse::from_json(v)))
                 .filter(|(_, u)| !u.is_empty())
                 .collect(),
         }
@@ -1115,9 +1143,9 @@ fn string_map(m: &IndexMap<String, String>) -> Value {
 /// from them later keeps it: 🚀 节点选择's in `selected`, a built-in
 /// policy's in `policies` (`DIRECT` / `REJECT` as `direct` / `block`), any
 /// other group's in `group_pick` (its old region strategy dropped). A
-/// policy's copy of a shared group is recorded as the group it stands for;
-/// a pick inside a policy's one-line copy (`<policy>@<group>`) is how that
-/// policy uses the group (`policy_use`). A pick that would change whether a
+/// group's copy of a shared member is recorded as the member it stands
+/// for; a pick inside a one-line copy (`<user>@<group>`) is how that
+/// group uses the member (`group_use`). A pick that would change whether a
 /// policy runs with 固定出口 by default ([`built_in_sticky`]) saves the
 /// switch as it was. The speed test's selector, Clash's `GLOBAL` and the
 /// groups' own children are no settings. True when the settings changed.
@@ -1126,10 +1154,8 @@ pub fn record_pick(settings: &mut Map<String, Value>, group: &str, member: &str)
     if group == tags::SPEED_TEST || group == "GLOBAL" || group.contains('~') {
         return false;
     }
-    if let Some((policy, shared)) = group.split_once(COPY_MARK) {
-        if is_policy_tag(policy) && !shared.is_empty() {
-            return record_use(settings, policy, shared, member);
-        }
+    if let Some((user, shared)) = copy_parts(group) {
+        return record_use(settings, user, shared, member);
     }
     let member = copy_origin(group, member).unwrap_or(member);
     let keyed = |settings: &mut Map<String, Value>, key: &str, value: &str| {
@@ -1188,7 +1214,7 @@ fn object_entry<'a>(settings: &'a mut Map<String, Value>, key: &str) -> &'a mut 
 /// (then that).
 fn raw_built_in_sticky(settings: &Map<String, Value>, policy: &str) -> bool {
     let saved = settings
-        .get("policy_use")
+        .get("group_use")
         .and_then(|u| u.get(policy))
         .and_then(|u| u.get("sticky"))
         .and_then(Value::as_bool);
@@ -1209,25 +1235,25 @@ fn raw_built_in_sticky(settings: &Map<String, Value>, policy: &str) -> bool {
 
 /// Saves policy `policy`'s 固定出口 switch as `on`.
 fn keep_sticky(settings: &mut Map<String, Value>, policy: &str, on: bool) {
-    let uses = object_entry(settings, "policy_use");
+    let uses = object_entry(settings, "group_use");
     let entry = object_entry(uses, policy);
     entry.insert("sticky".into(), on.into());
 }
 
-/// Member `member` picked in `policy`'s one-line copy of `shared`: one of
+/// Member `member` picked in `user`'s one-line copy of `shared`: one of
 /// the group's automatic children is that mode, anything else a line.
-fn record_use(settings: &mut Map<String, Value>, policy: &str, shared: &str, member: &str) -> bool {
+fn record_use(settings: &mut Map<String, Value>, user: &str, shared: &str, member: &str) -> bool {
     let mode = member.strip_prefix(shared).and_then(|suffix| match suffix {
-        "~auto" | "~smart" => Some(GroupUse::Smart),
-        "~balance" => Some(GroupUse::Balance),
-        "~fastest" => Some(GroupUse::Fastest),
+        "~auto" | "~smart" => Some(MemberUse::Smart),
+        "~balance" => Some(MemberUse::Balance),
+        "~fastest" => Some(MemberUse::Fastest),
         _ => None,
     });
     let want = mode
-        .unwrap_or_else(|| GroupUse::Line(member.to_owned()))
+        .unwrap_or_else(|| MemberUse::Line(member.to_owned()))
         .to_json();
-    let uses = object_entry(settings, "policy_use");
-    let groups = object_entry(object_entry(uses, policy), "groups");
+    let uses = object_entry(settings, "group_use");
+    let groups = object_entry(object_entry(uses, user), "members");
     if groups.get(shared) == Some(&want) {
         return false;
     }
@@ -1368,7 +1394,7 @@ mod tests {
             Value::Object(s.clone()),
             json!({"mode": "smart", "selected": "HK 01",
                 "policies": {"policy:ai": "block", "policy:google": "region:US"},
-                "policy_use": {"policy:ai": {"sticky": true}},
+                "group_use": {"policy:ai": {"sticky": true}},
                 "group_pick": {"region:HK": "HK 02"}})
         );
         // Read back as the app reads them.
@@ -1410,29 +1436,55 @@ mod tests {
             json!({
                 "policies": {"policy:youtube": "region:US", "policy:google": "auto~fastest"},
                 "group_pick": {"group:g1": "region:JP"},
-                "policy_use": {
-                    "policy:ai": {"groups": {"region:US": {"use": "line", "line": "US 1"}}},
-                    "policy:netflix": {"groups": {"region:JP": {"use": "fastest"}}},
+                "group_use": {
+                    "policy:ai": {"members": {"region:US": {"use": "line", "line": "US 1"}}},
+                    "policy:netflix": {"members": {"region:JP": {"use": "fastest"}}},
                 },
             })
         );
         let p = ProxySettings::from_json(&Value::Object(s));
         assert_eq!(
-            p.group_use("policy:ai", "region:US"),
-            Some(&GroupUse::Line("US 1".into()))
+            p.member_use("policy:ai", "region:US"),
+            Some(&MemberUse::Line("US 1".into()))
         );
         assert_eq!(
-            p.group_use("policy:netflix", "region:JP"),
-            Some(&GroupUse::Fastest)
+            p.member_use("policy:netflix", "region:JP"),
+            Some(&MemberUse::Fastest)
         );
         // Saved and read back the same.
         assert_eq!(ProxySettings::from_json(&p.to_json()), p);
     }
 
     #[test]
-    fn policy_use_reads_leniently_and_writes_only_what_is_set() {
-        let s = ProxySettings::from_json(&json!({"policy_use": {
-            "policy:ai": {"sticky": false, "groups": {
+    fn picks_in_any_groups_copies_are_how_it_uses_the_member() {
+        let mut s = Map::new();
+        // 自动选择's / 节点选择's copy picked there: the member.
+        assert!(record_pick(&mut s, "auto", "auto@region:HK~fastest"));
+        assert!(record_pick(&mut s, "proxy", "proxy@region:JP"));
+        // Inside their one-line copies: how they use the member.
+        assert!(record_pick(&mut s, "auto@region:HK", "HK 2"));
+        assert!(record_pick(&mut s, "proxy@region:JP", "region:JP~balance"));
+        assert!(record_pick(&mut s, "sub:Main@sub:A", "A 2"));
+        // A subscription's group with `@` in its name is no copy.
+        assert!(record_pick(&mut s, "sub:a@b", "B 1"));
+        assert_eq!(
+            Value::Object(s),
+            json!({
+                "group_pick": {"auto": "region:HK", "sub:a@b": "B 1"},
+                "selected": "region:JP",
+                "group_use": {
+                    "auto": {"members": {"region:HK": {"use": "line", "line": "HK 2"}}},
+                    "proxy": {"members": {"region:JP": {"use": "balance"}}},
+                    "sub:Main": {"members": {"sub:A": {"use": "line", "line": "A 2"}}},
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn group_use_reads_leniently_and_writes_only_what_is_set() {
+        let s = ProxySettings::from_json(&json!({"group_use": {
+            "policy:ai": {"sticky": false, "members": {
                 "region:US": {"use": "line", "line": "US 1"},
                 "region:JP": {"use": "line"},
                 "region:SG": {"use": "default"},
@@ -1443,8 +1495,8 @@ mod tests {
             "policy:media": 3,
         }}));
         assert_eq!(
-            s.to_json()["policy_use"],
-            json!({"policy:ai": {"sticky": false, "groups": {
+            s.to_json()["group_use"],
+            json!({"policy:ai": {"sticky": false, "members": {
                 "region:US": {"use": "line", "line": "US 1"},
                 "auto": {"use": "balance"},
             }}})
@@ -1452,7 +1504,7 @@ mod tests {
         assert!(!s.sticky_of("policy:ai"));
         assert!(ProxySettings::default()
             .to_json()
-            .get("policy_use")
+            .get("group_use")
             .is_none());
     }
 
@@ -1466,7 +1518,7 @@ mod tests {
         assert!(!of(json!({"policies": {"policy:ai": "region:JP"}})));
         assert!(!of(json!({"group_defaults": {"policy:ai": "fastest"}})));
         assert!(of(json!({"policies": {"policy:ai": "region:JP"},
-            "policy_use": {"policy:ai": {"sticky": true}}})));
+            "group_use": {"policy:ai": {"sticky": true}}})));
         // No other policy has it unless switched on.
         let s = ProxySettings::from_json(&json!({}));
         assert!(!s.sticky_of("policy:youtube"));

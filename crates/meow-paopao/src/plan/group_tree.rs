@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Map, Value};
 
 use crate::model::settings::{
-    is_policy_tag, GroupEdit, GroupMode, GroupStrategy, GroupUse, ProxySettings, COPY_MARK,
+    is_policy_tag, GroupEdit, GroupMode, GroupStrategy, MemberUse, ProxySettings, COPY_MARK,
 };
 use crate::plan::outbound_tags;
 use crate::plan::policies::{Policy, POLICIES};
@@ -26,7 +26,7 @@ pub enum GroupKind {
     /// The lowest latency member (`url-test`).
     Fastest,
     /// One member for every site, kept until it fails or slows (a
-    /// policy's 固定出口, see [`with_policy_use`]).
+    /// policy's 固定出口, see [`with_group_use`]).
     Sticky,
 }
 
@@ -62,7 +62,7 @@ pub mod group_child {
     pub const BALANCE: &str = "~balance";
     /// 速度最快.
     pub const FASTEST: &str = "~fastest";
-    /// 固定出口 (a policy's copy only, [`super::with_policy_use`]).
+    /// 固定出口 (a policy's copy only, [`super::with_group_use`]).
     pub const STICKY: &str = "~sticky";
 
     /// Whether `tag` is an automatic child (it has a `~`).
@@ -123,8 +123,8 @@ pub struct GroupSpec {
     pub raw_type: Option<String>,
     /// A built-in policy the user changed (`ProxySettings::group_edits`).
     pub edited: bool,
-    /// A policy's own copy of a member ([`with_policy_use`]): the member
-    /// it stands for in that policy.
+    /// A group's own copy of a member ([`with_group_use`]): the member
+    /// it stands for in that group.
     pub origin: Option<String>,
 }
 
@@ -356,7 +356,7 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
         select.pick = Some(pick);
         let mut all = vec![select];
         all.extend(custom_groups(s, &own_base(extras), &outlet_there));
-        return tree_without_loops(with_policy_use(s, all));
+        return tree_without_loops(with_group_use(s, all));
     }
 
     // Exactly as the subscriptions wrote it (when they wrote any groups).
@@ -386,7 +386,7 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
             })
             .collect();
         all.extend(custom_groups(s, &own_base(extras), &outlet_there));
-        return tree_without_loops(with_policy_use(s, all));
+        return tree_without_loops(with_group_use(s, all));
     }
 
     let mut b = Layers {
@@ -576,7 +576,7 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
     let mut all = built;
     all.extend(own);
     all.extend(b.children);
-    tree_without_loops(with_policy_use(s, all))
+    tree_without_loops(with_group_use(s, all))
 }
 
 /// The layered build's shared state: lines switched off, and the automatic
@@ -704,7 +704,7 @@ impl Layers {
         let preferred = chosen_region.or_else(|| p.prefer_region.and_then(in_allowed));
         let own_auto = format!("{tag}{}", group_child::AUTO);
         // 固定出口 (a sticky policy) over its own lines when no region is
-        // preferred: what decides them all ([`with_policy_use`] keeps it
+        // preferred: what decides them all ([`with_group_use`] keeps it
         // on one).
         let all_lines_auto = || {
             [own_auto.as_str(), outbound_tags::AUTO]
@@ -757,57 +757,103 @@ impl Layers {
     }
 }
 
-/// Each policy's own use of the groups among its members
-/// (`ProxySettings::policy_use`) and its 固定出口: a member it uses
-/// otherwise than as the member itself decides is replaced, in that policy
-/// only, by a copy of its own ([`policy_copy`]: tagged
-/// `<policy>@<member>…`, [`GroupSpec::origin`] naming the member, not a
-/// card); the pick follows. Without any, the groups are as they were.
-fn with_policy_use(s: &ProxySettings, mut groups: Vec<GroupSpec>) -> Vec<GroupSpec> {
-    if s.policy_use.is_empty() && !groups.iter().any(|g| s.sticky_of(&g.tag)) {
+/// Each 策略组's own use of the shared groups among its members
+/// (`ProxySettings::group_use`) and a policy's 固定出口: a member it uses
+/// otherwise than as the member itself decides is replaced, in that group
+/// only, by a copy of its own ([`member_copy`]: tagged `<user>@<member>…`,
+/// [`GroupSpec::origin`] naming the member, not a card); the pick follows.
+/// Any selector card may use its members so (节点选择, 自动选择, a policy,
+/// the user's 策略组, a subscription's group in PaoPao's layers), never a
+/// subscription's group written as is or a copy. Members go first
+/// (♻️ 自动选择 before 🚀 节点选择 before a policy), so a copy over a
+/// member that uses its own members its own way, and 固定出口 following
+/// the picks down, see what that member really uses. Without any, the
+/// groups are as they were.
+fn with_group_use(s: &ProxySettings, mut groups: Vec<GroupSpec>) -> Vec<GroupSpec> {
+    if s.group_use.is_empty() && !groups.iter().any(|g| s.sticky_of(&g.tag)) {
         return groups;
     }
-    let by_tag: HashMap<String, GroupSpec> =
+    let mut by_tag: HashMap<String, GroupSpec> =
         groups.iter().map(|g| (g.tag.clone(), g.clone())).collect();
     let mut copies = Vec::new();
-    for g in &mut groups {
-        if g.kind != GroupKind::Select || !is_policy_tag(&g.tag) {
+    for i in members_first(&groups) {
+        let g = &mut groups[i];
+        if g.kind != GroupKind::Select || !g.card || g.raw_type.is_some() || g.origin.is_some() {
             continue;
         }
         let sticky = s.sticky_of(&g.tag);
-        for i in 0..g.members.len() {
-            let m = g.members[i].clone();
+        if !sticky && !s.group_use.contains_key(&g.tag) {
+            continue;
+        }
+        for k in 0..g.members.len() {
+            let m = g.members[k].clone();
             let Some(member) = by_tag.get(&m) else {
                 continue;
             };
             let picked = g.pick.as_deref() == Some(m.as_str());
-            let use_ = s.group_use(&g.tag, &m);
-            let Some(copy) = policy_copy(&g.tag, member, use_, sticky && picked, &by_tag) else {
+            let use_ = s.member_use(&g.tag, &m);
+            let Some(copy) = member_copy(&g.tag, member, use_, sticky && picked, &by_tag) else {
                 continue;
             };
             if picked {
                 g.pick = Some(copy.tag.clone());
             }
-            g.members[i] = copy.tag.clone();
+            g.members[k] = copy.tag.clone();
+            by_tag.insert(copy.tag.clone(), copy.clone());
             copies.push(copy);
         }
+        by_tag.insert(g.tag.clone(), g.clone());
     }
     groups.extend(copies);
     groups
+}
+
+/// The groups' indexes, each group after the groups among its members
+/// (in list order otherwise; a loop is entered once, where first met).
+fn members_first(groups: &[GroupSpec]) -> Vec<usize> {
+    fn visit(
+        i: usize,
+        groups: &[GroupSpec],
+        index: &HashMap<&str, usize>,
+        seen: &mut [bool],
+        out: &mut Vec<usize>,
+    ) {
+        if seen[i] {
+            return;
+        }
+        seen[i] = true;
+        for m in &groups[i].members {
+            if let Some(&j) = index.get(m.as_str()) {
+                visit(j, groups, index, seen, out);
+            }
+        }
+        out.push(i);
+    }
+    let index: HashMap<&str, usize> = groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.tag.as_str(), i))
+        .collect();
+    let mut seen = vec![false; groups.len()];
+    let mut out = Vec::with_capacity(groups.len());
+    for i in 0..groups.len() {
+        visit(i, groups, &index, &mut seen, &mut out);
+    }
+    out
 }
 
 /// The automatic modes a shared group offers, by its children: 智能选择
 /// (`~auto`, ♻️ 自动选择's `~smart`), 负载均衡, 速度最快.
 fn mode_child<'a>(
     group: &GroupSpec,
-    use_: &GroupUse,
+    use_: &MemberUse,
     by_tag: &'a HashMap<String, GroupSpec>,
 ) -> Option<(&'static str, &'a GroupSpec)> {
     let (suffix, tags): (&str, &[&str]) = match use_ {
-        GroupUse::Smart => (group_child::AUTO, &["~auto", "~smart"]),
-        GroupUse::Balance => (group_child::BALANCE, &["~balance"]),
-        GroupUse::Fastest => (group_child::FASTEST, &["~fastest"]),
-        GroupUse::Line(_) => return None,
+        MemberUse::Smart => (group_child::AUTO, &["~auto", "~smart"]),
+        MemberUse::Balance => (group_child::BALANCE, &["~balance"]),
+        MemberUse::Fastest => (group_child::FASTEST, &["~fastest"]),
+        MemberUse::Line(_) => return None,
     };
     tags.iter()
         .map(|t| format!("{}{t}", group.tag))
@@ -823,13 +869,14 @@ fn is_auto_kind(k: GroupKind) -> bool {
     )
 }
 
-/// Policy `policy`'s copy of its member `member`, when it needs one:
+/// Group `user`'s copy of its member `member`, when it needs one:
 ///
 /// - a shared group (a select over automatic children or lines, not a
-///   policy, not 🚀 节点选择) the policy uses in a mode of its own
-///   (`use_`): that child's kind over its lines (`@<group>~fastest` …), or
-///   a selector over the group's members on the line chosen (`@<group>`);
-///   a mode or line the group does not offer now: none (its default);
+///   policy, not 🚀 节点选择) `user` uses in a mode of its own (`use_`):
+///   that child's kind over its lines (`@<group>~fastest` …), or a
+///   selector over the group's members (as it has them, its own copies
+///   included) on the line chosen (`@<group>`); a mode or line the group
+///   does not offer now: none (its default);
 /// - `sticky` (the policy picks this member and has 固定出口 on) and the
 ///   member ends on an automatic group — the mode chosen, an automatic
 ///   group itself, or where the selectors' picks lead from the member
@@ -840,14 +887,14 @@ fn is_auto_kind(k: GroupKind) -> bool {
 ///   slows; it has no sticky 速度最快 / 负载均衡 (one `strategy`), so the
 ///   automatic group gives the lines, the smart group chooses among them.
 ///   Ending on one line, DIRECT or REJECT: no copy (nothing to keep).
-fn policy_copy(
-    policy: &str,
+fn member_copy(
+    user: &str,
     member: &GroupSpec,
-    use_: Option<&GroupUse>,
+    use_: Option<&MemberUse>,
     sticky: bool,
     by_tag: &HashMap<String, GroupSpec>,
 ) -> Option<GroupSpec> {
-    let base = format!("{policy}{COPY_MARK}{}", member.tag);
+    let base = format!("{user}{COPY_MARK}{}", member.tag);
     let copy = |suffix: &str, kind: GroupKind, members: &[String], name: &str| {
         let mut c = GroupSpec::new(
             &format!("{base}{suffix}"),
@@ -883,7 +930,7 @@ fn policy_copy(
     let shared = !is_policy_tag(&member.tag) && member.tag != outbound_tags::PROXY;
     let short = |c: &GroupSpec| c.short.clone().unwrap_or_else(|| c.label.clone());
     let chosen = use_.filter(|_| shared).and_then(|u| match u {
-        GroupUse::Line(l) => member
+        MemberUse::Line(l) => member
             .members
             .iter()
             .any(|m| m == l && !by_tag.contains_key(m) && m != "DIRECT" && m != "REJECT")
