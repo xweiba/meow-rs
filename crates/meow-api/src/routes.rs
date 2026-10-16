@@ -3168,7 +3168,10 @@ pub(crate) fn paopao_reload(state: Arc<AppState>) -> crate::paopao::Reload {
                 path: Some(path.to_string_lossy().into_owned()),
                 payload: None,
             };
-            let res = put_configs(State(state), Query(HashMap::new()), Json(body)).await;
+            // In place: the connections whose line the new config still
+            // has run on (the user changed a setting, a
+            // refresh brought lines), unlike an outside `PUT /configs`.
+            let res = apply_configs(state, false, body, true).await;
             let status = res.status();
             if status.is_success() {
                 return Ok(());
@@ -3190,7 +3193,19 @@ async fn put_configs(
     Json(body): Json<PutConfigsBody>,
 ) -> Response {
     let force = params.get("force").is_some_and(|v| v == "true");
+    apply_configs(state, force, body, false).await
+}
 
+/// `PUT /configs`; `keep_connections` (PaoPao's own reload,
+/// [`paopao_reload`]): the routing swap keeps the established connections
+/// whose line the new config still has ([`meow_tunnel::Tunnel::reload_routing_keeping`])
+/// instead of closing them all (the cold reload's contract).
+async fn apply_configs(
+    state: Arc<AppState>,
+    force: bool,
+    body: PutConfigsBody,
+    keep_connections: bool,
+) -> Response {
     let yaml =
         match (body.path, body.payload) {
             (Some(p), _) => match tokio::fs::read_to_string(&p).await {
@@ -3557,9 +3572,15 @@ async fn put_configs(
     if let Some(dns) = &dns {
         install_resolver_everywhere(&state.tunnel, state.dns_server.as_ref(), dns);
     }
-    let dropped = state
-        .tunnel
-        .reload_routing(proxies, rules, mode, dialer_registry);
+    let dropped = if keep_connections {
+        state
+            .tunnel
+            .reload_routing_keeping(proxies, rules, mode, dialer_registry)
+    } else {
+        state
+            .tunnel
+            .reload_routing(proxies, rules, mode, dialer_registry)
+    };
     if dropped > 0 {
         tracing::warn!(
             connections_dropped = dropped,
@@ -3582,14 +3603,20 @@ async fn put_configs(
     );
 
     // `reload_routing` above ran after the pre-install and cancelled every
-    // tracked TCP flow; any admitted since dialled under the binding.
+    // tracked TCP flow; any admitted since dialled under the binding. The
+    // kept ones (PaoPao's) are cancelled there only when the outbound
+    // binding changed under them.
     swap_config_and_reconcile_tun(
         &state,
         raw_config,
         dns,
         prior_resolver,
         preinstalled,
-        TrackedTcp::AlreadyCancelled,
+        if keep_connections {
+            TrackedTcp::Cancel
+        } else {
+            TrackedTcp::AlreadyCancelled
+        },
     )
     .await;
 

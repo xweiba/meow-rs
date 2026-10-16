@@ -1370,6 +1370,42 @@ impl Tunnel {
         closed
     }
 
+    /// PaoPao's hot reload (the app's settings, a refresh it rebuilt for):
+    /// publishes the new routing like [`Self::update_routing`] and keeps
+    /// every established TCP flow whose line — the outbound it left by, the
+    /// first of its chain — still exists in `proxies`; only the ones riding
+    /// a line the new config no longer has are closed. The groups it went
+    /// through do not count: a group renamed or gone (a policy's 固定出口
+    /// switched off removes its copy of a region) changes how new
+    /// connections are routed, not the socket an established one already
+    /// has to its line. New connections take the new rules and picks
+    /// (「仅对新连接生效」). Returns how many were closed.
+    ///
+    /// Unlike [`Self::reload_routing`] the TCP generation stays: a setup
+    /// already deciding finishes on the old decision (its outbound object
+    /// lives as long as the flow holds it), as on the warm path.
+    pub fn reload_routing_keeping(
+        &self,
+        proxies: HashMap<SmolStr, Arc<dyn Proxy>>,
+        rules: Vec<Box<dyn Rule>>,
+        mode: Option<TunnelMode>,
+        dialer_registry: meow_proxy::dialer::ProxyRegistry,
+    ) -> usize {
+        let names: std::collections::HashSet<SmolStr> = proxies.keys().cloned().collect();
+        let old = self.install_routing(Arc::new(RouteTable::new(proxies, rules, dialer_registry)));
+        if let Some(mode) = mode {
+            self.set_mode(mode);
+        }
+        let closed = self.inner.stats.close_connections_where(|info| {
+            info.chains
+                .first()
+                .is_some_and(|line| !names.contains(&**line))
+        });
+        drop(old);
+        info!(closed, "Routing configuration reloaded, connections kept");
+        closed
+    }
+
     /// Close every UDP session the tunnel can reach and return how many:
     /// the tunnel's own NAT table (drained, each conn closed) plus every
     /// listener-owned flow holding a [`udp::UdpFlushWatch`] — those end on
@@ -3172,5 +3208,62 @@ mod tests {
             survivor.run_until_closed(async { "relay" }).await,
             Some("relay")
         );
+    }
+
+    /// PaoPao's hot reload keeps the connections whose line the new config
+    /// still has (whatever became of their groups) and closes only the
+    /// rest; the cold reload closes them all.
+    #[test]
+    fn reload_keeping_closes_only_vanished_chains() {
+        let tunnel = test_tunnel();
+        let direct = meow_config::rebuild_from_raw(&Default::default())
+            .unwrap()
+            .proxies
+            .remove("DIRECT")
+            .unwrap();
+        let table = |names: &[&str]| -> HashMap<SmolStr, Arc<dyn Proxy>> {
+            names
+                .iter()
+                .map(|n| (SmolStr::new(n), Arc::clone(&direct)))
+                .collect()
+        };
+        tunnel.update_routing(
+            table(&["US 03", "US 04", "AI", "DIRECT"]),
+            vec![],
+            Default::default(),
+        );
+        let stats = tunnel.statistics();
+        let track = |chain: &[&str]| {
+            stats.track_connection(
+                Metadata::default(),
+                "MATCH".into(),
+                "".into(),
+                chain.iter().map(|h| Arc::<str>::from(*h)).collect(),
+            )
+        };
+        let kept = track(&["US 03", "AI"]);
+        let direct_conn = track(&["DIRECT"]);
+        let gone = track(&["US 04", "AI"]);
+        // Its group gone (固定出口 off), its line still there: kept.
+        let regrouped = track(&["US 03", "AI@US~sticky", "AI"]);
+        let closed = tunnel.reload_routing_keeping(
+            table(&["US 03", "AI", "DIRECT"]),
+            vec![],
+            Some(TunnelMode::Global),
+            Default::default(),
+        );
+        assert_eq!(closed, 1);
+        let live: Vec<_> = stats.active_connections().iter().map(|c| c.id).collect();
+        assert!(live.contains(&kept) && live.contains(&direct_conn));
+        assert!(live.contains(&regrouped));
+        assert!(!live.contains(&gone));
+        assert_eq!(tunnel.mode(), TunnelMode::Global);
+        assert!(tunnel.route_snapshot().proxies.contains_key("AI"));
+        // The cold reload: all of them.
+        assert_eq!(
+            tunnel.reload_routing(table(&["US 03", "AI"]), vec![], None, Default::default()),
+            3
+        );
+        assert_eq!(stats.active_connection_count(), 0);
     }
 }

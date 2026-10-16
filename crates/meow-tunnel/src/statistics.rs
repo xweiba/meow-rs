@@ -465,6 +465,27 @@ impl Statistics {
         }
         closed
     }
+
+    /// PaoPao: request closure of the tracked TCP connections `close` picks
+    /// (by their entry) and remove their entries; the rest, and the
+    /// headless flows, run on. Returns the number of closure requests.
+    pub fn close_connections_where(&self, close: impl Fn(&ConnectionInfo) -> bool) -> usize {
+        let mut ended = Vec::new();
+        self.connections.retain(|_, info| {
+            if !close(info) {
+                return true;
+            }
+            info.counters.close();
+            ended.push(info.clone());
+            false
+        });
+        let closed = ended.len();
+        ended.sort_by_key(|info| info.seq);
+        for info in ended {
+            self.remember(info);
+        }
+        closed
+    }
 }
 
 impl Default for Statistics {
