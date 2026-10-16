@@ -298,7 +298,7 @@ impl SmartGroup {
             loads: Loads::default(),
             started: std::sync::atomic::AtomicBool::new(false),
             refresh_minutes: AtomicU64::new(DEFAULT_REFRESH.as_secs() / 60),
-            speed_urls: SPEED_URLS.iter().map(|u| u.to_string()).collect(),
+            speed_urls: SPEED_URLS.iter().map(ToString::to_string).collect(),
             speed_tests: Arc::new(Semaphore::new(SPEED_PROBE_CONCURRENCY)),
             sticky: std::sync::atomic::AtomicBool::new(false),
             streams: parking_lot::Mutex::new(Vec::new()),

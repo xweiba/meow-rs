@@ -48,8 +48,16 @@ fn test_state_ephemeral(raw: RawConfig) -> Arc<AppState> {
 }
 
 fn test_state_with_backing(raw: RawConfig, config_path: Option<String>) -> Arc<AppState> {
+    test_state_with_dns(raw, config_path, "8.8.8.8:53")
+}
+
+fn test_state_with_dns(
+    raw: RawConfig,
+    config_path: Option<String>,
+    nameserver: &str,
+) -> Arc<AppState> {
     let resolver = Arc::new(Resolver::new(
-        vec!["8.8.8.8:53".parse().unwrap()],
+        vec![nameserver.parse().unwrap()],
         vec![],
         DnsMode::Normal,
         DomainTrie::new(),
@@ -3701,7 +3709,9 @@ async fn post_dns_query_returns_known_host() {
 /// POST /dns/query for an unknown name returns `answer: null`.
 #[tokio::test]
 async fn post_dns_query_unknown_name_returns_null_answer() {
-    let state = test_state_default();
+    // A nameserver that never answers: a real one may be behind a fake-ip
+    // DNS hijack (a proxy running on the test machine) and answer anything.
+    let state = test_state_with_dns(test_raw_config(), None, "127.0.0.1:9");
     let app = create_router(state);
     let resp = app
         .oneshot(
