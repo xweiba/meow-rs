@@ -40,12 +40,15 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::{Mutex, Notify};
 
-use super::store::{InputHead, Schedule, Store, SubHead};
+use super::store::{InputHead, ModuleHead, Schedule, Store, SubHead};
 use super::{Output, Runner, EXIT_OK};
 
 /// Time for one subscription: up to four downloads (directly, through the
 /// core, each once more with a last `/`) of 30 s each, and the parse.
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(150);
+/// Time for one module: its text, its scripts and data, 30 s each at
+/// most (twice where the first try got no answer).
+const MODULE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Time for merging and building.
 const APPLY_TIMEOUT: Duration = Duration::from_secs(60);
 /// The scheduler looks at the clock again at least this often (a suspend,
@@ -78,6 +81,21 @@ pub struct Service {
     wake: Notify,
     /// A schedule minute (tests make it shorter).
     minute: Duration,
+    /// The exit lookups ([`super::exits`]).
+    exits: super::exits::Exits,
+    /// The schedule changed, or an input was handed over (true).
+    exits_wake: Notify,
+    exits_handed: AtomicBool,
+    /// How the network is looked at ([`super::network`]).
+    network: (super::network::Look, super::network::TryIpv6),
+    network_wake: Notify,
+    /// The route API while it listens ([`super::route`]).
+    route: parking_lot::Mutex<Option<super::route::Listening>>,
+    /// A trip started or ended ([`super::track`]).
+    track_wake: Notify,
+    /// The built-in 虚拟定位 module is on, as the input last handed over
+    /// says (None: not read yet).
+    location_on: Mutex<Option<bool>>,
 }
 
 /// Why a job did not run.
@@ -114,6 +132,9 @@ impl std::fmt::Display for JobError {
 pub struct Report {
     /// Each subscription refreshed, with its problem.
     pub refreshed: Vec<Refreshed>,
+    /// Each rewrite module refreshed (a refresh of all), with its problem.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub modules: Vec<Refreshed>,
     /// `input.json` changed (lines, or only a problem shown).
     pub input_changed: bool,
     /// A config was built.
@@ -133,7 +154,7 @@ pub struct Refreshed {
     pub error: Option<String>,
 }
 
-fn now_ms() -> i64 {
+pub(super) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
@@ -162,7 +183,98 @@ impl Service {
             input: Mutex::new(()),
             wake: Notify::new(),
             minute: Duration::from_secs(60),
+            exits: super::exits::Exits::new(
+                Arc::new(|_, _| Box::pin(async { None })),
+                Arc::new(|_| Box::pin(async { None })),
+            ),
+            exits_wake: Notify::new(),
+            exits_handed: AtomicBool::new(false),
+            network: (
+                Arc::new(|| Box::pin(async { super::network::Net::unknown() })),
+                Arc::new(|| Box::pin(async { false })),
+            ),
+            network_wake: Notify::new(),
+            route: parking_lot::Mutex::new(None),
+            track_wake: Notify::new(),
+            location_on: Mutex::new(None),
         }
+    }
+
+    /// Exits looked up through `ask` (a line's adapter), servers resolved
+    /// by `resolve` ([`super::exits::real_ask`], [`super::exits::real_resolve`]).
+    pub fn with_exits(mut self, ask: super::exits::Ask, resolve: super::exits::Resolve) -> Self {
+        self.exits = super::exits::Exits::new(ask, resolve);
+        self
+    }
+
+    /// The network looked at by `look`, IPv6 tried by `try_ipv6`
+    /// ([`super::network::real_look`], [`super::network::real_try_ipv6`]).
+    pub fn with_network(
+        mut self,
+        look: super::network::Look,
+        try_ipv6: super::network::TryIpv6,
+    ) -> Self {
+        self.network = (look, try_ipv6);
+        self
+    }
+
+    pub(super) fn exits_job(&self) -> &super::exits::Exits {
+        &self.exits
+    }
+
+    /// The first exit round after a hand-over waits this long.
+    pub(super) fn locate_after(&self) -> Duration {
+        self.minute / 4
+    }
+
+    /// Exit rounds after that.
+    pub(super) fn check_every(&self) -> Duration {
+        self.minute * 30
+    }
+
+    /// The schedule changed or an input came: true for an input.
+    pub(super) async fn exits_woken(&self) -> bool {
+        self.exits_wake.notified().await;
+        self.exits_handed.swap(false, Ordering::Relaxed)
+    }
+
+    pub(super) fn network_watch(&self) -> &(super::network::Look, super::network::TryIpv6) {
+        &self.network
+    }
+
+    /// The network is looked at this often.
+    pub(super) fn watch_every(&self) -> Duration {
+        self.minute / 6
+    }
+
+    pub(super) async fn network_woken(&self) {
+        self.network_wake.notified().await;
+    }
+
+    pub(super) fn route_listener(&self) -> &parking_lot::Mutex<Option<super::route::Listening>> {
+        &self.route
+    }
+
+    pub(super) fn wake_track(&self) {
+        self.track_wake.notify_one();
+    }
+
+    pub(super) async fn track_woken(&self) {
+        self.track_wake.notified().await;
+    }
+
+    /// The running config's `mixed-port`.
+    pub(super) fn mixed_port(&self) -> Option<u16> {
+        self.raw_config.read().mixed_port.filter(|&p| p != 0)
+    }
+
+    /// Whether the built-in 虚拟定位 module is on (None: no input).
+    pub(super) async fn location_module_on(&self) -> Option<bool> {
+        let mut on = self.location_on.lock().await;
+        if on.is_none() {
+            *on = self.input_head().await.ok().map(|h| location_on_in(&h));
+        }
+        *on
     }
 
     /// Configs built here keep the API at `controller` (`host:port`) with
@@ -197,21 +309,26 @@ impl Service {
     }
 
     /// Keeps `body` as the build input: checked to be one, written whole,
-    /// the records of subscriptions it no longer has removed. Its
-    /// subscriptions' count.
+    /// the records of subscriptions and modules it no longer has removed;
+    /// what it was built for (the network) noted. Its subscriptions' count.
     pub async fn store_input(&self, body: Bytes) -> Result<usize, JobError> {
         let head = InputHead::parse(&body).map_err(JobError::Invalid)?;
         let _input = self.input.lock().await;
         let store = self.store.clone();
+        let kept = head.clone();
         let n = tokio::task::spawn_blocking(move || {
+            let head = kept;
             super::store::write_atomic(&store.input(), &body, true)
                 .map_err(|e| JobError::Failed(format!("cannot keep the build input: {e}")))?;
-            let keep: std::collections::HashSet<String> = head
-                .subscriptions
-                .iter()
-                .map(|s| format!("{}.json", super::store::file_name_for(&s.id)))
-                .collect();
-            if let Ok(dir) = std::fs::read_dir(store.subscriptions()) {
+            let file = |id: &str| format!("{}.json", super::store::file_name_for(id));
+            let subs: std::collections::HashSet<String> =
+                head.subscriptions.iter().map(|s| file(&s.id)).collect();
+            let modules: std::collections::HashSet<String> =
+                head.modules.iter().map(|m| file(&m.id)).collect();
+            for (dir, keep) in [(store.subscriptions(), subs), (store.modules(), modules)] {
+                let Ok(dir) = std::fs::read_dir(dir) else {
+                    continue;
+                };
                 for e in dir.flatten() {
                     let name = e.file_name().to_string_lossy().into_owned();
                     if name.ends_with(".json") && !keep.contains(&name) {
@@ -225,6 +342,12 @@ impl Service {
         .map_err(|e| JobError::Failed(e.to_string()))??;
         self.handed.store(true, Ordering::Relaxed);
         self.wake.notify_one();
+        *self.location_on.lock().await = Some(location_on_in(&head));
+        self.network_handed(head.network, head.ipv6);
+        self.exits.fresh.store(true, Ordering::Relaxed);
+        self.exits_handed.store(true, Ordering::Relaxed);
+        self.exits_wake.notify_one();
+        self.network_wake.notify_one();
         Ok(n)
     }
 
@@ -252,12 +375,28 @@ impl Service {
         enabled: Option<bool>,
         minutes: Option<u32>,
     ) -> Result<Schedule, String> {
+        self.set_jobs(ScheduleChange {
+            enabled,
+            minutes,
+            ..ScheduleChange::default()
+        })
+        .await
+    }
+
+    /// Sets what `change` says of the schedule and wakes the jobs.
+    pub async fn set_jobs(&self, change: ScheduleChange) -> Result<Schedule, String> {
         let mut s = self.schedule().await;
-        if let Some(e) = enabled {
+        if let Some(e) = change.enabled {
             s.enabled = e;
         }
-        if let Some(m) = minutes {
+        if let Some(m) = change.minutes {
             s.minutes = m;
+        }
+        if let Some(e) = change.exits {
+            s.exits = e;
+        }
+        if let Some(n) = change.network {
+            s.network = n;
         }
         let store = self.store.clone();
         let written = s.clone();
@@ -266,6 +405,8 @@ impl Service {
             .map_err(|e| e.to_string())?
             .map_err(|e| format!("cannot keep the schedule: {e}"))?;
         self.wake.notify_one();
+        self.exits_wake.notify_one();
+        self.network_wake.notify_one();
         Ok(s)
     }
 
@@ -275,12 +416,22 @@ impl Service {
     }
 
     /// Refreshes the input's subscriptions (`only`: that one), one at a
-    /// time, then merges, rebuilds and reloads as described above. A
+    /// time, then (a refresh of all) its rewrite modules downloaded from
+    /// the web, then merges, rebuilds and reloads as described above. A
     /// refresh of all of them counts as the schedule's run.
     pub async fn refresh(&self, only: Option<&str>) -> Result<Report, JobError> {
         let runner = self.runner.clone().ok_or(JobError::Unavailable)?;
         let _job = self.job.try_lock().map_err(|_| JobError::Busy)?;
-        let mut subs = self.input_head().await?.subscriptions;
+        let head = self.input_head().await?;
+        let mut subs = head.subscriptions;
+        let modules: Vec<ModuleHead> = if only.is_none() {
+            head.modules
+                .into_iter()
+                .filter(ModuleHead::is_remote)
+                .collect()
+        } else {
+            Vec::new()
+        };
         if let Some(id) = only {
             subs.retain(|s| s.id == id);
             if subs.is_empty() {
@@ -313,8 +464,30 @@ impl Service {
                 }
             }
         }
-        if !recorded.is_empty() {
-            self.rebuild(&runner, &recorded, false, &mut report).await;
+        let mut fresh_modules = Vec::new();
+        for m in &modules {
+            let error = match self.refresh_module(&runner, m, proxy.as_deref()).await {
+                Ok(error) => {
+                    fresh_modules.push(m.id.clone());
+                    error
+                }
+                Err(why) => {
+                    tracing::warn!("paopao module {}: {why}", m.id);
+                    Some(why)
+                }
+            };
+            report.modules.push(Refreshed {
+                id: m.id.clone(),
+                error,
+            });
+        }
+        if !recorded.is_empty() || !fresh_modules.is_empty() {
+            let change = Change {
+                ids: &recorded,
+                modules: &fresh_modules,
+                ..Change::default()
+            };
+            self.rebuild(&runner, change, &mut report).await;
         }
         if only.is_none() {
             self.ran(report.error.clone()).await;
@@ -329,7 +502,31 @@ impl Service {
         let runner = self.runner.clone().ok_or(JobError::Unavailable)?;
         let _job = self.job.try_lock().map_err(|_| JobError::Busy)?;
         let mut report = Report::default();
-        self.rebuild(&runner, &[], true, &mut report).await;
+        let change = Change {
+            always: true,
+            ..Change::default()
+        };
+        self.rebuild(&runner, change, &mut report).await;
+        super::give_back();
+        Ok(report)
+    }
+
+    /// Rebuilds with the input's top-level keys in `set` replaced (what the
+    /// core measured or saw: exits, the network), run when the config
+    /// differs. Waits for a job that runs (a refresh, another of these)
+    /// rather than being refused: what it brings must not be lost.
+    pub async fn apply_set(&self, set: serde_json::Map<String, Value>) -> Result<Report, JobError> {
+        let runner = self.runner.clone().ok_or(JobError::Unavailable)?;
+        let _job = self.job.lock().await;
+        if !self.store.input().exists() {
+            return Err(JobError::NoInput);
+        }
+        let mut report = Report::default();
+        let change = Change {
+            set: Some(Value::Object(set)),
+            ..Change::default()
+        };
+        self.rebuild(&runner, change, &mut report).await;
         super::give_back();
         Ok(report)
     }
@@ -354,15 +551,43 @@ impl Service {
         Ok(v.get("error").and_then(Value::as_str).map(str::to_owned))
     }
 
-    /// Merges the records of `ids` into the input, builds when lines
-    /// changed (`always`: in any case), runs the config when it differs.
-    async fn rebuild(&self, runner: &Runner, ids: &[String], always: bool, report: &mut Report) {
+    /// One rewrite module refreshed by a child, which writes its scripts
+    /// and its record; its problem (None: it worked), or why no record was
+    /// written.
+    async fn refresh_module(
+        &self,
+        runner: &Runner,
+        m: &ModuleHead,
+        proxy: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let values: serde_json::Map<String, Value> = m
+            .values
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone().into()))
+            .collect();
         let req = json!({
             "dir": self.store.dir(),
-            "ids": ids,
+            "id": m.id,
+            "url": m.url,
+            "values": values,
+            "proxy": proxy,
+        });
+        let v = small(runner, "module", req, MODULE_TIMEOUT).await?;
+        Ok(v.get("error").and_then(Value::as_str).map(str::to_owned))
+    }
+
+    /// Merges what `change` brings into the input, builds when that changed
+    /// what the config is built from (`always`: in any case), runs the
+    /// config when it differs.
+    async fn rebuild(&self, runner: &Runner, change: Change<'_>, report: &mut Report) {
+        let req = json!({
+            "dir": self.store.dir(),
+            "ids": change.ids,
+            "modules": change.modules,
+            "set": change.set.unwrap_or_else(|| json!({})),
             "config": self.config_path,
             "now": now_ms(),
-            "build": always,
+            "build": change.always,
             "keep": self.own_runtime(),
         });
         let applied = {
@@ -426,6 +651,35 @@ impl Service {
         let store = self.store.clone();
         let _ = tokio::task::spawn_blocking(move || s.write(&store)).await;
     }
+}
+
+/// What `PUT /paopao/schedule` changes (None: as it is).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScheduleChange {
+    pub enabled: Option<bool>,
+    pub minutes: Option<u32>,
+    pub exits: Option<bool>,
+    pub network: Option<bool>,
+}
+
+/// The input's built-in 虚拟定位 module is on.
+fn location_on_in(head: &InputHead) -> bool {
+    head.modules
+        .iter()
+        .any(|m| m.url == super::track::LOCATION_MODULE && m.enabled)
+}
+
+/// What a rebuild takes in.
+#[derive(Default)]
+struct Change<'a> {
+    /// Subscriptions refreshed.
+    ids: &'a [String],
+    /// Modules refreshed.
+    modules: &'a [String],
+    /// Top-level input keys replaced.
+    set: Option<Value>,
+    /// Built even when nothing changed.
+    always: bool,
 }
 
 /// `next` over `path`: renamed, or copied where a rename cannot (another

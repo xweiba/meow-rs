@@ -1,6 +1,7 @@
 //! L1: subscription bodies → nodes, provider split and usage.
 
 mod clash;
+pub mod module;
 mod outbound;
 mod parser;
 mod uri;

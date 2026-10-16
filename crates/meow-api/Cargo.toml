@@ -43,6 +43,7 @@ base64 = "0.22"
 prometheus-client = "0.22"
 hickory-proto = { workspace = true }
 smol_str = { workspace = true }
+indexmap = { version = "2", features = ["serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

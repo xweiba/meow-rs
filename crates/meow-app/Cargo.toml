@@ -124,6 +124,8 @@ serde = { workspace = true }
 # A refreshed subscription's body is recorded by its SHA-256.
 sha2 = { workspace = true }
 hex = { workspace = true }
+# A module's scripts are named relative to it.
+url = "2"
 
 [target.'cfg(windows)'.dependencies]
 tracing-appender = "0.2.5"

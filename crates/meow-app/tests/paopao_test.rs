@@ -1,4 +1,4 @@
-//! `meow paopao parse|build|fetch|refresh|apply` (the children behind
+//! `meow paopao parse|build|fetch|refresh|module|apply` (the children behind
 //! `/paopao/…`): the stdin/stdout contract against the library they wrap,
 //! and the API routes on a running core — its own refresh, rebuild and
 //! reload included — against a local subscription server.
@@ -636,4 +636,263 @@ async fn a_rebuilt_config_keeps_the_running_cores_api_and_port() {
     // Still reached where it was, with its secret; the lines are in.
     assert!(proxy_names(api_port).await.contains(&"HK 01".to_owned()));
     assert!(TcpStream::connect(("127.0.0.1", mixed_port)).await.is_ok());
+}
+
+const MODULE: &str = "#!name=Test {{{who}}}\n#!arguments=who:me\n\
+    [Script]\nfix = type=http-response, pattern=^https://a\\.example/x, script-path=s.js, argument=w={{{who}}}\n\
+    [Map Local]\n^https://a\\.example/ad data-type=json data=\"data.json\"\n\
+    ^https://a\\.example/remote data-type=json data=\"PLACEHOLDER/data.json\"\n\
+    [MITM]\nhostname = a.example\n";
+
+/// A module server: `/m.sgmodule` ([`MODULE`]), its script `/s.js` and
+/// its data `/data.json`; `/bad.sgmodule` has a script that is gone; the
+/// rest 404.
+async fn module_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    let module = MODULE.replace("PLACEHOLDER", &base);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else {
+                return;
+            };
+            let module = module.clone();
+            tokio::spawn(async move {
+                let head = read_head(&mut s).await;
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_owned();
+                let body = match path.as_str() {
+                    "/m.sgmodule" => Some(module),
+                    "/bad.sgmodule" => Some(module.replace("s.js", "gone.js")),
+                    "/s.js" => Some("$done({})".to_owned()),
+                    "/data.json" => Some("{\"ads\":[]}".to_owned()),
+                    _ => None,
+                };
+                let res = match body {
+                    Some(b) => format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{b}", b.len()),
+                    None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_owned(),
+                };
+                let _ = s.write_all(res.as_bytes()).await;
+                let _ = s.shutdown().await;
+            });
+        }
+    });
+    base
+}
+
+#[tokio::test]
+async fn a_module_refresh_keeps_its_scripts_and_spec_as_the_app_would() {
+    let base = module_server().await;
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join("paopao");
+    let url = format!("{base}/m.sgmodule");
+    let mut input = handed_over("http://127.0.0.1:1/sub", 9090, 7890);
+    input["modules"] = json!([{"id": "m1", "url": url, "enabled": true,
+        "spec": {"name": "old", "scripts": [], "rewrites": [], "hostnames": [], "rules": []},
+        "source": "old", "values": {"who": "you"}}]);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("input.json"), input.to_string()).unwrap();
+    let record = || -> Value {
+        serde_json::from_str(&std::fs::read_to_string(dir.join("modules/m1.json")).unwrap())
+            .unwrap()
+    };
+
+    let req = json!({ "dir": dir, "id": "m1", "url": url, "values": {"who": "you"} });
+    let (out, code) = child("module", &req.to_string()).await;
+    assert_eq!(
+        (code, serde_json::from_str::<Value>(&out).unwrap()),
+        (0, json!({"id": "m1", "error": null}))
+    );
+    let r = record();
+    assert_eq!(r["spec"]["name"], "Test you");
+    assert_eq!(r["spec"]["scripts"][0]["argument"], "w=you");
+    assert_eq!(r["values"], json!({"who": "you"}));
+    assert_eq!(r["source"], MODULE.replace("PLACEHOLDER", &base));
+    assert_eq!(r["updated"], r["checked"]);
+    // Map Local data by URL is kept with the module; a plain one stays.
+    let rewrites = r["spec"]["rewrites"].as_array().unwrap();
+    assert_eq!(rewrites[0]["action"]["text"], "data.json");
+    assert_eq!(rewrites[1]["action"]["text"], "{\"ads\":[]}");
+    assert!(rewrites[1]["action"].get("dataUrl").is_none());
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("modules/m1/0.js")).unwrap(),
+        "$done({})"
+    );
+
+    // Merged into the input, then built.
+    let config = home.path().join("config.yaml");
+    let req = json!({ "dir": dir, "modules": ["m1"], "config": config, "now": 1 });
+    let (out, code) = child("apply", &req.to_string()).await;
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap()["rebuilt"],
+        true
+    );
+    let kept: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("input.json")).unwrap()).unwrap();
+    assert_eq!(kept["modules"][0]["spec"], r["spec"]);
+    assert_eq!(kept["modules"][0]["source"], r["source"]);
+    assert!(dir.join("policies.json").exists());
+    // Taken in already: nothing to do.
+    let (out, _) = child("apply", &req.to_string()).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap()["rebuilt"],
+        false
+    );
+
+    // A script gone: the problem in the app's words, the old spec kept.
+    let bad = format!("{base}/bad.sgmodule");
+    let req = json!({ "dir": dir, "id": "m1", "url": bad, "values": {"who": "you"} });
+    let (out, _) = child("module", &req.to_string()).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap()["error"],
+        "模块中的脚本下载失败（404）"
+    );
+    let failed = record();
+    assert_eq!(failed["spec"], r["spec"]);
+    assert_eq!(failed["updated"], r["updated"]);
+    assert_eq!(failed["last_error"], "模块中的脚本下载失败（404）");
+    // Not merged: it did not work.
+    let req = json!({ "dir": dir, "modules": ["m1"], "config": config, "now": 1 });
+    let (out, _) = child("apply", &req.to_string()).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap()["input_changed"],
+        false
+    );
+
+    // Unreachable and not a module.
+    let req =
+        json!({ "dir": dir, "id": "m2", "url": format!("http://127.0.0.1:{}/x", free_port()) });
+    let (out, _) = child("module", &req.to_string()).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap()["error"],
+        "模块下载失败，请检查链接和网络"
+    );
+    let req = json!({ "dir": dir, "id": "m3", "url": format!("{base}/nope") });
+    let (out, _) = child("module", &req.to_string()).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap()["error"],
+        "模块下载失败（404）"
+    );
+    let req = json!({ "dir": dir, "id": "m4", "url": format!("{base}/s.js") });
+    let (out, _) = child("module", &req.to_string()).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap()["error"],
+        "这个链接中没有可用的模块内容"
+    );
+}
+
+#[tokio::test]
+async fn apply_puts_what_the_core_measured_into_the_input() {
+    let store = tempfile::tempdir().unwrap();
+    let dir = store.path();
+    let input = handed_over("http://127.0.0.1:1/sub", 9090, 7890);
+    std::fs::write(dir.join("input.json"), input.to_string()).unwrap();
+    let set = json!({"exits": {"1.2.3.4:443": "JP"}, "network": {"kind": "wifi", "ssid": "x", "addresses": []}});
+    let req = json!({ "dir": dir, "set": set, "now": 1 });
+    let (out, code) = child("apply", &req.to_string()).await;
+    assert_eq!(
+        (code, serde_json::from_str::<Value>(&out).unwrap()),
+        (
+            0,
+            json!({"input_changed": true, "rebuilt": true, "next": true})
+        )
+    );
+    let kept: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("input.json")).unwrap()).unwrap();
+    assert_eq!(kept["exits"], set["exits"]);
+    assert_eq!(kept["network"]["ssid"], "x");
+    // The same again: nothing.
+    let (out, _) = child("apply", &req.to_string()).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap()["input_changed"],
+        false
+    );
+}
+
+/// A plain-HTTP server answering every request as ip-api.com does, for
+/// Japan.
+async fn ip_api_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                read_head(&mut s).await;
+                let b = r#"{"status":"success","countryCode":"JP","city":"Osaka","query":"203.0.113.9","as":"AS1 Test"}"#;
+                let res = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{b}", b.len());
+                let _ = s.write_all(res.as_bytes()).await;
+                let _ = s.shutdown().await;
+            });
+        }
+    });
+    addr.to_string()
+}
+
+#[tokio::test]
+async fn the_core_looks_exits_up_through_each_line() {
+    // Each line is an HTTP proxy that tunnels everything to the local
+    // stand-in: only ip-api.com (plain HTTP) answers; the HTTPS services
+    // fail their handshake. Nothing leaves this machine.
+    let server = ip_api_server().await;
+    let line = redirecting_proxy(server).await;
+    let line_port: u16 = line.rsplit(':').next().unwrap().parse().unwrap();
+    let (api_port, mixed_port) = (free_port(), free_port());
+    let home = tempfile::tempdir().unwrap();
+    let config = format!(
+        "mixed-port: {mixed_port}\nbind-address: 127.0.0.1\nallow-lan: false\n\
+         external-controller: 127.0.0.1:{api_port}\nsecret: s3cret\nlog-level: warning\n\
+         geox-url: {{geoip: 'http://127.0.0.1:1/a', mmdb: 'http://127.0.0.1:1/b', \
+         asn: 'http://127.0.0.1:1/c', geosite: 'http://127.0.0.1:1/d'}}\n\
+         proxies: [{{name: L1, type: http, server: 127.0.0.1, port: {line_port}}}]\n\
+         proxy-groups: [{{name: speedtest, type: select, proxies: [L1]}}]\n\
+         rules: ['MATCH,DIRECT']\n"
+    );
+    let path = home.path().join("config.yaml");
+    std::fs::write(&path, config).unwrap();
+    let _core = tokio::process::Command::new(env!("CARGO_BIN_EXE_meow"))
+        .arg("-f")
+        .arg(&path)
+        .arg("-d")
+        .arg(home.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    for _ in 0..200 {
+        if TcpStream::connect(("127.0.0.1", api_port)).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (status, body) = api(api_port, "/paopao/exits/locate", Some("s3cret"), "").await;
+    assert_eq!(status, 200, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        (v["asked"].clone(), v["found"].clone()),
+        (json!(1), json!(1))
+    );
+    let (_, body) = api_call(api_port, "GET", "/paopao/exits", Some("s3cret"), "").await;
+    let v: Value = serde_json::from_str(&body).unwrap();
+    let exit = &v["exits"][format!("127.0.0.1:{line_port}")];
+    assert_eq!(exit["cc"], "JP");
+    assert_eq!(exit["city"], "Osaka");
+    assert_eq!(exit["src"], "ip-api.com (1/1)");
+
+    let (status, body) = api(
+        api_port,
+        "/paopao/exits/relocate?tag=L1",
+        Some("s3cret"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["result"],
+        "found"
+    );
 }

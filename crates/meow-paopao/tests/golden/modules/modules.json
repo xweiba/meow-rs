@@ -1,0 +1,1530 @@
+[
+ {
+  "name": "sm-surge",
+  "text": "#!name=Example\n#!desc=Does things\n#!arguments=lat:31.2,lon:121.5\n[Script]\nloc = type=http-response, pattern=^https://gs-loc\\.apple\\.com/clls/wloc, requires-body=1, binary-body-mode=1, script-path=https://example.com/loc.js, argument=\"lat={{{lat}}}&lon={{{lon}}}\", timeout=5\ntick = type=cron, cronexp=\"0 * * * *\", script-path=https://example.com/cron.js\n[URL Rewrite]\n^https://ads\\.example\\.com/v1 - reject-dict\n^https://ads\\.example\\.com/img - reject-img\n^http://old\\.example\\.com/(.*) https://new.example.com/$1 302\n^https://m\\.example\\.com/(.*) https://www.example.com/$1 header\n[Header Rewrite]\nhttp-request ^https://api\\.example\\.com header-add X-Who paopao\nhttp-response ^https://api\\.example\\.com header-replace-regex Server nginx/.* nginx\n^https://api\\.example\\.com header-del Cookie\n[Map Local]\n^https://api\\.example\\.com/ads data-type=json data=\"{\\\"ads\\\":[]}\" status-code=200\n^https://api\\.example\\.com/pixel data-type=tiny-gif\n^https://api\\.example\\.com/remote data-type=json data=\"https://cdn.example.com/empty.json\"\n[Body Rewrite]\nhttp-response ^https://api\\.example\\.com/feed \"ad\":true \"ad\":false \"vip\":0 \"vip\":1\n[Rule]\nDOMAIN-SUFFIX,tracker.example,REJECT\nDOMAIN,api.example.com,PROXY\nDOMAIN,odd.example.com,SomeGroup\n[MITM]\nhostname = %APPEND% gs-loc.apple.com, *.example.com, -skip.example.com\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "Example",
+   "desc": "Does things",
+   "scripts": [
+    {
+     "name": "loc",
+     "response": true,
+     "pattern": "^https://gs-loc\\.apple\\.com/clls/wloc",
+     "url": "https://example.com/loc.js",
+     "argument": "lat=31.2&lon=121.5",
+     "binary": true,
+     "body": true,
+     "timeout": 5
+    },
+    {
+     "name": "tick",
+     "response": false,
+     "pattern": "",
+     "url": "https://example.com/cron.js",
+     "timeout": 30,
+     "cron": "0 * * * *"
+    }
+   ],
+   "rewrites": [
+    {
+     "pattern": "^https://ads\\.example\\.com/v1",
+     "action": {
+      "op": "reject",
+      "kind": "dict"
+     }
+    },
+    {
+     "pattern": "^https://ads\\.example\\.com/img",
+     "action": {
+      "op": "reject",
+      "kind": "image"
+     }
+    },
+    {
+     "pattern": "^http://old\\.example\\.com/(.*)",
+     "action": {
+      "op": "redirect",
+      "from": "^http://old\\.example\\.com/(.*)",
+      "to": "https://new.example.com/$1",
+      "status": 302
+     }
+    },
+    {
+     "pattern": "^https://m\\.example\\.com/(.*)",
+     "action": {
+      "op": "url",
+      "from": "^https://m\\.example\\.com/(.*)",
+      "to": "https://www.example.com/$1"
+     }
+    },
+    {
+     "pattern": "^https://api\\.example\\.com",
+     "action": {
+      "op": "header",
+      "ops": [
+       [
+        "add",
+        "X-Who",
+        "paopao",
+        ""
+       ]
+      ]
+     }
+    },
+    {
+     "pattern": "^https://api\\.example\\.com",
+     "action": {
+      "op": "header",
+      "ops": [
+       [
+        "replace-regex",
+        "Server",
+        "nginx/.*",
+        "nginx"
+       ]
+      ]
+     },
+     "response": true
+    },
+    {
+     "pattern": "^https://api\\.example\\.com",
+     "action": {
+      "op": "header",
+      "ops": [
+       [
+        "del",
+        "Cookie",
+        "",
+        ""
+       ]
+      ]
+     }
+    },
+    {
+     "pattern": "^https://api\\.example\\.com/ads",
+     "action": {
+      "op": "local",
+      "status": 200,
+      "headers": {
+       "Content-Type": "application/json"
+      },
+      "text": "{\"ads\":[]}"
+     }
+    },
+    {
+     "pattern": "^https://api\\.example\\.com/pixel",
+     "action": {
+      "op": "local",
+      "status": 200,
+      "headers": {
+       "Content-Type": "image/gif"
+      },
+      "base64": "R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=="
+     }
+    },
+    {
+     "pattern": "^https://api\\.example\\.com/remote",
+     "action": {
+      "op": "local",
+      "status": 200,
+      "headers": {
+       "Content-Type": "application/json"
+      },
+      "dataUrl": "https://cdn.example.com/empty.json"
+     }
+    },
+    {
+     "pattern": "^https://api\\.example\\.com/feed",
+     "action": {
+      "op": "body",
+      "pairs": [
+       [
+        "\"ad\":true",
+        "\"ad\":false"
+       ],
+       [
+        "\"vip\":0",
+        "\"vip\":1"
+       ]
+      ]
+     },
+     "response": true,
+     "body": true
+    }
+   ],
+   "hostnames": [
+    "gs-loc.apple.com",
+    "*.example.com"
+   ],
+   "excluded": [
+    "skip.example.com"
+   ],
+   "rules": [
+    "DOMAIN-SUFFIX,tracker.example,REJECT",
+    "DOMAIN,api.example.com,PROXY"
+   ],
+   "arguments": [
+    {
+     "key": "lat",
+     "kind": "input",
+     "default": "31.2"
+    },
+    {
+     "key": "lon",
+     "kind": "input",
+     "default": "121.5"
+    }
+   ]
+  }
+ },
+ {
+  "name": "sm-stash",
+  "text": "name: Stash one\ndesc: from Stash\nhttp:\n  mitm:\n    - \"s.example.com\"\n    - \"-x.s.example.com\"\n  url-rewrite:\n    - ^https://s\\.example\\.com/ad - reject-dict\n    - ^http://s\\.example\\.com/(.*) https://s.example.com/$1 307\n  header-rewrite:\n    - http-request ^https://s\\.example\\.com header-del Referer\n  script:\n    - match: ^https://s\\.example\\.com/api\n      name: fix\n      type: response\n      require-body: true\n      timeout: 20\nscript-providers:\n  fix:\n    url: https://example.com/fix.js\n    interval: 86400\nrules:\n  - DOMAIN-SUFFIX,stash-ads.example,REJECT\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "Stash one",
+   "desc": "from Stash",
+   "scripts": [
+    {
+     "name": "fix",
+     "response": true,
+     "pattern": "^https://s\\.example\\.com/api",
+     "url": "https://example.com/fix.js",
+     "body": true,
+     "timeout": 20
+    }
+   ],
+   "rewrites": [
+    {
+     "pattern": "^https://s\\.example\\.com/ad",
+     "action": {
+      "op": "reject",
+      "kind": "dict"
+     }
+    },
+    {
+     "pattern": "^http://s\\.example\\.com/(.*)",
+     "action": {
+      "op": "redirect",
+      "from": "^http://s\\.example\\.com/(.*)",
+      "to": "https://s.example.com/$1",
+      "status": 307
+     }
+    },
+    {
+     "pattern": "^https://s\\.example\\.com",
+     "action": {
+      "op": "header",
+      "ops": [
+       [
+        "del",
+        "Referer",
+        "",
+        ""
+       ]
+      ]
+     }
+    }
+   ],
+   "hostnames": [
+    "s.example.com"
+   ],
+   "excluded": [
+    "x.s.example.com"
+   ],
+   "rules": [
+    "DOMAIN-SUFFIX,stash-ads.example,REJECT"
+   ]
+  }
+ },
+ {
+  "name": "sm-loon",
+  "text": "#!name=Loon one\n[Rule]\nDOMAIN-KEYWORD,adx,REJECT\n[Rewrite]\n^https://a\\.example\\.net/ad reject-200\n^https://a\\.example\\.net/go 302 https://b.example.net/\n^https://a\\.example\\.net/h header-add X-L 1\n^https://a\\.example\\.net/mock mock-response-body data-type=text data=\"ok\" status-code=201\n^https://a\\.example\\.net/b response-body-replace-regex foo bar\n[Script]\nhttp-request ^https://a\\.example\\.net/api script-path=req.js, requires-body=true, tag=fix, argument=x\n[Mitm]\nhostname = a.example.net\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "Loon one",
+   "scripts": [
+    {
+     "name": "fix",
+     "response": false,
+     "pattern": "^https://a\\.example\\.net/api",
+     "url": "req.js",
+     "argument": "x",
+     "body": true,
+     "timeout": 10
+    }
+   ],
+   "rewrites": [
+    {
+     "pattern": "^https://a\\.example\\.net/ad",
+     "action": {
+      "op": "reject",
+      "kind": "empty"
+     }
+    },
+    {
+     "pattern": "^https://a\\.example\\.net/go",
+     "action": {
+      "op": "redirect",
+      "from": "^https://a\\.example\\.net/go",
+      "to": "https://b.example.net/",
+      "status": 302
+     }
+    },
+    {
+     "pattern": "^https://a\\.example\\.net/h",
+     "action": {
+      "op": "header",
+      "ops": [
+       [
+        "add",
+        "X-L",
+        "1"
+       ]
+      ]
+     }
+    },
+    {
+     "pattern": "^https://a\\.example\\.net/mock",
+     "action": {
+      "op": "local",
+      "status": 201,
+      "headers": {
+       "Content-Type": "text/plain"
+      },
+      "text": "ok"
+     }
+    },
+    {
+     "pattern": "^https://a\\.example\\.net/b",
+     "action": {
+      "op": "body",
+      "pairs": [
+       [
+        "foo",
+        "bar"
+       ]
+      ]
+     },
+     "response": true,
+     "body": true
+    }
+   ],
+   "hostnames": [
+    "a.example.net"
+   ],
+   "rules": [
+    "DOMAIN-KEYWORD,adx,REJECT"
+   ]
+  }
+ },
+ {
+  "name": "sm-qx",
+  "text": "[rewrite_local]\n^https://q\\.example\\.org/ad url reject-array\n^https://q\\.example\\.org/go url 307 https://r.example.org/\n^https://q\\.example\\.org/b url response-body foo response-body bar\n^https://q\\.example\\.org/api url script-response-body https://example.org/q.js\n[filter_local]\nhost-suffix, q-ads.example.org, reject\n[mitm]\nhostname = q.example.org\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "fb.sgmodule",
+   "scripts": [
+    {
+     "name": "script1",
+     "response": true,
+     "pattern": "^https://q\\.example\\.org/api",
+     "url": "https://example.org/q.js",
+     "body": true,
+     "timeout": 10
+    }
+   ],
+   "rewrites": [
+    {
+     "pattern": "^https://q\\.example\\.org/ad",
+     "action": {
+      "op": "reject",
+      "kind": "array"
+     }
+    },
+    {
+     "pattern": "^https://q\\.example\\.org/go",
+     "action": {
+      "op": "redirect",
+      "from": "^https://q\\.example\\.org/go",
+      "to": "https://r.example.org/",
+      "status": 307
+     }
+    },
+    {
+     "pattern": "^https://q\\.example\\.org/b",
+     "action": {
+      "op": "body",
+      "pairs": [
+       [
+        "foo",
+        "bar"
+       ]
+      ]
+     },
+     "response": true,
+     "body": true
+    }
+   ],
+   "hostnames": [
+    "q.example.org"
+   ],
+   "rules": [
+    "DOMAIN-SUFFIX,q-ads.example.org,REJECT"
+   ]
+  }
+ },
+ {
+  "name": "sm-module",
+  "text": "#!name=e2e\n[Script]\ntag = type=http-response, pattern=^https://www\\.baidu\\.com/, script-path=tag.js, argument=hello\n[URL Rewrite]\n^https://www\\.baidu\\.com/paopao-reject - reject-dict\n^https://www\\.baidu\\.com/paopao-go https://www.baidu.com/robots.txt 302\n[Header Rewrite]\nhttp-response ^https://www\\.baidu\\.com/robots\\.txt header-add X-Rewritten yes\n[Map Local]\n^https://www\\.baidu\\.com/paopao-local data-type=json data=\"{\\\"local\\\":true}\" status-code=200\n[Body Rewrite]\nhttp-response ^https://www\\.baidu\\.com/robots\\.txt Baiduspider PaoPaoSpider\n[MITM]\nhostname = www.baidu.com\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "e2e",
+   "scripts": [
+    {
+     "name": "tag",
+     "response": true,
+     "pattern": "^https://www\\.baidu\\.com/",
+     "url": "tag.js",
+     "argument": "hello",
+     "timeout": 10
+    }
+   ],
+   "rewrites": [
+    {
+     "pattern": "^https://www\\.baidu\\.com/paopao-reject",
+     "action": {
+      "op": "reject",
+      "kind": "dict"
+     }
+    },
+    {
+     "pattern": "^https://www\\.baidu\\.com/paopao-go",
+     "action": {
+      "op": "redirect",
+      "from": "^https://www\\.baidu\\.com/paopao-go",
+      "to": "https://www.baidu.com/robots.txt",
+      "status": 302
+     }
+    },
+    {
+     "pattern": "^https://www\\.baidu\\.com/robots\\.txt",
+     "action": {
+      "op": "header",
+      "ops": [
+       [
+        "add",
+        "X-Rewritten",
+        "yes",
+        ""
+       ]
+      ]
+     },
+     "response": true
+    },
+    {
+     "pattern": "^https://www\\.baidu\\.com/paopao-local",
+     "action": {
+      "op": "local",
+      "status": 200,
+      "headers": {
+       "Content-Type": "application/json"
+      },
+      "text": "{\"local\":true}"
+     }
+    },
+    {
+     "pattern": "^https://www\\.baidu\\.com/robots\\.txt",
+     "action": {
+      "op": "body",
+      "pairs": [
+       [
+        "Baiduspider",
+        "PaoPaoSpider"
+       ]
+      ]
+     },
+     "response": true,
+     "body": true
+    }
+   ],
+   "hostnames": [
+    "www.baidu.com"
+   ],
+   "rules": []
+  }
+ },
+ {
+  "name": "mf-surge",
+  "text": "#!name=签到合集\n#!desc=每天自动签到 {{{城市}}}\n#!author=someone\n#!homepage=https://example.com/home\n#!icon=https://example.com/icon.png\n#!category=工具\n#!system=ios,mac\n#!openUrl=https://example.com/open\n#!arguments=城市:上海, 开启:true\n#!arguments-desc=城市: 你的城市\\n开启: 是否签到\n[Script]\ncheckin = type=cron, cronexp=\"0 8 * * *\", script-path=https://example.com/checkin.js, timeout=60, argument=city={{{城市}}}\ncookie = type=http-request, pattern=^https://api\\.example\\.com/login, script-path=https://example.com/cookie.js\noff = type=http-request, pattern=^https://x, script-path=https://example.com/off.js, enable=false\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "签到合集",
+   "desc": "每天自动签到 上海",
+   "scripts": [
+    {
+     "name": "checkin",
+     "response": false,
+     "pattern": "",
+     "url": "https://example.com/checkin.js",
+     "argument": "city=上海",
+     "timeout": 60,
+     "cron": "0 8 * * *"
+    },
+    {
+     "name": "cookie",
+     "response": false,
+     "pattern": "^https://api\\.example\\.com/login",
+     "url": "https://example.com/cookie.js",
+     "timeout": 10
+    }
+   ],
+   "rewrites": [],
+   "hostnames": [],
+   "rules": [],
+   "arguments": [
+    {
+     "key": "城市",
+     "kind": "input",
+     "default": "上海"
+    },
+    {
+     "key": "开启",
+     "kind": "toggle",
+     "default": "true"
+    }
+   ],
+   "argumentsHelp": "城市: 你的城市\n开启: 是否签到",
+   "author": "someone",
+   "homepage": "https://example.com/home",
+   "icon": "https://example.com/icon.png",
+   "category": "工具",
+   "systems": [
+    "ios",
+    "mac"
+   ],
+   "openUrl": "https://example.com/open"
+  }
+ },
+ {
+  "name": "mf-loon",
+  "text": "#!name=Loon 参数\n[Argument]\nlat = input,\"31.2\",tag=纬度,desc=十进制\non = switch,true,tag=开关\nmode = select,\"fast\",\"slow\",tag=模式\n[Script]\nhttp-response ^https://a\\.example\\.net/x script-path=https://example.com/x.js, tag=x, argument=[{lat},{mode}]\nhttp-response ^https://a\\.example\\.net/y script-path=https://example.com/y.js, tag=y, enable={on}\ncron \"*/30 * * * *\" script-path=https://example.com/c.js, tag=tick\n[Mitm]\nhostname = a.example.net\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "Loon 参数",
+   "scripts": [
+    {
+     "name": "x",
+     "response": true,
+     "pattern": "^https://a\\.example\\.net/x",
+     "url": "https://example.com/x.js",
+     "argument": "{\"lat\":\"31.2\",\"mode\":\"fast\"}",
+     "timeout": 10,
+     "argObject": true
+    },
+    {
+     "name": "y",
+     "response": true,
+     "pattern": "^https://a\\.example\\.net/y",
+     "url": "https://example.com/y.js",
+     "timeout": 10
+    },
+    {
+     "name": "tick",
+     "response": false,
+     "pattern": "",
+     "url": "https://example.com/c.js",
+     "timeout": 30,
+     "cron": "*/30 * * * *"
+    }
+   ],
+   "rewrites": [],
+   "hostnames": [
+    "a.example.net"
+   ],
+   "rules": [],
+   "arguments": [
+    {
+     "key": "lat",
+     "label": "纬度",
+     "kind": "input",
+     "default": "31.2",
+     "help": "十进制"
+    },
+    {
+     "key": "on",
+     "label": "开关",
+     "kind": "toggle",
+     "default": "true"
+    },
+    {
+     "key": "mode",
+     "label": "模式",
+     "kind": "choice",
+     "default": "fast",
+     "options": [
+      "fast",
+      "slow"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "mf-qx",
+  "text": "[task_local]\n0 9 * * * https://example.com/qx-task.js, tag=QX 签到, enabled=true\n0 10 * * * https://example.com/off.js, tag=关, enabled=false\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "fb.sgmodule",
+   "scripts": [
+    {
+     "name": "QX 签到",
+     "response": false,
+     "pattern": "",
+     "url": "https://example.com/qx-task.js",
+     "timeout": 10,
+     "cron": "0 9 * * *"
+    }
+   ],
+   "rewrites": [],
+   "hostnames": [],
+   "rules": []
+  }
+ },
+ {
+  "name": "mf-stash",
+  "text": "name: Stash 定时\ncron:\n  script:\n    - name: daily\n      cron: \"0 7 * * *\"\n      timeout: 40\nscript-providers:\n  daily:\n    url: https://example.com/daily.js\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "Stash 定时",
+   "scripts": [
+    {
+     "name": "daily",
+     "response": false,
+     "pattern": "",
+     "url": "https://example.com/daily.js",
+     "timeout": 40,
+     "cron": "0 7 * * *"
+    }
+   ],
+   "rewrites": [],
+   "hostnames": [],
+   "rules": []
+  }
+ },
+ {
+  "name": "mf-module",
+  "text": "#!name=每分钟\n[Script]\ntick = type=cron, cronexp=\"* * * * *\", script-path=tick.js, argument=hi\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "每分钟",
+   "scripts": [
+    {
+     "name": "tick",
+     "response": false,
+     "pattern": "",
+     "url": "tick.js",
+     "argument": "hi",
+     "timeout": 30,
+     "cron": "* * * * *"
+    }
+   ],
+   "rewrites": [],
+   "hostnames": [],
+   "rules": []
+  }
+ },
+ {
+  "name": "rs-10",
+  "text": "#!name=Ads {{{mode}}}\n#!desc=Removes ads\n#!arguments=mode:fast,debug:false\n#!arguments-desc=Pick a mode\\nthen go\n#!author=me\n#!system=ios, Mac\n#!category=x\n\n[Rule]\nDOMAIN-SUFFIX,ads.example.com,REJECT\nhost,a.example.com,direct\nGEOIP,CN,whatever\nIP-CIDR,1.2.3.0/24,reject-dict,no-resolve,extra\n\n[URL Rewrite]\n^https://a\\.com/ads - reject\n^https://b\\.com/(.*) https://c.com/$1 302\n^https://d\\.com header-add X-A \"a b\"\n\n[Header Rewrite]\nhttp-response ^https://e\\.com header-replace Cache-Control no-cache\n\n[Map Local]\n^https://f\\.com/x data-type=json data=\"{}\" status-code=201 header=\"A:b|C:d\"\n^https://f\\.com/y data-type=tiny-gif\n\n[Body Rewrite]\nhttp-response ^https://g\\.com a b c d\n\n[Script]\nAd = type=http-response, pattern=^https://h\\.com, script-path=ad.js, requires-body=1, argument=m={{{mode}}}\nDaily = type=cron, cronexp=\"0 8 * * *\", script-path=daily.js\nOff = type=http-request, pattern=x, script-path=off.js, enable=false\n\n[MITM]\nhostname = %APPEND% h.com, *.i.com, -j.i.com, h.com\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "Ads fast",
+   "desc": "Removes ads",
+   "scripts": [
+    {
+     "name": "Ad",
+     "response": true,
+     "pattern": "^https://h\\.com",
+     "url": "ad.js",
+     "argument": "m=fast",
+     "body": true,
+     "timeout": 10
+    },
+    {
+     "name": "Daily",
+     "response": false,
+     "pattern": "",
+     "url": "daily.js",
+     "timeout": 30,
+     "cron": "0 8 * * *"
+    }
+   ],
+   "rewrites": [
+    {
+     "pattern": "^https://a\\.com/ads",
+     "action": {
+      "op": "reject",
+      "kind": "plain"
+     }
+    },
+    {
+     "pattern": "^https://b\\.com/(.*)",
+     "action": {
+      "op": "redirect",
+      "from": "^https://b\\.com/(.*)",
+      "to": "https://c.com/$1",
+      "status": 302
+     }
+    },
+    {
+     "pattern": "^https://d\\.com",
+     "action": {
+      "op": "header",
+      "ops": [
+       [
+        "add",
+        "X-A",
+        "a b"
+       ]
+      ]
+     }
+    },
+    {
+     "pattern": "^https://e\\.com",
+     "action": {
+      "op": "header",
+      "ops": [
+       [
+        "replace",
+        "Cache-Control",
+        "no-cache",
+        ""
+       ]
+      ]
+     },
+     "response": true
+    },
+    {
+     "pattern": "^https://f\\.com/x",
+     "action": {
+      "op": "local",
+      "status": 201,
+      "headers": {
+       "A": "b",
+       "C": "d",
+       "Content-Type": "application/json"
+      },
+      "text": "{}"
+     }
+    },
+    {
+     "pattern": "^https://f\\.com/y",
+     "action": {
+      "op": "local",
+      "status": 200,
+      "headers": {
+       "Content-Type": "image/gif"
+      },
+      "base64": "R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=="
+     }
+    },
+    {
+     "pattern": "^https://g\\.com",
+     "action": {
+      "op": "body",
+      "pairs": [
+       [
+        "a",
+        "b"
+       ],
+       [
+        "c",
+        "d"
+       ]
+      ]
+     },
+     "response": true,
+     "body": true
+    }
+   ],
+   "hostnames": [
+    "h.com",
+    "*.i.com"
+   ],
+   "excluded": [
+    "j.i.com"
+   ],
+   "rules": [
+    "DOMAIN-SUFFIX,ads.example.com,REJECT",
+    "DOMAIN,a.example.com,DIRECT",
+    "IP-CIDR,1.2.3.0/24,REJECT,no-resolve"
+   ],
+   "arguments": [
+    {
+     "key": "mode",
+     "kind": "input",
+     "default": "fast"
+    },
+    {
+     "key": "debug",
+     "kind": "toggle",
+     "default": "false"
+    }
+   ],
+   "argumentsHelp": "Pick a mode\nthen go",
+   "author": "me",
+   "category": "x",
+   "systems": [
+    "ios",
+    "mac"
+   ]
+  }
+ },
+ {
+  "name": "rs-11",
+  "text": "#!name=Loon\n[Argument]\ntoken = input,\"abc\",tag=Token,desc=Your token\non = switch,true,tag=On\npick = select,\"a\",\"b\",tag=Pick\n\n[Script]\nhttp-response ^https://x\\.com script-path=https://s/x.js, requires-body=true, tag=X, argument=[{token},{on}]\ncron \"0 9 * * *\" script-path=c.js, tag=Daily\nhttp-request ^https://y\\.com script-path=y.js, enable=false\n\n[Rewrite]\n^https://z\\.com reject-200\n^https://w\\.com response-header-del Set-Cookie\n^https://v\\.com mock-response-body data-type=text data=\"hi\"\n^https://u\\.com response-body-replace-regex a b\n^https://t\\.com/{token} 302 https://t2.com/{on}/{nope}\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "Loon",
+   "scripts": [
+    {
+     "name": "X",
+     "response": true,
+     "pattern": "^https://x\\.com",
+     "url": "https://s/x.js",
+     "argument": "{\"token\":\"abc\",\"on\":\"true\"}",
+     "body": true,
+     "timeout": 10,
+     "argObject": true
+    },
+    {
+     "name": "Daily",
+     "response": false,
+     "pattern": "",
+     "url": "c.js",
+     "timeout": 30,
+     "cron": "0 9 * * *"
+    }
+   ],
+   "rewrites": [
+    {
+     "pattern": "^https://z\\.com",
+     "action": {
+      "op": "reject",
+      "kind": "empty"
+     }
+    },
+    {
+     "pattern": "^https://w\\.com",
+     "action": {
+      "op": "header",
+      "ops": [
+       [
+        "del",
+        "Set-Cookie",
+        ""
+       ]
+      ]
+     },
+     "response": true
+    },
+    {
+     "pattern": "^https://v\\.com",
+     "action": {
+      "op": "local",
+      "status": 200,
+      "headers": {
+       "Content-Type": "text/plain"
+      },
+      "text": "hi"
+     }
+    },
+    {
+     "pattern": "^https://u\\.com",
+     "action": {
+      "op": "body",
+      "pairs": [
+       [
+        "a",
+        "b"
+       ]
+      ]
+     },
+     "response": true,
+     "body": true
+    },
+    {
+     "pattern": "^https://t\\.com/abc",
+     "action": {
+      "op": "redirect",
+      "from": "^https://t\\.com/abc",
+      "to": "https://t2.com/true/{nope}",
+      "status": 302
+     }
+    }
+   ],
+   "hostnames": [],
+   "rules": [],
+   "arguments": [
+    {
+     "key": "token",
+     "label": "Token",
+     "kind": "input",
+     "default": "abc",
+     "help": "Your token"
+    },
+    {
+     "key": "on",
+     "label": "On",
+     "kind": "toggle",
+     "default": "true"
+    },
+    {
+     "key": "pick",
+     "label": "Pick",
+     "kind": "choice",
+     "default": "a",
+     "options": [
+      "a",
+      "b"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "rs-12",
+  "text": "[rewrite_local]\n^https://a\\.com url reject-img\n^https://b\\.com url 307 https://c.com\n^https://d\\.com url response-header (\\r\\n)X:1 $1X:2\n^https://e\\.com url response-body a response-body b\n^https://f\\.com url echo-response text/html https://data/x.html\n^https://g\\.com url script-response-body https://s/g.js\n^https://h\\.com url script-request-header h.js\n\n[task_local]\n0 8 * * * https://s/t.js, tag=Morning, enabled=true\n0 9 * * * https://s/off.js, enabled=false\n\n[filter_local]\nhost-suffix,q.com,proxy\n\n[mitm]\nhostname = a.com, b.com\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "fb.sgmodule",
+   "scripts": [
+    {
+     "name": "script1",
+     "response": true,
+     "pattern": "^https://g\\.com",
+     "url": "https://s/g.js",
+     "body": true,
+     "timeout": 10
+    },
+    {
+     "name": "script2",
+     "response": false,
+     "pattern": "^https://h\\.com",
+     "url": "h.js",
+     "timeout": 10
+    },
+    {
+     "name": "Morning",
+     "response": false,
+     "pattern": "",
+     "url": "https://s/t.js",
+     "timeout": 10,
+     "cron": "0 8 * * *"
+    }
+   ],
+   "rewrites": [
+    {
+     "pattern": "^https://a\\.com",
+     "action": {
+      "op": "reject",
+      "kind": "image"
+     }
+    },
+    {
+     "pattern": "^https://b\\.com",
+     "action": {
+      "op": "redirect",
+      "from": "^https://b\\.com",
+      "to": "https://c.com",
+      "status": 307
+     }
+    },
+    {
+     "pattern": "^https://d\\.com",
+     "action": {
+      "op": "header",
+      "ops": [
+       [
+        "block-regex",
+        "",
+        "(\\r\\n)X:1",
+        "$1X:2"
+       ]
+      ]
+     },
+     "response": true
+    },
+    {
+     "pattern": "^https://e\\.com",
+     "action": {
+      "op": "body",
+      "pairs": [
+       [
+        "a",
+        "b"
+       ]
+      ]
+     },
+     "response": true,
+     "body": true
+    },
+    {
+     "pattern": "^https://f\\.com",
+     "action": {
+      "op": "local",
+      "status": 200,
+      "headers": {
+       "Content-Type": "text/html"
+      },
+      "dataUrl": "https://data/x.html"
+     }
+    }
+   ],
+   "hostnames": [
+    "a.com",
+    "b.com"
+   ],
+   "rules": [
+    "DOMAIN-SUFFIX,q.com,PROXY"
+   ]
+  }
+ },
+ {
+  "name": "rs-13",
+  "text": "name: Stash One\ndesc: d\nhttp:\n  mitm:\n    - \"a.com\"\n    - \"-b.com\"\n  url-rewrite:\n    - ^https://x\\.com - reject\n  script:\n    - match: ^https://y\\.com\n      name: y\n      type: response\n      require-body: true\n      timeout: 20\n    - match: ^https://z\\.com\n      name: unknown\nscript-providers:\n  y:\n    url: https://s/y.js\n  d:\n    url: https://s/d.js\ncron:\n  script:\n    - name: d\n      cron: \"0 8 * * *\"\nrules:\n  - DOMAIN,r.com,DIRECT\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "Stash One",
+   "desc": "d",
+   "scripts": [
+    {
+     "name": "y",
+     "response": true,
+     "pattern": "^https://y\\.com",
+     "url": "https://s/y.js",
+     "body": true,
+     "timeout": 20
+    },
+    {
+     "name": "d",
+     "response": false,
+     "pattern": "",
+     "url": "https://s/d.js",
+     "timeout": 30,
+     "cron": "0 8 * * *"
+    }
+   ],
+   "rewrites": [
+    {
+     "pattern": "^https://x\\.com",
+     "action": {
+      "op": "reject",
+      "kind": "plain"
+     }
+    }
+   ],
+   "hostnames": [
+    "a.com"
+   ],
+   "excluded": [
+    "b.com"
+   ],
+   "rules": [
+    "DOMAIN,r.com,DIRECT"
+   ]
+  }
+ },
+ {
+  "name": "values",
+  "text": "#!arguments=mode:fast\n[Script]\nA = type=http-request, pattern=x, script-path=a.js, argument={{{mode}}}\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "fb.sgmodule",
+   "scripts": [
+    {
+     "name": "A",
+     "response": false,
+     "pattern": "x",
+     "url": "a.js",
+     "argument": "fast",
+     "timeout": 10
+    }
+   ],
+   "rewrites": [],
+   "hostnames": [],
+   "rules": [],
+   "arguments": [
+    {
+     "key": "mode",
+     "kind": "input",
+     "default": "fast"
+    }
+   ]
+  }
+ },
+ {
+  "name": "hello",
+  "text": "hello",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "fb.sgmodule",
+   "scripts": [],
+   "rewrites": [],
+   "hostnames": [],
+   "rules": []
+  }
+ },
+ {
+  "name": "edge-args",
+  "text": "#!arguments=a:\"1\",b:true,c:x:y\n#!name={{{a}}}-{{{zz}}}-{b}-{ b }\n[Script]\nS = type=http-response, pattern=\"^https://x, y\", script-path=s.js, argument=\"k=\\\"v\\\",w\", timeout=abc, binary-body-mode=TRUE\nhttp-response   ^p\\s   script-path=l.js,tag=L, timeout=7\ncron  \"1 2 3 4 5\"  script-path=c.js\ncron \"x\" \n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "1--true-{ b }",
+   "scripts": [
+    {
+     "name": "S",
+     "response": true,
+     "pattern": "^https://x, y",
+     "url": "s.js",
+     "argument": "k=\"v\",w",
+     "binary": true,
+     "timeout": 10
+    },
+    {
+     "name": "L",
+     "response": true,
+     "pattern": "^p\\s",
+     "url": "l.js",
+     "timeout": 7
+    },
+    {
+     "name": "cron3",
+     "response": false,
+     "pattern": "",
+     "url": "c.js",
+     "timeout": 30,
+     "cron": "1 2 3 4 5"
+    }
+   ],
+   "rewrites": [],
+   "hostnames": [],
+   "rules": [],
+   "arguments": [
+    {
+     "key": "a",
+     "kind": "input",
+     "default": "1"
+    },
+    {
+     "key": "b",
+     "kind": "toggle",
+     "default": "true"
+    },
+    {
+     "key": "c",
+     "kind": "input",
+     "default": "x:y"
+    }
+   ]
+  }
+ },
+ {
+  "name": "edge-words",
+  "text": "[URL Rewrite]\n^a \"b c\" 302\n^d k=\"e f\" header\n^g _ reject-video\n^h reject extra more\n^i header-replace X\n[Header Rewrite]\n^j header-bogus A\nhttp-request ^k header-replace-regex A b c d e\n[Body Rewrite]\nhttp-request ^l a\nnope ^m a b\n[Map Local]\n^n data=\"http://x/y\" header=\"Content-Type:a/b|bad|:x\"\n^o data-type=base64 data=AAAA status-code=x\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "fb.sgmodule",
+   "scripts": [],
+   "rewrites": [
+    {
+     "pattern": "^a",
+     "action": {
+      "op": "redirect",
+      "from": "^a",
+      "to": "b c",
+      "status": 302
+     }
+    },
+    {
+     "pattern": "^d",
+     "action": {
+      "op": "url",
+      "from": "^d",
+      "to": "k=e f"
+     }
+    },
+    {
+     "pattern": "^g",
+     "action": {
+      "op": "reject",
+      "kind": "image"
+     }
+    },
+    {
+     "pattern": "^i",
+     "action": {
+      "op": "header",
+      "ops": [
+       [
+        "replace",
+        "X",
+        ""
+       ]
+      ]
+     }
+    },
+    {
+     "pattern": "^k",
+     "action": {
+      "op": "header",
+      "ops": [
+       [
+        "replace-regex",
+        "A",
+        "b",
+        "c d e"
+       ]
+      ]
+     }
+    },
+    {
+     "pattern": "^n",
+     "action": {
+      "op": "local",
+      "status": 200,
+      "headers": {
+       "Content-Type": "a/b"
+      },
+      "dataUrl": "http://x/y"
+     }
+    },
+    {
+     "pattern": "^o",
+     "action": {
+      "op": "local",
+      "status": 200,
+      "headers": {
+       "Content-Type": "text/plain"
+      },
+      "base64": "AAAA"
+     }
+    }
+   ],
+   "hostnames": [],
+   "rules": []
+  }
+ },
+ {
+  "name": "edge-qx",
+  "text": "[rewrite_local]\n^a url\n^a url 302\n^b url request-header x\n^c url request-body a request-body\n^d url script-echo-response s.js\n^e url script-analyze-echo-response s.js\n[task_local]\n,\n1 2 3 4 5 a.js, enabled=false\n1 2 3 4 5 b.js, tag=B, x\n1 2 3 4 5 c.js\n[filter_local]\nHOST-WILDCARD, *.a.com, Direct\nip6-cidr,::1/128,proxy,no-resolve,no-resolve\nUSER-AGENT,x\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "fb.sgmodule",
+   "scripts": [
+    {
+     "name": "script1",
+     "response": false,
+     "pattern": "^d",
+     "url": "s.js",
+     "timeout": 10
+    },
+    {
+     "name": "script2",
+     "response": true,
+     "pattern": "^e",
+     "url": "s.js",
+     "timeout": 10
+    },
+    {
+     "name": "task3",
+     "response": false,
+     "pattern": "",
+     "url": "c.js",
+     "timeout": 10,
+     "cron": "1 2 3 4 5"
+    }
+   ],
+   "rewrites": [],
+   "hostnames": [],
+   "rules": [
+    "DOMAIN-WILDCARD,*.a.com,DIRECT",
+    "IP-CIDR6,::1/128,PROXY,no-resolve,no-resolve"
+   ]
+  }
+ },
+ {
+  "name": "edge-sections",
+  "text": "[ MITM ]\nhostname=a.com,,%INSERT% b.com, -, -c.com, -c.com\nHostname = d.com\n[Argument]\nk = \n= input,1\n# x = select,a\n[unknown]\nDOMAIN,a,DIRECT\n;comment\n//comment\n#!system=\n#!openUrl=https://o\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "fb.sgmodule",
+   "scripts": [],
+   "rewrites": [],
+   "hostnames": [
+    "a.com",
+    "b.com",
+    "d.com"
+   ],
+   "excluded": [
+    "c.com"
+   ],
+   "rules": [],
+   "arguments": [
+    {
+     "key": "# x",
+     "kind": "choice",
+     "default": "a",
+     "options": [
+      "a"
+     ]
+    }
+   ],
+   "openUrl": "https://o"
+  }
+ },
+ {
+  "name": "edge-stash-bad-types",
+  "text": "name: 5\nhttp:\n  mitm: notalist\n  script:\n    - match: 3\n      name: n\n      timeout: 1.9\n    - just a string\nscript-providers:\n  n: {url: 7}\nrules: [\"DOMAIN,a,REJECT\", 1]\nicon: 2.0\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "throws": "_TypeError"
+  }
+ },
+ {
+  "name": "edge-stash-not-map",
+  "text": "name:\n- a\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "[a]",
+   "scripts": [],
+   "rewrites": [],
+   "hostnames": [],
+   "rules": []
+  }
+ },
+ {
+  "name": "edge-stash-detect",
+  "text": "  \n\n[x]\nname: a\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "fb.sgmodule",
+   "scripts": [],
+   "rewrites": [],
+   "hostnames": [],
+   "rules": []
+  }
+ },
+ {
+  "name": "edge-loon-argobj",
+  "text": "[Argument]\na = input,x\n[Script]\nhttp-request ^p script-path=p.js, argument=[ {a} , {b},{a}], tag=t\nhttp-request ^q script-path=q.js, argument=[{a}\n",
+  "fallback": "fb.sgmodule",
+  "values": {},
+  "spec": {
+   "name": "fb.sgmodule",
+   "scripts": [
+    {
+     "name": "t",
+     "response": false,
+     "pattern": "^p",
+     "url": "p.js",
+     "argument": "{\"a\":\"x\",\"b\":\"\"}",
+     "timeout": 10,
+     "argObject": true
+    },
+    {
+     "name": "script2",
+     "response": false,
+     "pattern": "^q",
+     "url": "q.js",
+     "argument": "[x",
+     "timeout": 10
+    }
+   ],
+   "rewrites": [],
+   "hostnames": [],
+   "rules": [],
+   "arguments": [
+    {
+     "key": "a",
+     "kind": "input",
+     "default": "x"
+    }
+   ]
+  }
+ },
+ {
+  "name": "mf-surge-values",
+  "text": "#!name=签到合集\n#!desc=每天自动签到 {{{城市}}}\n#!author=someone\n#!homepage=https://example.com/home\n#!icon=https://example.com/icon.png\n#!category=工具\n#!system=ios,mac\n#!openUrl=https://example.com/open\n#!arguments=城市:上海, 开启:true\n#!arguments-desc=城市: 你的城市\\n开启: 是否签到\n[Script]\ncheckin = type=cron, cronexp=\"0 8 * * *\", script-path=https://example.com/checkin.js, timeout=60, argument=city={{{城市}}}\ncookie = type=http-request, pattern=^https://api\\.example\\.com/login, script-path=https://example.com/cookie.js\noff = type=http-request, pattern=^https://x, script-path=https://example.com/off.js, enable=false\n",
+  "fallback": "x",
+  "values": {
+   "城市": "北京",
+   "nope": "x"
+  },
+  "spec": {
+   "name": "签到合集",
+   "desc": "每天自动签到 北京",
+   "scripts": [
+    {
+     "name": "checkin",
+     "response": false,
+     "pattern": "",
+     "url": "https://example.com/checkin.js",
+     "argument": "city=北京",
+     "timeout": 60,
+     "cron": "0 8 * * *"
+    },
+    {
+     "name": "cookie",
+     "response": false,
+     "pattern": "^https://api\\.example\\.com/login",
+     "url": "https://example.com/cookie.js",
+     "timeout": 10
+    }
+   ],
+   "rewrites": [],
+   "hostnames": [],
+   "rules": [],
+   "arguments": [
+    {
+     "key": "城市",
+     "kind": "input",
+     "default": "上海"
+    },
+    {
+     "key": "开启",
+     "kind": "toggle",
+     "default": "true"
+    }
+   ],
+   "argumentsHelp": "城市: 你的城市\n开启: 是否签到",
+   "author": "someone",
+   "homepage": "https://example.com/home",
+   "icon": "https://example.com/icon.png",
+   "category": "工具",
+   "systems": [
+    "ios",
+    "mac"
+   ],
+   "openUrl": "https://example.com/open"
+  }
+ },
+ {
+  "name": "mf-loon-values",
+  "text": "#!name=Loon 参数\n[Argument]\nlat = input,\"31.2\",tag=纬度,desc=十进制\non = switch,true,tag=开关\nmode = select,\"fast\",\"slow\",tag=模式\n[Script]\nhttp-response ^https://a\\.example\\.net/x script-path=https://example.com/x.js, tag=x, argument=[{lat},{mode}]\nhttp-response ^https://a\\.example\\.net/y script-path=https://example.com/y.js, tag=y, enable={on}\ncron \"*/30 * * * *\" script-path=https://example.com/c.js, tag=tick\n[Mitm]\nhostname = a.example.net\n",
+  "fallback": "x",
+  "values": {
+   "on": "false",
+   "mode": "slow"
+  },
+  "spec": {
+   "name": "Loon 参数",
+   "scripts": [
+    {
+     "name": "x",
+     "response": true,
+     "pattern": "^https://a\\.example\\.net/x",
+     "url": "https://example.com/x.js",
+     "argument": "{\"lat\":\"31.2\",\"mode\":\"slow\"}",
+     "timeout": 10,
+     "argObject": true
+    },
+    {
+     "name": "tick",
+     "response": false,
+     "pattern": "",
+     "url": "https://example.com/c.js",
+     "timeout": 30,
+     "cron": "*/30 * * * *"
+    }
+   ],
+   "rewrites": [],
+   "hostnames": [
+    "a.example.net"
+   ],
+   "rules": [],
+   "arguments": [
+    {
+     "key": "lat",
+     "label": "纬度",
+     "kind": "input",
+     "default": "31.2",
+     "help": "十进制"
+    },
+    {
+     "key": "on",
+     "label": "开关",
+     "kind": "toggle",
+     "default": "true"
+    },
+    {
+     "key": "mode",
+     "label": "模式",
+     "kind": "choice",
+     "default": "fast",
+     "options": [
+      "fast",
+      "slow"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "values-rs",
+  "text": "#!arguments=mode:fast\n[Script]\nA = type=http-request, pattern=x, script-path=a.js, argument={{{mode}}}\n",
+  "fallback": "f",
+  "values": {
+   "mode": "slow",
+   "other": "x"
+  },
+  "spec": {
+   "name": "f",
+   "scripts": [
+    {
+     "name": "A",
+     "response": false,
+     "pattern": "x",
+     "url": "a.js",
+     "argument": "slow",
+     "timeout": 10
+    }
+   ],
+   "rewrites": [],
+   "hostnames": [],
+   "rules": [],
+   "arguments": [
+    {
+     "key": "mode",
+     "kind": "input",
+     "default": "fast"
+    }
+   ]
+  }
+ }
+]

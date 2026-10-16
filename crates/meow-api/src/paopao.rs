@@ -40,9 +40,36 @@
 //!   merges, rebuilds and reloads → the job's report `{refreshed: [{id,
 //!   error?}], input_changed, rebuilt, reloaded, error?}`; `409` no input
 //!   yet, `404` no such subscription, `503` a job runs.
-//! - `PUT /paopao/schedule` `{enabled?, minutes?}` (0 minutes = none; 720
-//!   until set, off until enabled) and `GET` → `{enabled, minutes,
-//!   last_run, next_run, last_error, running}`.
+//!   A refresh of all of them refreshes the rewrite modules too (`modules`
+//!   in the report).
+//! - `GET /paopao/modules` (`?full=true`: specs and texts too): `{modules:
+//!   [{id, url, enabled, refreshed}]}`, `refreshed` the module's last
+//!   refresh (`{checked, updated, last_error, values, …}`) or null.
+//! - `PUT /paopao/schedule` `{enabled?, minutes?, exits?, network?}` (0
+//!   minutes = none; 720 until set; everything off until enabled) and
+//!   `GET` → `{enabled, minutes, last_run, next_run, last_error, running,
+//!   available, exits, network, jobs}`, `jobs` what this core does.
+//!
+//! Exits ([`exits`]): `GET /paopao/exits` → `{exits: {key: {cc, at, ip?,
+//! city?, region?, org?, src?}}, pending, resolved, last_run, last_error,
+//! running}`; `PUT` `{exits?, pending?, resolved?}` takes the app's
+//! (newer ones win); `DELETE` (`?tag=`: that line's) forgets them and looks
+//! again; `POST /paopao/exits/locate` runs a round now; `POST
+//! /paopao/exits/relocate?tag=` looks one line up → `{result: found |
+//! limited | failed, exit?, reloaded, …}` (`404` no such line).
+//!
+//! The network ([`network`]): `GET /paopao/network` → `{network: {kind,
+//! ssid?, addresses}, ipv6, changed, last_error}`; `POST
+//! /paopao/network/check` looks now (`changed`: the config was rebuilt
+//! for it).
+//!
+//! The route API ([`route`]): `PUT /paopao/route` `{port, key, lan,
+//! policies?}` → `{listening}` (`409` the port is taken), `GET` →
+//! `{listening, port, lan}` or `404`, `DELETE` stops it.
+//!
+//! 虚拟定位's trip ([`track`]): `PUT /paopao/location/track` `{points,
+//! speed, loop, step_ms?, config_url}`, `GET` → `{track, point, done}`,
+//! `DELETE` ends it.
 
 use axum::{
     body::{Body, Bytes},
@@ -67,10 +94,20 @@ use tokio::process::{Child, ChildStdout};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{timeout_at, Instant};
 
+pub mod exits;
+#[cfg(all(test, unix))]
+mod jobs_tests;
+pub mod network;
+pub mod route;
 pub mod service;
 pub mod store;
+pub mod track;
 
-pub use service::{run_schedule, JobError, Reload, Report, Service};
+pub use exits::run_exits;
+pub use network::run_network;
+pub use route::start_route;
+pub use service::{run_schedule, JobError, Reload, Report, ScheduleChange, Service};
+pub use track::run_track;
 
 /// The child's exit codes: its answer is the result.
 pub const EXIT_OK: i32 = 0;
@@ -376,6 +413,23 @@ pub fn router<S: Clone + Send + Sync + 'static>(service: Arc<Service>) -> Router
         .route("/paopao/subscriptions", get(subscriptions))
         .route("/paopao/subscriptions/refresh", post(refresh))
         .route("/paopao/schedule", get(get_schedule).put(put_schedule))
+        .route("/paopao/modules", get(modules))
+        .route(
+            "/paopao/exits",
+            get(get_exits).put(put_exits).delete(delete_exits),
+        )
+        .route("/paopao/exits/locate", post(locate))
+        .route("/paopao/exits/relocate", post(relocate))
+        .route("/paopao/network", get(get_network))
+        .route("/paopao/network/check", post(check_network))
+        .route(
+            "/paopao/route",
+            get(get_route).put(put_route).delete(delete_route),
+        )
+        .route(
+            "/paopao/location/track",
+            get(get_track).put(put_track).delete(delete_track),
+        )
         .with_state(service)
         .layer(DefaultBodyLimit::max(MAX_INPUT))
         .layer(middleware::from_fn(same_origin_only))
@@ -592,6 +646,10 @@ struct ScheduleBody {
     enabled: Option<bool>,
     #[serde(default)]
     minutes: Option<u32>,
+    #[serde(default)]
+    exits: Option<bool>,
+    #[serde(default)]
+    network: Option<bool>,
 }
 
 async fn put_schedule(State(p): State<PaoPao>, body: Bytes) -> Response {
@@ -599,7 +657,13 @@ async fn put_schedule(State(p): State<PaoPao>, body: Bytes) -> Response {
         Ok(b) => b,
         Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("bad schedule: {e}")),
     };
-    match p.set_schedule(b.enabled, b.minutes).await {
+    let change = ScheduleChange {
+        enabled: b.enabled,
+        minutes: b.minutes,
+        exits: b.exits,
+        network: b.network,
+    };
+    match p.set_jobs(change).await {
         Ok(s) => schedule_answer(&p, &s),
         Err(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
@@ -620,8 +684,214 @@ fn schedule_answer(p: &Service, s: &store::Schedule) -> Response {
         "running": p.running(),
         // False where the core runs inside an app: nothing runs then.
         "available": p.can_run(),
+        "exits": s.exits,
+        "network": s.network,
+        "jobs": ["subscriptions", "modules", "exits", "network", "route", "track"],
     }))
     .into_response()
+}
+
+async fn modules(State(p): State<PaoPao>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let head = match p.input_head().await {
+        Ok(head) => head,
+        Err(JobError::NoInput) => store::InputHead::default(),
+        Err(e) => return job_refusal(e),
+    };
+    let store = p.store().clone();
+    let full = flag(&q, "full");
+    let listed = tokio::task::spawn_blocking(move || {
+        let modules: Vec<serde_json::Value> = head
+            .modules
+            .iter()
+            .map(|m| {
+                let refreshed =
+                    store::ModuleRecord::read(&store.module(&m.id), &m.id).map(|mut r| {
+                        if !full {
+                            r.spec = serde_json::Value::Null;
+                            r.source = None;
+                        }
+                        r
+                    });
+                json!({ "id": m.id, "url": m.url, "enabled": m.enabled, "refreshed": refreshed })
+            })
+            .collect();
+        json!({ "modules": modules }).to_string()
+    })
+    .await;
+    match listed {
+        Ok(body) => {
+            let whole = futures::stream::once(async move { Ok(Bytes::from(body)) });
+            json_body(StatusCode::OK, giving_back(whole.boxed()))
+        }
+        Err(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// `501` where the core runs inside an app.
+fn unavailable(p: &Service) -> Option<Response> {
+    (!p.can_run()).then(|| job_refusal(JobError::Unavailable))
+}
+
+async fn get_exits(State(p): State<PaoPao>) -> Response {
+    Json(p.exits_answer().await).into_response()
+}
+
+async fn put_exits(State(p): State<PaoPao>, body: Bytes) -> Response {
+    if let Some(r) = unavailable(&p) {
+        return r;
+    }
+    let given: exits::ExitsFile = match serde_json::from_slice(&body) {
+        Ok(g) => g,
+        Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("bad exits: {e}")),
+    };
+    match p.take_exits(given).await {
+        Ok(report) => Json(report).into_response(),
+        Err(e) => job_refusal(e),
+    }
+}
+
+async fn delete_exits(
+    State(p): State<PaoPao>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if let Some(r) = unavailable(&p) {
+        return r;
+    }
+    match p.clear_exits(q.get("tag").map(String::as_str)).await {
+        Ok(report) => {
+            // Looked up again at once (Dart `clearExits`).
+            if p.schedule().await.exits {
+                let svc = Arc::clone(&p);
+                tokio::spawn(async move { svc.locate().await });
+            }
+            Json(report).into_response()
+        }
+        Err(e) => job_refusal(e),
+    }
+}
+
+async fn locate(State(p): State<PaoPao>) -> Response {
+    match p.locate().await {
+        Ok(report) => Json(report).into_response(),
+        Err(e) => job_refusal(e),
+    }
+}
+
+async fn relocate(State(p): State<PaoPao>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let Some(tag) = q.get("tag") else {
+        return refuse(StatusCode::BAD_REQUEST, "no tag");
+    };
+    match p.relocate(tag).await {
+        Ok((probe, report)) => {
+            let mut v = serde_json::to_value(&report).unwrap_or_default();
+            v["result"] = probe.name().into();
+            if let exits::Probe::Found(info) = probe {
+                v["exit"] = serde_json::to_value(info).unwrap_or_default();
+            }
+            Json(v).into_response()
+        }
+        Err(e) => job_refusal(e),
+    }
+}
+
+async fn get_network(State(p): State<PaoPao>) -> Response {
+    Json(p.network_answer()).into_response()
+}
+
+async fn check_network(State(p): State<PaoPao>) -> Response {
+    if let Some(r) = unavailable(&p) {
+        return r;
+    }
+    let changed = p.watch_network_once().await;
+    let mut v = p.network_answer();
+    v["changed"] = changed.into();
+    Json(v).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct RouteBody {
+    port: u16,
+    key: String,
+    #[serde(default)]
+    lan: bool,
+    #[serde(default)]
+    policies: Option<Vec<serde_json::Value>>,
+}
+
+async fn put_route(State(p): State<PaoPao>, body: Bytes) -> Response {
+    if let Some(r) = unavailable(&p) {
+        return r;
+    }
+    let b: RouteBody = match serde_json::from_slice(&body) {
+        Ok(b) => b,
+        Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("bad route: {e}")),
+    };
+    if b.port == 0 || b.key.is_empty() {
+        return refuse(StatusCode::BAD_REQUEST, "a port and a key are needed");
+    }
+    if let Some(policies) = &b.policies {
+        let written = serde_json::to_vec(policies)
+            .map_err(io::Error::other)
+            .and_then(|bytes| store::write_atomic(&p.store().policies(), &bytes, false));
+        if let Err(e) = written {
+            return refuse(StatusCode::INTERNAL_SERVER_ERROR, e);
+        }
+    }
+    let conf = route::RouteConf {
+        port: b.port,
+        key: b.key,
+        lan: b.lan,
+    };
+    let same = p.route_now().is_some_and(|(c, _)| c == conf);
+    let addr = if same {
+        p.route_now().map(|(_, a)| a)
+    } else {
+        match p.listen_route(conf.clone()).await {
+            Ok(a) => Some(a),
+            Err(e) => return refuse(StatusCode::CONFLICT, e),
+        }
+    };
+    if let Err(e) = conf.write(p.store()) {
+        return refuse(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+    Json(json!({ "listening": addr.map(|a| a.to_string()) })).into_response()
+}
+
+async fn get_route(State(p): State<PaoPao>) -> Response {
+    match p.route_now() {
+        Some((c, a)) => Json(json!({ "listening": a.to_string(), "port": c.port, "lan": c.lan }))
+            .into_response(),
+        None => refuse(StatusCode::NOT_FOUND, "the route API is not listening here"),
+    }
+}
+
+async fn delete_route(State(p): State<PaoPao>) -> Response {
+    p.stop_route();
+    let _ = tokio::fs::remove_file(p.store().route()).await;
+    Json(json!({})).into_response()
+}
+
+async fn put_track(State(p): State<PaoPao>, body: Bytes) -> Response {
+    if let Some(r) = unavailable(&p) {
+        return r;
+    }
+    let t: track::Track = match serde_json::from_slice(&body) {
+        Ok(t) => t,
+        Err(e) => return refuse(StatusCode::BAD_REQUEST, format!("bad track: {e}")),
+    };
+    match p.start_track(t).await {
+        Ok(()) => Json(p.track_answer()).into_response(),
+        Err(e) => refuse(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn get_track(State(p): State<PaoPao>) -> Response {
+    Json(p.track_answer()).into_response()
+}
+
+async fn delete_track(State(p): State<PaoPao>) -> Response {
+    p.stop_track().await;
+    Json(json!({ "track": null })).into_response()
 }
 
 /// `answer` as a body that, once sent (or dropped), hands what the

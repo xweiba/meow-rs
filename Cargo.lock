@@ -2821,6 +2821,7 @@ dependencies = [
  "futures",
  "hickory-proto",
  "http-body-util",
+ "indexmap",
  "libc",
  "meow-checkin",
  "meow-common",
@@ -2886,6 +2887,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "url",
  "windows-service",
  "windows-sys 0.61.2",
 ]

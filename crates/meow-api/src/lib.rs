@@ -455,10 +455,24 @@ impl ApiServer {
                     .map(PathBuf::from),
                 routes::paopao_reload(Arc::clone(&state)),
             )
-            .with_identity(bound.to_string(), self.secret.clone()),
+            .with_identity(bound.to_string(), self.secret.clone())
+            .with_exits(
+                paopao::exits::real_ask(self.tunnel.clone()),
+                paopao::exits::real_resolve(),
+            )
+            .with_network(
+                paopao::network::real_look(),
+                paopao::network::real_try_ipv6(),
+            ),
         );
+        // And, once told, exits, the network, the route API and 虚拟定位's
+        // trip, with or without the app.
         if paopao.can_run() {
             tokio::spawn(paopao::run_schedule(Arc::clone(&paopao)));
+            tokio::spawn(paopao::run_exits(Arc::clone(&paopao)));
+            tokio::spawn(paopao::run_network(Arc::clone(&paopao)));
+            tokio::spawn(paopao::run_track(Arc::clone(&paopao)));
+            tokio::spawn(paopao::start_route(Arc::clone(&paopao)));
         }
 
         let app = routes::create_router_with(

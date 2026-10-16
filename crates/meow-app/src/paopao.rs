@@ -1,4 +1,4 @@
-//! `meow paopao parse|build|fetch|refresh|apply`: the child process behind
+//! `meow paopao parse|build|fetch|refresh|module|apply`: the child process behind
 //! the API's `/paopao/…` routes and the core's own refreshes
 //! ([`meow_api::paopao`]). Input on stdin, the answer on stdout, then exit:
 //! what a parse or a build allocates goes with the process, never into the
@@ -19,12 +19,23 @@
 //!   there is no answer) and its record written to the store in `dir`
 //!   ([`meow_api::paopao::store`]); answers `{id, error}`, `error` the
 //!   subscription's problem (null when it worked).
-//! - `apply`: `{dir, ids, config?, now, build?, keep?}` → the records of
-//!   `ids` merged into the stored input (written back when that changed
-//!   it); when lines changed (or `build`), the config built at `now`, its
-//!   keys in `keep` (the running core's API and port) set as `keep` has
-//!   them, and, when it differs from the one in `config`, written to the
-//!   store's `config.next.yaml`. Answers `{input_changed, rebuilt, next}`.
+//! - `module`: `{dir, id, url, values?, proxy?}` → one rewrite module
+//!   refreshed as the app refreshes it (`_fetchModule`: the module, then
+//!   its scripts and Map Local data, each directly and through `proxy` when
+//!   there is no answer; parsed with `values` by
+//!   `meow_paopao::ingest::module`); once all of it arrived the scripts
+//!   are written beside the core (`<home>/modules/<id>/<i>.js`, `home` the
+//!   store's parent) and its record to the store. Answers `{id, error}`.
+//! - `apply`: `{dir, ids, modules?, set?, config?, now, build?, keep?}` →
+//!   the records of `ids` (subscriptions) and `modules` merged into the
+//!   stored input, the top-level keys of `set` (measured exits, the
+//!   network …) put in as they are, the input written back when that
+//!   changed it; when what the config is built from changed (or `build`),
+//!   the config built at `now`, its keys in `keep` (the running core's API
+//!   and port) set as `keep` has them, and, when it differs from the one
+//!   in `config`, written to the store's `config.next.yaml`; the build's
+//!   route policies go to `policies.json`. Answers `{input_changed,
+//!   rebuilt, next}`.
 //!
 //! The exit code says what the answer is ([`meow_api::paopao::EXIT_OK`],
 //! `EXIT_INVALID`, `EXIT_UPSTREAM`); an error answer is `{"error": ...}`.
@@ -34,7 +45,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use meow_api::paopao::store::{write_atomic, Store};
+use meow_api::paopao::store::{write_atomic, ModuleRecord, Store};
 use meow_api::paopao::{EXIT_INVALID, EXIT_OK, EXIT_UPSTREAM};
 use meow_paopao::refresh::{self, Change, Download, Refreshed, Via};
 use serde_json::{json, Value};
@@ -56,7 +67,9 @@ pub enum Op {
     Fetch,
     /// `{dir, id, url, user_agent?, proxy?}` on stdin → the subscription refreshed into the store
     Refresh,
-    /// `{dir, ids, config?, now, build?, keep?}` on stdin → refreshes merged, the config rebuilt
+    /// `{dir, id, url, values?, proxy?}` on stdin → the module refreshed into the store
+    Module,
+    /// `{dir, ids, modules?, set?, config?, now, build?, keep?}` on stdin → refreshes merged, the config rebuilt
     Apply,
 }
 
@@ -84,6 +97,7 @@ pub fn answer(op: &Op, input: &str) -> (Value, i32) {
         Op::Build => judged(meow_paopao::build_json(input)),
         Op::Fetch => fetch(input),
         Op::Refresh => refresh(input),
+        Op::Module => module(input),
         Op::Apply => apply(input),
     }
 }
@@ -252,6 +266,11 @@ struct ApplyRequest {
     #[serde(default)]
     ids: Vec<String>,
     #[serde(default)]
+    modules: Vec<String>,
+    /// Top-level input keys replaced as they are.
+    #[serde(default)]
+    set: serde_json::Map<String, Value>,
+    #[serde(default)]
     config: Option<PathBuf>,
     now: i64,
     #[serde(default)]
@@ -288,6 +307,19 @@ fn apply(input: &str) -> (Value, i32) {
             Change::Lines => (changed, lines) = (true, true),
         }
     }
+    for id in &req.modules {
+        if merge_module(&mut input, &store, id) {
+            (changed, lines) = (true, true);
+        }
+    }
+    if let Some(m) = input.as_object_mut() {
+        for (k, v) in req.set {
+            if m.get(&k) != Some(&v) {
+                m.insert(k, v);
+                (changed, lines) = (true, true);
+            }
+        }
+    }
     if changed {
         let written = serde_json::to_vec(&input)
             .map_err(std::io::Error::other)
@@ -304,8 +336,20 @@ fn apply(input: &str) -> (Value, i32) {
     }
     // Built at the time it runs (usage running out, plans ending).
     input["now"] = req.now.into();
-    let mut config = meow_paopao::build(&meow_paopao::BuildInput::from_json(&input)).config;
+    let built = meow_paopao::build(&meow_paopao::BuildInput::from_json(&input));
     drop(input);
+    let policies: Vec<Value> = built
+        .route_policies
+        .iter()
+        .map(meow_paopao::RoutePolicy::to_json)
+        .collect();
+    if let Err(e) = serde_json::to_vec(&policies)
+        .map_err(std::io::Error::other)
+        .and_then(|b| write_atomic(&store.policies(), &b, false))
+    {
+        return invalid(format!("cannot keep the route policies: {e}"));
+    }
+    let mut config = built.config;
     // The input may be from a start on other ports: the core stays where
     // it is.
     for (k, v) in req.keep {
@@ -332,6 +376,247 @@ fn apply(input: &str) -> (Value, i32) {
         json!({ "input_changed": changed, "rebuilt": true, "next": !same }),
         EXIT_OK,
     )
+}
+
+/// Module `id`'s fresh record (one that worked) taken into the input's
+/// module of the same address and settings: its spec and text. True when
+/// that changed them.
+fn merge_module(input: &mut Value, store: &Store, id: &str) -> bool {
+    let Some(r) = ModuleRecord::read(&store.module(id), id).filter(ModuleRecord::worked) else {
+        return false;
+    };
+    let Some(m) = input
+        .get_mut("modules")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object_mut)
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+    else {
+        return false;
+    };
+    let values = m
+        .get("values")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if m.get("url").and_then(Value::as_str) != Some(r.url.as_str()) || values != r.values {
+        return false;
+    }
+    let source = r.source.clone().map(Value::String);
+    if m.get("spec") == Some(&r.spec) && m.get("source") == source.as_ref() {
+        return false;
+    }
+    m.insert("spec".into(), r.spec);
+    match source {
+        Some(s) => m.insert("source".into(), s),
+        None => m.remove("source"),
+    };
+    true
+}
+
+#[derive(serde::Deserialize)]
+struct ModuleRequest {
+    dir: PathBuf,
+    id: String,
+    url: String,
+    #[serde(default)]
+    values: serde_json::Map<String, Value>,
+    #[serde(default)]
+    proxy: Option<String>,
+}
+
+/// What one download of a module's part came to.
+enum Got {
+    /// An answer, its status and body as text.
+    Answer(u16, String),
+    /// Could not connect or timed out: worth trying through the proxy.
+    NoAnswer,
+    /// Anything else (not an address, not text).
+    Unusable,
+}
+
+fn get_text(runtime: &tokio::runtime::Runtime, url: &str, proxy: Option<&str>) -> Got {
+    let proxy = match proxy {
+        Some(p) => match http_proxy(p) {
+            Some(p) => Some(p),
+            None => return Got::Unusable,
+        },
+        None => None,
+    };
+    let scheme = url.split_once("://").map(|(s, _)| s.to_ascii_lowercase());
+    if !matches!(scheme.as_deref(), Some("http" | "https")) {
+        return Got::Unusable;
+    }
+    let headers = [("User-Agent".to_owned(), USER_AGENT.to_owned())];
+    let got = runtime.block_on(async {
+        tokio::time::timeout(
+            FETCH_TIMEOUT,
+            meow_config::internal_http::fetch_response(url, proxy.as_ref(), &headers, MAX_BODY),
+        )
+        .await
+    });
+    match got {
+        Err(_) | Ok(Err(_)) => Got::NoAnswer,
+        Ok(Ok(res)) => match String::from_utf8(res.body) {
+            Ok(body) => Got::Answer(res.status, body),
+            Err(_) => Got::Unusable,
+        },
+    }
+}
+
+/// Dart `_fetch`: directly, then through `proxy` when that got no answer.
+/// `Err(true)`: no answer through the proxy either.
+fn get_either(
+    runtime: &tokio::runtime::Runtime,
+    url: &str,
+    proxy: Option<&str>,
+) -> Result<(u16, String), bool> {
+    match get_text(runtime, url, None) {
+        Got::Answer(s, b) => Ok((s, b)),
+        Got::NoAnswer if proxy.is_some() => match get_text(runtime, url, proxy) {
+            Got::Answer(s, b) => Ok((s, b)),
+            _ => Err(true),
+        },
+        _ => Err(false),
+    }
+}
+
+/// The module's spec and its scripts, or the problem in the app's words.
+fn module_parts(
+    runtime: &tokio::runtime::Runtime,
+    req: &ModuleRequest,
+) -> Result<(Value, String, Vec<String>), String> {
+    let text = match get_either(runtime, &req.url, req.proxy.as_deref()) {
+        Ok((200, body)) => body,
+        Ok((status, _)) => return Err(format!("模块下载失败（{status}）")),
+        Err(true) => return Err("模块下载失败，经代理也无法连接，请检查链接和网络".into()),
+        Err(false) => return Err("模块下载失败，请检查链接和网络".into()),
+    };
+    let values: Vec<(String, String)> = req
+        .values
+        .iter()
+        .map(|(k, v)| {
+            let v = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+            (k.clone(), v)
+        })
+        .collect();
+    let base =
+        url::Url::parse(&req.url).map_err(|_| "模块下载失败，请检查链接和网络".to_owned())?;
+    let mut spec = meow_paopao::ingest::module::parse_module(
+        &text,
+        &meow_paopao::ingest::module::fallback_name(&req.url),
+        &values,
+    );
+    let list = |k: &str| spec.get(k).and_then(Value::as_array).map_or(0, Vec::len);
+    if list("scripts") + list("rewrites") + list("hostnames") + list("rules") == 0 {
+        return Err("这个链接中没有可用的模块内容".into());
+    }
+    let net = "模块中的脚本下载失败，请检查网络";
+    let fetch = |rel: &str, what: &str| -> Result<String, String> {
+        // The built-in location script lives in the app alone.
+        let at = base.join(rel).map_err(|_| net.to_owned())?;
+        match get_either(runtime, at.as_str(), req.proxy.as_deref()) {
+            Ok((200, body)) => Ok(body),
+            Ok((status, _)) => Err(format!("模块中的{what}下载失败（{status}）")),
+            Err(_) => Err(net.to_owned()),
+        }
+    };
+    let mut scripts = Vec::new();
+    for s in spec
+        .get("scripts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let url = s.get("url").and_then(Value::as_str).unwrap_or("");
+        if url.starts_with("builtin:") {
+            return Err(net.to_owned());
+        }
+        scripts.push(fetch(url, "脚本")?);
+    }
+    // [Map Local] data given by URL: kept with the module as text.
+    if let Some(rewrites) = spec.get_mut("rewrites").and_then(Value::as_array_mut) {
+        for r in rewrites {
+            let Some(action) = r.get_mut("action").and_then(Value::as_object_mut) else {
+                continue;
+            };
+            let Some(url) = action
+                .get("dataUrl")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let data = fetch(&url, "数据")?;
+            action.shift_remove("dataUrl");
+            action.insert("text".into(), data.into());
+        }
+    }
+    Ok((spec, text, scripts))
+}
+
+fn module(input: &str) -> (Value, i32) {
+    let req: ModuleRequest = match serde_json::from_str(input) {
+        Ok(r) => r,
+        Err(e) => return invalid(format!("bad module request: {e}")),
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => return (json!({ "error": e.to_string() }), 1),
+    };
+    let store = Store::new(&req.dir);
+    let path = store.module(&req.id);
+    let now = now_ms();
+    let record = match module_parts(&runtime, &req) {
+        Ok((spec, source, scripts)) => {
+            let dir = store.home().join("modules").join(&req.id);
+            let written = std::fs::create_dir_all(&dir).and_then(|()| {
+                scripts.iter().enumerate().try_for_each(|(i, s)| {
+                    write_atomic(
+                        &store
+                            .home()
+                            .join(meow_paopao::rules::module_script_path(&req.id, i)),
+                        s.as_bytes(),
+                        false,
+                    )
+                })
+            });
+            if let Err(e) = written {
+                return invalid(format!("cannot keep the module's scripts: {e}"));
+            }
+            ModuleRecord {
+                id: req.id.clone(),
+                url: req.url.clone(),
+                checked: now,
+                updated: Some(now),
+                last_error: None,
+                values: req.values.clone(),
+                spec,
+                source: Some(source),
+            }
+        }
+        Err(problem) => {
+            let kept = ModuleRecord::read(&path, &req.id).unwrap_or_default();
+            ModuleRecord {
+                id: req.id.clone(),
+                url: req.url.clone(),
+                checked: now,
+                last_error: Some(problem),
+                ..kept
+            }
+        }
+    };
+    let written = serde_json::to_vec(&record)
+        .map_err(std::io::Error::other)
+        .and_then(|b| write_atomic(&path, &b, false));
+    if let Err(e) = written {
+        return invalid(format!("cannot keep the module's record: {e}"));
+    }
+    (json!({ "id": req.id, "error": record.last_error }), EXIT_OK)
 }
 
 fn upstream(why: impl std::fmt::Display) -> (Value, i32) {

@@ -24,6 +24,7 @@ pub mod dns_mode;
 pub mod error;
 pub mod fs_util;
 pub mod home_dir;
+pub mod host_addrs;
 pub mod iface_counters;
 pub mod memory;
 pub mod metadata;

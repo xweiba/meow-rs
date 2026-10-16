@@ -6,7 +6,16 @@
 //! - `subscriptions/<id>.json`: each subscription's last refresh
 //!   (`meow_paopao::refresh::Refreshed`): how it went, and the lines of the
 //!   last one that worked.
+//! - `modules/<id>.json`: each rewrite module's last refresh: how it went,
+//!   and the spec and text of the last one that worked (its scripts are
+//!   kept beside the core, `<home>/modules/<id>/<i>.js`).
 //! - `schedule.json`: [`Schedule`].
+//! - `exits.json`: where each line exits ([`super::exits`]).
+//! - `network.json`: the network the core last saw ([`super::network`]).
+//! - `route.json`: where the route API listens and its key
+//!   ([`super::route`]); `policies.json`: what it offers, from the last
+//!   config built (here or by the app).
+//! - `track.json`: the trip 虚拟定位 moves along ([`super::track`]).
 //! - `config.next.yaml`: a config built and not yet run; moved over the
 //!   core's config file once the core runs it, removed when it refuses it.
 //!
@@ -57,6 +66,41 @@ impl Store {
 
     pub fn schedule(&self) -> PathBuf {
         self.dir.join("schedule.json")
+    }
+
+    pub fn modules(&self) -> PathBuf {
+        self.dir.join("modules")
+    }
+
+    /// Module `id`'s record.
+    pub fn module(&self, id: &str) -> PathBuf {
+        self.modules().join(format!("{}.json", file_name_for(id)))
+    }
+
+    pub fn exits(&self) -> PathBuf {
+        self.dir.join("exits.json")
+    }
+
+    pub fn network(&self) -> PathBuf {
+        self.dir.join("network.json")
+    }
+
+    pub fn route(&self) -> PathBuf {
+        self.dir.join("route.json")
+    }
+
+    /// The route policies of the last config built here.
+    pub fn policies(&self) -> PathBuf {
+        self.dir.join("policies.json")
+    }
+
+    pub fn track(&self) -> PathBuf {
+        self.dir.join("track.json")
+    }
+
+    /// The core's home, where module scripts and the scripts' store live.
+    pub fn home(&self) -> &Path {
+        self.dir.parent().unwrap_or(&self.dir)
     }
 
     pub fn next_config(&self) -> PathBuf {
@@ -114,9 +158,10 @@ pub fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> 
     done
 }
 
-/// When subscriptions are refreshed on their own. Off until told
-/// (`PUT /paopao/schedule`): while the app refreshes them itself, the two
-/// must not both run.
+/// When subscriptions and modules are refreshed on their own, and whether
+/// exits are looked up and the network watched. All off until told (`PUT
+/// /paopao/schedule`): while the app does them itself, the two must not
+/// both run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Schedule {
     #[serde(default)]
@@ -130,6 +175,12 @@ pub struct Schedule {
     /// What went wrong in it, if anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Exits are looked up here ([`super::exits`]).
+    #[serde(default)]
+    pub exits: bool,
+    /// The network is watched here ([`super::network`]).
+    #[serde(default)]
+    pub network: bool,
 }
 
 fn default_minutes() -> u32 {
@@ -143,6 +194,8 @@ impl Default for Schedule {
             minutes: DEFAULT_MINUTES,
             last_run: None,
             last_error: None,
+            exits: false,
+            network: false,
         }
     }
 }
@@ -200,15 +253,82 @@ pub struct SubStatus {
     pub skipped: i64,
 }
 
+/// A rewrite module's last refresh (`modules/<id>.json`): how it went and,
+/// from the last one that worked, its spec (`ModuleSpec.toJson`) and text,
+/// parsed with `values`. The text comes last so a reader after the status
+/// alone stops short of it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModuleRecord {
+    pub id: String,
+    pub url: String,
+    /// When it was last tried, Unix ms.
+    pub checked: i64,
+    /// When it last worked, Unix ms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<i64>,
+    /// The last try's problem in the app's words; None when it worked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// The settings the spec was made with.
+    #[serde(default)]
+    pub values: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub spec: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+impl ModuleRecord {
+    /// The record at `path`, when there is one of module `id`.
+    pub fn read(path: &Path, id: &str) -> Option<Self> {
+        std::fs::read(path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Self>(&b).ok())
+            .filter(|r| r.id == id)
+    }
+
+    /// Its last try worked.
+    pub fn worked(&self) -> bool {
+        self.updated == Some(self.checked) && self.last_error.is_none()
+    }
+}
+
 /// What the core reads of a build input: its subscriptions' ids and
-/// addresses, everything else (the lines above all) parsed past without
-/// being kept. Lenient as the builder (`BuildInput::from_json`): a
+/// addresses and its modules' (with their settings), everything else (the
+/// lines and the modules' texts above all) parsed past without being kept. Lenient as the builder (`BuildInput::from_json`): a
 /// subscription without a string `id` and `url` is left out, a
 /// `subscriptions` that is no list reads as none. Only a document that is
 /// no JSON object fails.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InputHead {
     pub subscriptions: Vec<SubHead>,
+    pub modules: Vec<ModuleHead>,
+    /// Measured exits: server key → country.
+    pub exits: Vec<(String, String)>,
+    /// Server domains resolved: domain → IP.
+    pub resolved: Vec<(String, String)>,
+    /// The network it was built for (`{kind, ssid?, addresses}`).
+    pub network: Option<serde_json::Value>,
+    pub ipv6: Option<bool>,
+}
+
+/// A rewrite module of the input (`ScriptModule.toJson` without its spec
+/// and text).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleHead {
+    pub id: String,
+    pub url: String,
+    pub enabled: bool,
+    /// The user's settings for its arguments.
+    pub values: Vec<(String, String)>,
+}
+
+impl ModuleHead {
+    /// Downloaded from the web (not one built in, `builtin:…`).
+    pub fn is_remote(&self) -> bool {
+        let lower = self.url.to_ascii_lowercase();
+        lower.starts_with("http://") || lower.starts_with("https://")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +359,26 @@ impl<'de> Deserialize<'de> for InputHead {
                 while let Some(k) = m.next_key::<String>()? {
                     if k == "subscriptions" {
                         head.subscriptions = m.next_value::<Subs>()?.0;
+                    } else if k == "modules" {
+                        head.modules = m.next_value::<Modules>()?.0;
+                    } else if k == "exits" || k == "resolved" {
+                        let pairs = match m.next_value::<serde_json::Value>()? {
+                            serde_json::Value::Object(o) => o
+                                .into_iter()
+                                .filter_map(|(k, v)| Some((k, v.as_str()?.to_owned())))
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                        if k == "exits" {
+                            head.exits = pairs;
+                        } else {
+                            head.resolved = pairs;
+                        }
+                    } else if k == "network" {
+                        head.network = Some(m.next_value::<serde_json::Value>()?)
+                            .filter(serde_json::Value::is_object);
+                    } else if k == "ipv6" {
+                        head.ipv6 = m.next_value::<serde_json::Value>()?.as_bool();
                     } else {
                         m.next_value::<IgnoredAny>()?;
                     }
@@ -345,6 +485,89 @@ impl<'de> Deserialize<'de> for Sub {
     }
 }
 
+/// `modules`: a list, else none.
+struct Modules(Vec<ModuleHead>);
+
+impl<'de> Deserialize<'de> for Modules {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        lenient_visitor!(V, Vec<ModuleHead>, "a list", {
+            fn visit_str<E: de::Error>(self, _: &str) -> Result<Vec<ModuleHead>, E> {
+                Ok(Vec::new())
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Vec<ModuleHead>, A::Error> {
+                while m.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(Vec::new())
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Vec<ModuleHead>, A::Error> {
+                let mut out = Vec::new();
+                while let Some(m) = s.next_element::<Module>()? {
+                    out.extend(m.0);
+                }
+                Ok(out)
+            }
+        });
+        d.deserialize_any(V).map(Modules)
+    }
+}
+
+/// One module: its head when it has a string `id` (Dart reads a module
+/// without a `url` as one with an empty one, `enabled` unless `false`).
+struct Module(Option<ModuleHead>);
+
+impl<'de> Deserialize<'de> for Module {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        lenient_visitor!(V, Option<ModuleHead>, "a module", {
+            fn visit_str<E: de::Error>(self, _: &str) -> Result<Option<ModuleHead>, E> {
+                Ok(None)
+            }
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                mut s: A,
+            ) -> Result<Option<ModuleHead>, A::Error> {
+                while s.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(None)
+            }
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut m: A,
+            ) -> Result<Option<ModuleHead>, A::Error> {
+                let (mut id, mut url, mut enabled, mut values) = (None, None, true, Vec::new());
+                while let Some(k) = m.next_key::<String>()? {
+                    match k.as_str() {
+                        "id" => id = m.next_value::<Text>()?.0,
+                        "url" => url = m.next_value::<Text>()?.0,
+                        "enabled" => enabled = m.next_value::<serde_json::Value>()? != false,
+                        "values" => {
+                            if let serde_json::Value::Object(o) = m.next_value()? {
+                                values = o
+                                    .into_iter()
+                                    .map(|(k, v)| {
+                                        let v = match v {
+                                            serde_json::Value::String(s) => s,
+                                            v => v.to_string(),
+                                        };
+                                        (k, v)
+                                    })
+                                    .collect();
+                            }
+                        }
+                        _ => {
+                            m.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(id.map(|id| ModuleHead {
+                    id,
+                    url: url.unwrap_or_default(),
+                    enabled,
+                    values,
+                }))
+            }
+        });
+        d.deserialize_any(V).map(Module)
+    }
+}
+
 /// A string, else None.
 struct Text(Option<String>);
 
@@ -382,9 +605,33 @@ mod tests {
                 "junk", 3, null, [1],
                 {"id": "d", "url": "https://d/", "name": 5, "user_agent": "ua", "split": {"rules": []}}
             ],
-            "runtime": {"secret": "s"}
+            "runtime": {"secret": "s"},
+            "modules": [
+                {"id": "m1", "url": "https://m/a.sgmodule", "enabled": false, "spec": {"scripts": []},
+                 "source": "x", "values": {"k": "v", "n": 1}},
+                {"id": "m2", "url": "builtin:location-spoofer"},
+                {"url": "https://no-id/"}, 4
+            ]
         }"#;
         let head = InputHead::parse(input).unwrap();
+        assert_eq!(
+            head.modules,
+            [
+                ModuleHead {
+                    id: "m1".into(),
+                    url: "https://m/a.sgmodule".into(),
+                    enabled: false,
+                    values: vec![("k".into(), "v".into()), ("n".into(), "1".into())],
+                },
+                ModuleHead {
+                    id: "m2".into(),
+                    url: "builtin:location-spoofer".into(),
+                    enabled: true,
+                    values: vec![],
+                },
+            ]
+        );
+        assert!(head.modules[0].is_remote() && !head.modules[1].is_remote());
         let ids: Vec<&str> = head.subscriptions.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["a1", "d"]);
         assert_eq!(head.subscriptions[0].name.as_deref(), Some("A"));
