@@ -233,3 +233,102 @@ fn the_users_own_group_takes_a_use_too() {
         "consistent-hashing"
     );
 }
+
+#[test]
+fn sticky_follows_the_selectors_down_to_the_automatic_group_in_use() {
+    // YouTube on 节点选择, which is on ♻️ 自动选择, on its 智能选择: the
+    // sticky copy goes over 智能选择's lines.
+    let out = run(&json!({
+        "policies": {"policy:youtube": "proxy"},
+        "policy_use": {"policy:youtube": {"sticky": true}},
+    }));
+    let t = "policy:youtube@proxy~sticky";
+    assert_eq!(group(&out, "policy:youtube")["proxies"][0], t);
+    assert_eq!(group(&out, t)["type"], "smart");
+    assert_eq!(group(&out, t)["strategy"], "sticky");
+    assert_eq!(
+        group(&out, t)["proxies"],
+        group(&out, "auto~smart")["proxies"]
+    );
+    assert_eq!(group(&out, t)["proxies"].as_array().unwrap().len(), 6);
+    assert_eq!(tree(&out, t)["origin"], "proxy");
+    assert_eq!(
+        tree(&out, t)["label"],
+        "🚀 节点选择 · ♻️ 自动选择 · 智能选择 · 固定出口"
+    );
+    // 节点选择 and every other policy as they were.
+    assert_eq!(
+        out.tree.by_tag("proxy").unwrap().pick.as_deref(),
+        Some("auto")
+    );
+    assert!(group(&out, "policy:netflix")["proxies"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("proxy")));
+
+    // 节点选择 on 美国, whose default is 速度最快: over 美国's lines.
+    let out = run(&json!({
+        "selected": US,
+        "group_pick": {US: "region:US~fastest"},
+        "policies": {"policy:youtube": "proxy"},
+        "policy_use": {"policy:youtube": {"sticky": true}},
+    }));
+    assert_eq!(group(&out, "policy:youtube")["proxies"][0], t);
+    assert_eq!(
+        group(&out, t)["proxies"],
+        json!(["美国 1", "美国 2", "美国 3"])
+    );
+    assert_eq!(group(&out, t)["strategy"], "sticky");
+    assert_eq!(
+        tree(&out, t)["label"],
+        "🚀 节点选择 · 🇺🇸 美国 · 速度最快 · 固定出口"
+    );
+}
+
+#[test]
+fn sticky_has_nothing_to_keep_on_one_line_or_direct() {
+    for (settings, why) in [
+        (json!({"selected": "美国 2"}), "节点选择 on one line"),
+        (json!({"selected": "DIRECT"}), "节点选择 直连"),
+        (
+            json!({"group_pick": {"auto": "region:HK"}}),
+            "自动选择 on 香港's one line",
+        ),
+    ] {
+        let mut s = settings;
+        s["policies"] = json!({"policy:youtube": "proxy"});
+        s["policy_use"] = json!({"policy:youtube": {"sticky": true}});
+        let out = run(&s);
+        assert_eq!(
+            group(&out, "policy:youtube")["proxies"][0],
+            "proxy",
+            "{why}"
+        );
+        assert!(
+            !out.tree
+                .groups
+                .iter()
+                .any(|g| g.tag.starts_with("policy:youtube@")),
+            "{why}"
+        );
+    }
+}
+
+#[test]
+fn the_users_own_group_follows_the_selectors_too() {
+    let on = json!({
+        "custom_groups": [{"id": "g1", "name": "工作", "pick": "proxy"}],
+        "policy_use": {"group:g1": {"sticky": true}},
+    });
+    let out = run(&on);
+    let t = "group:g1@proxy~sticky";
+    assert_eq!(group(&out, "group:g1")["proxies"][0], t);
+    assert_eq!(group(&out, t)["proxies"].as_array().unwrap().len(), 6);
+    assert_eq!(group(&out, t)["strategy"], "sticky");
+    // On one line: none.
+    let mut one = on;
+    one["selected"] = json!("日本 1");
+    let out = run(&one);
+    assert_eq!(group(&out, "group:g1")["proxies"][0], "proxy");
+    assert!(!has_group(&out, t));
+}

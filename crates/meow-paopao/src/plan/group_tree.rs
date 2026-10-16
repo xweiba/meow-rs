@@ -831,13 +831,15 @@ fn is_auto_kind(k: GroupKind) -> bool {
 ///   a selector over the group's members on the line chosen (`@<group>`);
 ///   a mode or line the group does not offer now: none (its default);
 /// - `sticky` (the policy picks this member and has 固定出口 on) and the
-///   member decides by itself — the mode chosen, the group's own default
-///   when that is one of its children, or an automatic group itself:
-///   meow's sticky smart group over the same lines (`…~sticky`). The core
-///   keeps one line for all of the policy's sites and moves it only when
-///   it fails or slows; it has no sticky 速度最快 / 负载均衡 (one
-///   `strategy`), so the mode chosen gives the lines, the smart group
-///   chooses among them.
+///   member ends on an automatic group — the mode chosen, an automatic
+///   group itself, or where the selectors' picks lead from the member
+///   ([`automatic_in_use`]: 🚀 节点选择 → ♻️ 自动选择 → its 智能选择, a
+///   region → its 速度最快 …): meow's sticky smart group over that
+///   group's lines (`<policy>@<member>~sticky`). The core keeps one line
+///   for all of the policy's sites and moves it only when it fails or
+///   slows; it has no sticky 速度最快 / 负载均衡 (one `strategy`), so the
+///   automatic group gives the lines, the smart group chooses among them.
+///   Ending on one line, DIRECT or REJECT: no copy (nothing to keep).
 fn policy_copy(
     policy: &str,
     member: &GroupSpec,
@@ -874,14 +876,13 @@ fn policy_copy(
             .map(|n| format!("{n} · {sticky_name}"));
         return Some(c);
     }
-    if member.kind != GroupKind::Select
-        || is_policy_tag(&member.tag)
-        || member.tag == outbound_tags::PROXY
-    {
+    if member.kind != GroupKind::Select {
         return None;
     }
+    // Modes and lines of its own only in a shared group; 固定出口 anywhere.
+    let shared = !is_policy_tag(&member.tag) && member.tag != outbound_tags::PROXY;
     let short = |c: &GroupSpec| c.short.clone().unwrap_or_else(|| c.label.clone());
-    let chosen = use_.and_then(|u| match u {
+    let chosen = use_.filter(|_| shared).and_then(|u| match u {
         GroupUse::Line(l) => member
             .members
             .iter()
@@ -889,26 +890,34 @@ fn policy_copy(
             .then_some(Err(l)),
         mode => mode_child(member, mode, by_tag).map(Ok),
     });
-    // The mode in force: the one chosen, else the group's own default when
-    // it is one of its children.
-    let auto = match chosen {
-        Some(Ok((_, c))) => Some(c),
-        Some(Err(_)) => None,
-        None => member
-            .pick
-            .as_ref()
-            .filter(|p| group_child::parent_of(p) == member.tag)
-            .and_then(|p| by_tag.get(p))
-            .filter(|c| is_auto_kind(c.kind)),
-    };
     if sticky {
-        if let Some(c) = auto {
-            let name = format!("{} · {sticky_name}", short(c));
+        // The automatic group in force: the mode chosen, else where the
+        // member's own pick leads.
+        let path = match chosen {
+            Some(Ok((_, c))) => Some(vec![member, c]),
+            Some(Err(_)) => None,
+            None => automatic_in_use(member, by_tag),
+        };
+        if let Some(path) = path {
+            // Named by the way down: a child by its short name, any other
+            // group by its own ("🚀 节点选择 · ♻️ 自动选择 · 智能选择").
+            let mut name: Vec<String> = path
+                .windows(2)
+                .map(|w| {
+                    if group_child::parent_of(&w[1].tag) == w[0].tag {
+                        short(w[1])
+                    } else {
+                        w[1].label.clone()
+                    }
+                })
+                .collect();
+            name.push(sticky_name.to_owned());
+            let lines = &path[path.len() - 1].members;
             return Some(copy(
                 group_child::STICKY,
                 GroupKind::Sticky,
-                &c.members,
-                &name,
+                lines,
+                &name.join(" · "),
             ));
         }
     }
@@ -920,6 +929,31 @@ fn policy_copy(
             Some(c)
         }
     }
+}
+
+/// Where `member`'s traffic ends, following the selectors' picks down from
+/// it: the groups on the way, `member` first, to the automatic one it ends
+/// on (智能选择, 负载均衡, 速度最快); None when it ends on one line, DIRECT
+/// or REJECT, or goes round. Dart `ProxyController.usesAutomatic` follows
+/// the same way.
+fn automatic_in_use<'a>(
+    member: &'a GroupSpec,
+    by_tag: &'a HashMap<String, GroupSpec>,
+) -> Option<Vec<&'a GroupSpec>> {
+    let mut path = vec![member];
+    let mut g = member;
+    while !is_auto_kind(g.kind) {
+        if g.kind != GroupKind::Select {
+            return None;
+        }
+        let next = by_tag.get(g.pick.as_deref()?)?;
+        if path.iter().any(|p| p.tag == next.tag) {
+            return None;
+        }
+        path.push(next);
+        g = next;
+    }
+    Some(path)
 }
 
 /// Our outbound names as the core's: `direct` → DIRECT, `block` → REJECT.
