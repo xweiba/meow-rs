@@ -713,8 +713,15 @@ struct Change<'a> {
 }
 
 /// `next` over `path`: renamed, or copied where a rename cannot (another
-/// file system).
+/// file system). `path` keeps its owner and mode: a core run as root by
+/// the app's service rewrites a file the app (its user) writes and reads.
 async fn replace(next: &std::path::Path, path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Ok(was) = tokio::fs::metadata(path).await {
+        use std::os::unix::fs::MetadataExt as _;
+        let _ = std::os::unix::fs::chown(next, Some(was.uid()), Some(was.gid()));
+        let _ = tokio::fs::set_permissions(next, was.permissions()).await;
+    }
     if tokio::fs::rename(next, path).await.is_ok() {
         return Ok(());
     }
@@ -883,6 +890,25 @@ mod tests {
 
     fn json_of(b: &[u8]) -> Value {
         serde_json::from_slice(b).unwrap()
+    }
+
+    /// The running config keeps its mode (and owner) when replaced: the
+    /// app, not root, writes and reads it next.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_replaced_config_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let next = dir.path().join("config.next.yaml");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(&next, "new").unwrap();
+        std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o600)).unwrap();
+        replace(&next, &path).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
     }
 
     #[tokio::test]
