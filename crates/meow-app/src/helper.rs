@@ -123,13 +123,19 @@ fn trusted_dir() -> std::path::PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(|d| d.join("core")))
-        .unwrap_or_else(|| {
-            if cfg!(windows) {
-                win::install_dir().join("core")
-            } else {
-                "/Library/Application Support/PaoPao/core".into()
-            }
-        })
+        .unwrap_or_else(|| install_root().join("core"))
+}
+
+/// The helper's own directory (`win` is only there on Windows: a `cfg!`
+/// branch would still be compiled elsewhere).
+#[cfg(windows)]
+fn install_root() -> std::path::PathBuf {
+    win::install_dir()
+}
+
+#[cfg(not(windows))]
+fn install_root() -> std::path::PathBuf {
+    "/Library/Application Support/PaoPao".into()
 }
 
 /// The core's file name in [`trusted_dir`].
