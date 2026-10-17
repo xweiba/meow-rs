@@ -535,6 +535,8 @@ async fn tasks_run_strictly_one_after_another() {
     r.engine
         .reorder_tasks(&json!({"task_ids": [ids[2], ids[0]]}))
         .unwrap();
+    // A task with nothing recorded yet is not run (nor marked done).
+    add_task(&r.engine, "empty", HOME, json!([]));
     assert_eq!(r.engine.run_all(), 3);
     // Asked again while queued: nothing is queued twice.
     assert_eq!(r.engine.run_all(), 0);

@@ -840,13 +840,17 @@ impl Engine {
     }
 
     /// 现在全部执行: every enabled task that can run, in tab order.
-    /// Returns how many were queued.
+    /// Returns how many were queued. A task without steps is left out, as
+    /// the schedule leaves it out: its run would do nothing and still
+    /// count as today's.
     pub fn run_all(&self) -> usize {
         let mut st = self.state.lock();
         let ids: Vec<String> = st
             .tasks
             .iter()
-            .filter(|t| t.enabled && unfilled(t, &st.secrets).is_empty())
+            .filter(|t| {
+                t.enabled && !t.steps.is_empty() && unfilled(t, &st.secrets).is_empty()
+            })
             .map(|t| t.id.clone())
             .collect();
         let mut queued = 0;
