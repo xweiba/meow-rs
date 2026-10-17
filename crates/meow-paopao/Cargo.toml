@@ -12,13 +12,12 @@ publish = false
 [lib]
 name = "meow_paopao"
 # rlib for meow-mobile (Android's core library) and the box; cdylib for the
-# desktop app's `meow_paopao` library beside the core binary.
+# desktop app's `meow_paopao` library beside the core binary. The C ABI
+# (`paopao_parse` / `paopao_build` / `paopao_free`) is always built: cargo
+# also builds the cdylib when this crate is only a dependency (meow-app), and
+# with the ABI behind a feature that build left a library with no exports at
+# the same path the release copies.
 crate-type = ["rlib", "cdylib"]
-
-[features]
-default = ["ffi"]
-# The C ABI (`paopao_parse` / `paopao_build` / `paopao_free`) for dart:ffi.
-ffi = []
 
 [dependencies]
 serde = { workspace = true }

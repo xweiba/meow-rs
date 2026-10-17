@@ -1,8 +1,6 @@
 //! The C ABI round trip: `paopao_build` / `paopao_parse` called as dart:ffi
 //! calls them, results freed with `paopao_free`.
 
-#![cfg(feature = "ffi")]
-
 mod common;
 
 use std::ffi::{c_char, CStr, CString};

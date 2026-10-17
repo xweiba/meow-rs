@@ -17,7 +17,7 @@ meow-common = { workspace = true }
 meow-proxy = { workspace = true, default-features = false }
 # Config generation for the app (dart:ffi `paopao_build` / `paopao_parse` /
 # `paopao_free`), exported from this same library: the app already loads it.
-meow-paopao = { path = "../meow-paopao", features = ["ffi"] }
+meow-paopao = { path = "../meow-paopao" }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
 

@@ -16,7 +16,7 @@
 //!   proxies, hosts, rewrite modules, rule lines.
 //! - [`emit`] (L5): the meow config assembled from all of the above.
 //! - [`api`] (L6): [`build`], [`explain`] and the JSON entry points; `ffi`
-//!   (feature `ffi`, on by default) puts them behind a C ABI:
+//!   puts them behind a C ABI:
 //!   `paopao_parse`, `paopao_build`, `paopao_explain`, `paopao_free`.
 //! - [`ingest::module`]: rewrite modules parsed as the app parses them
 //!   (the core's own module refreshes).
@@ -26,7 +26,6 @@
 pub mod api;
 mod dart;
 pub mod emit;
-#[cfg(feature = "ffi")]
 pub mod ffi;
 pub mod ingest;
 pub mod model;

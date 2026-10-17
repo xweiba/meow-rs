@@ -2,7 +2,7 @@
 //! NUL-terminated UTF-8 JSON in, a string this library allocated out, freed
 //! with [`paopao_free`]. Entry points: `paopao_parse`, `paopao_build`,
 //! `paopao_explain`. Built into `libmeow_mobile.so` on Android and into
-//! the desktop `meow_paopao` library (feature `ffi`).
+//! the desktop `meow_paopao` library.
 
 use std::ffi::{c_char, CStr, CString};
 

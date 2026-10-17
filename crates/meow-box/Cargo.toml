@@ -14,8 +14,8 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# Config generation, the same code the PaoPao app runs (no FFI here).
-meow-paopao = { path = "../meow-paopao", default-features = false }
+# Config generation, the same code the PaoPao app runs.
+meow-paopao = { path = "../meow-paopao" }
 # The domestic list for the DNS front (geosite.dat's `cn`, as the core's
 # GEOSITE rules read it).
 meow-rules = { workspace = true }
