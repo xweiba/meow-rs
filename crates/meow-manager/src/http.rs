@@ -13,6 +13,9 @@
 //! - `POST /manager/core/stop`, `POST /manager/core/restart` → the status.
 //! - `PATCH /manager/settings` `{system_proxy?, tun?, launch_at_login?}` →
 //!   the status.
+//! - `POST /manager/cleanup` `{forget?}`: 清理环境 → `{core_stopped,
+//!   launch_at_login_removed, launch_at_login_error, status}`
+//!   ([`crate::Manager::clean_up`]).
 //!
 //! Refusals are `{error, code, log?}`: `400 bad_request`, `409 no_run` /
 //! `needs_authorization`, `500 failed`; `401` without the token.
@@ -52,6 +55,7 @@ pub fn router(manager: Shared, token: &str) -> Router {
         .route("/manager/core/stop", post(stop))
         .route("/manager/core/restart", post(restart))
         .route("/manager/settings", patch(settings))
+        .route("/manager/cleanup", post(cleanup))
         .layer(middleware::from_fn_with_state(api.clone(), authorized))
         .with_state(api)
 }
@@ -170,6 +174,21 @@ async fn settings(State(api): State<Api>, bytes: axum::body::Bytes) -> Response 
         Err(r) => return (StatusCode::BAD_REQUEST, Json(r.to_json())).into_response(),
     };
     with(&api, move |m| m.set(p)).await
+}
+
+#[derive(Default, Deserialize)]
+struct Cleanup {
+    /// The app's data goes next: the manager's state file with it.
+    #[serde(default)]
+    forget: bool,
+}
+
+async fn cleanup(State(api): State<Api>, bytes: axum::body::Bytes) -> Response {
+    let req: Cleanup = match body(&bytes) {
+        Ok(r) => r,
+        Err(r) => return (StatusCode::BAD_REQUEST, Json(r.to_json())).into_response(),
+    };
+    with(&api, move |m| Ok(m.clean_up(req.forget))).await
 }
 
 /// 32 random hex digits.
@@ -308,6 +327,15 @@ mod tests {
         assert_eq!(s, 400);
         let (s, v) = call(&app, "POST", "/manager/core/stop", "t0k", "").await;
         assert_eq!((s, &v["running"]), (200, &json!(false)));
+        let (s, v) = call(&app, "POST", "/manager/cleanup", "t0k", "").await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(
+            (&v["core_stopped"], &v["launch_at_login_removed"]),
+            (&json!(true), &json!(true))
+        );
+        assert_eq!(v["status"]["launch_at_login"], false);
+        let (s, _) = call(&app, "POST", "/manager/cleanup", "t0k", "{bad").await;
+        assert_eq!(s, 400);
     }
 
     #[tokio::test]

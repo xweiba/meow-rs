@@ -599,6 +599,50 @@ impl Manager {
         }
     }
 
+    /// 清理环境 (the user's clean-up before removing the app): the OS proxy
+    /// put back, the core stopped, 开机自启 removed, every switch off (the
+    /// stored input says so too). `forget`: the app's data goes next — the
+    /// state file removed and not written again by this manager.
+    ///
+    /// `{core_stopped, launch_at_login_removed, launch_at_login_error,
+    /// status}`: each step as it ended (the OS proxy has no failure to say).
+    pub fn clean_up(&mut self, forget: bool) -> Value {
+        self.proxy.disable();
+        self.proxy_on = false;
+        self.core.stop();
+        let login_error = self.login.set(false).err();
+        let login_removed = !self.login.registered();
+        let stopped = !self.core.running();
+        self.saved.core = false;
+        self.saved.system_proxy = false;
+        self.saved.launch_at_login = false;
+        self.can_tun_seen = None;
+        if forget {
+            if let Some(path) = self.state.take() {
+                let _ = std::fs::remove_file(path);
+            }
+        } else {
+            self.save();
+            if let Some(run) = &self.saved.run {
+                let mut mirror = Map::new();
+                mirror.insert("system_proxy".into(), false.into());
+                mirror.insert("launch_at_login".into(), false.into());
+                if let Err(e) =
+                    self.builder
+                        .apply(&run.store(), &run.config, &mirror, false, &Map::new())
+                {
+                    tracing::debug!("manager: the input keeps the switches as they were: {e}");
+                }
+            }
+        }
+        json!({
+            "core_stopped": stopped,
+            "launch_at_login_removed": login_removed,
+            "launch_at_login_error": login_error,
+            "status": self.status(),
+        })
+    }
+
     /// Now and then: a core that ended by itself leaves no proxy pointing
     /// at nothing.
     pub fn watch(&mut self) {
@@ -712,6 +756,8 @@ pub(crate) mod tests {
 
     pub struct FakeLogin {
         pub on: Arc<Mutex<bool>>,
+        /// Changes refused with this.
+        pub refuse: Arc<Mutex<Option<String>>>,
     }
 
     impl LoginItem for FakeLogin {
@@ -719,6 +765,9 @@ pub(crate) mod tests {
             *self.on.lock().unwrap()
         }
         fn set(&self, on: bool) -> Result<(), String> {
+            if let Some(why) = &*self.refuse.lock().unwrap() {
+                return Err(why.clone());
+            }
             *self.on.lock().unwrap() = on;
             Ok(())
         }
@@ -783,6 +832,7 @@ pub(crate) mod tests {
         pub same: Arc<Mutex<Option<bool>>>,
         pub can_tun: Arc<Mutex<bool>>,
         pub login: Arc<Mutex<bool>>,
+        pub login_refuse: Arc<Mutex<Option<String>>>,
     }
 
     impl Rig {
@@ -797,6 +847,7 @@ pub(crate) mod tests {
                 same: Arc::default(),
                 can_tun: Arc::new(Mutex::new(true)),
                 login: Arc::default(),
+                login_refuse: Arc::default(),
             }
         }
 
@@ -820,6 +871,7 @@ pub(crate) mod tests {
                     }),
                     login: Box::new(FakeLogin {
                         on: Arc::clone(&self.login),
+                        refuse: Arc::clone(&self.login_refuse),
                     }),
                     can_tun: Box::new(move || *can.lock().unwrap()),
                 },
@@ -1093,5 +1145,66 @@ pub(crate) mod tests {
         // Shut down: switches kept for the next start.
         m.shutdown();
         assert!(rig.manager().saved().core);
+    }
+
+    #[test]
+    fn clean_up_puts_everything_back() {
+        let rig = Rig::new();
+        let mut m = rig.manager();
+        m.start(Some(rig.run()), Some(true)).unwrap();
+        m.set(Patch {
+            launch_at_login: Some(true),
+            ..Patch::default()
+        })
+        .unwrap();
+        rig.proxy.take();
+        rig.core.take();
+        rig.build.take();
+        let r = m.clean_up(false);
+        // The proxy put back before the core goes.
+        assert_eq!(rig.proxy.take(), ["proxy off"]);
+        assert_eq!(rig.core.take(), ["stop"]);
+        assert_eq!(r["core_stopped"], true);
+        assert_eq!(r["launch_at_login_removed"], true);
+        assert_eq!(r["launch_at_login_error"], Value::Null);
+        assert_eq!(r["status"]["running"], false);
+        assert!(!*rig.login.lock().unwrap());
+        // Kept off for the next manager, the input told too.
+        let again = rig.manager();
+        let saved = again.saved();
+        assert!(!saved.core && !saved.system_proxy && !saved.launch_at_login);
+        assert!(saved.run.is_some());
+        assert_eq!(
+            rig.build.take(),
+            [r#"apply {"launch_at_login":false,"system_proxy":false} build=false"#]
+        );
+        // Nothing comes up at the next login.
+        rig.manager().boot();
+        assert!(rig.core.take().is_empty());
+    }
+
+    #[test]
+    fn clean_up_says_what_did_not_go_and_forgets() {
+        let rig = Rig::new();
+        let mut m = rig.manager();
+        m.start(Some(rig.run()), Some(true)).unwrap();
+        m.set(Patch {
+            launch_at_login: Some(true),
+            ..Patch::default()
+        })
+        .unwrap();
+        *rig.login_refuse.lock().unwrap() = Some("no rights".into());
+        let state = rig.dir.path().join("manager.json");
+        assert!(state.exists());
+        rig.build.take();
+        let r = m.clean_up(true);
+        assert_eq!(r["core_stopped"], true);
+        assert_eq!(r["launch_at_login_removed"], false);
+        assert_eq!(r["launch_at_login_error"], "no rights");
+        // The data goes next: no state file, none written again.
+        assert!(!state.exists());
+        m.stop();
+        assert!(!state.exists());
+        assert!(rig.build.take().is_empty());
     }
 }
