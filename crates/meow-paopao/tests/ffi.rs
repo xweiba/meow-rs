@@ -5,7 +5,7 @@ mod common;
 
 use std::ffi::{c_char, CStr, CString};
 
-use meow_paopao::ffi::{paopao_build, paopao_explain, paopao_free, paopao_parse};
+use meow_paopao::ffi::{paopao_build, paopao_data_dir, paopao_explain, paopao_free, paopao_parse};
 use serde_json::Value;
 
 /// Calls `f` with `arg` as a C string, reads the result and frees it.
@@ -84,4 +84,25 @@ fn explain_through_the_c_abi() {
         paopao_free(out);
         assert!(text.contains("error"));
     }
+}
+
+#[test]
+fn the_data_directory_through_the_c_abi() {
+    // Under the override (the real one would move the user's data): it,
+    // as it is, nothing moved.
+    let dir = std::env::temp_dir().join("paopao ffi data dir");
+    // Only this test reads it.
+    std::env::set_var("PAOPAO_PROXY_DATA", &dir);
+    // SAFETY: the result is read before it is freed, once.
+    let out: Value = unsafe {
+        let out = paopao_data_dir();
+        assert!(!out.is_null());
+        let text = CStr::from_ptr(out).to_str().expect("UTF-8").to_owned();
+        paopao_free(out);
+        serde_json::from_str(&text).expect("JSON")
+    };
+    std::env::remove_var("PAOPAO_PROXY_DATA");
+    assert_eq!(out["dir"], Value::from(dir.to_string_lossy().into_owned()));
+    assert_eq!(out["moved_from"], Value::Null);
+    assert_eq!(out["problem"], Value::Null);
 }

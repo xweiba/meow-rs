@@ -25,6 +25,10 @@
 
 pub mod api;
 mod dart;
+/// The app's data directory: meow-manager's own file (std only), so the
+/// app (`paopao_data_dir`), the tray and PaoPao Menu find it one way.
+#[path = "../../meow-manager/src/data.rs"]
+pub mod data;
 pub mod emit;
 pub mod ffi;
 pub mod ingest;

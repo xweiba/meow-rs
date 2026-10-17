@@ -6,6 +6,7 @@
 //! macOS) is asked of the privileged helper by the [`manager::Core`] the
 //! daemon gives it; nothing here spawns a process by itself.
 
+pub mod data;
 #[cfg(feature = "desktop")]
 pub mod desktop;
 pub mod http;

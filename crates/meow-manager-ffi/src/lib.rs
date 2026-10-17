@@ -8,11 +8,13 @@
 //!                           const char *login_program,
 //!                           const char *login_args_json);
 //! void paopao_manager_stop(bool quit);
+//! char *paopao_manager_data_dir(const char *given);
+//! void paopao_manager_free(char *s);
 //! ```
 
 use meow_manager::desktop::{desktop_manager, Embedded, Options, HELPER_SOCKET};
 use meow_manager::login::Launch;
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, CStr, CString};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -94,5 +96,36 @@ pub extern "C" fn paopao_manager_stop(quit: bool) {
         .take();
     if let Some(e) = taken {
         e.shutdown(quit);
+    }
+}
+
+/// The app's data directory ([`meow_manager::data::resolve`]: the old
+/// one moved over first when only it exists): `given` the `--data` passed
+/// in (null or empty: none). Free the result with [`paopao_manager_free`];
+/// null only for a path that is no C string.
+///
+/// # Safety
+/// `given` is null or a NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn paopao_manager_data_dir(given: *const c_char) -> *mut c_char {
+    // SAFETY: as the caller promises.
+    let given = unsafe { text(given) }.filter(|g| !g.is_empty());
+    let r = meow_manager::data::resolve(
+        &meow_manager::data::Env::current(),
+        given.as_deref().map(std::path::Path::new),
+    );
+    CString::new(r.dir.to_string_lossy().into_owned())
+        .map_or(std::ptr::null_mut(), CString::into_raw)
+}
+
+/// Frees a string [`paopao_manager_data_dir`] returned; null is ignored.
+///
+/// # Safety
+/// `s` is null or a string from this library, not freed before.
+#[no_mangle]
+pub unsafe extern "C" fn paopao_manager_free(s: *mut c_char) {
+    if !s.is_null() {
+        // SAFETY: made by CString::into_raw here.
+        drop(unsafe { CString::from_raw(s) });
     }
 }

@@ -1,8 +1,9 @@
 //! C ABI over [`crate::api`] for the Dart app (dart:ffi, synchronous):
 //! NUL-terminated UTF-8 JSON in, a string this library allocated out, freed
 //! with [`paopao_free`]. Entry points: `paopao_parse`, `paopao_build`,
-//! `paopao_explain`, `paopao_migrate`. Built into `libmeow_mobile.so` on Android and into
-//! the desktop `meow_paopao` library.
+//! `paopao_explain`, `paopao_migrate`, `paopao_data_dir`. Built into
+//! `libmeow_mobile.so` on Android and into the desktop `meow_paopao`
+//! library.
 
 use std::ffi::{c_char, CStr, CString};
 
@@ -84,6 +85,21 @@ pub unsafe extern "C" fn paopao_explain(input: *const c_char, query: *const c_ch
 #[no_mangle]
 pub unsafe extern "C" fn paopao_migrate(input: *const c_char) -> *mut c_char {
     call(input, crate::api::migrate_json)
+}
+
+/// The app's data directory (see [`crate::data`]; the app passes none
+/// of its own) → `{dir, moved_from, problem}`: the old directory moved
+/// there first when only it exists. Free the result with [`paopao_free`].
+#[no_mangle]
+pub extern "C" fn paopao_data_dir() -> *mut c_char {
+    let r = crate::data::resolve(&crate::data::Env::current(), None);
+    let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
+    let out = json!({
+        "dir": text(&r.dir),
+        "moved_from": r.moved_from.as_deref().map(text),
+        "problem": r.problem,
+    });
+    CString::new(out.to_string()).map_or(std::ptr::null_mut(), CString::into_raw)
 }
 
 /// Frees a string returned by this library; null is ignored.
