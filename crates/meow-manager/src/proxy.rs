@@ -487,6 +487,7 @@ impl SystemProxy {
         add("ProxyEnable", "REG_DWORD", "1");
         add("ProxyServer", "REG_SZ", &server);
         add("ProxyOverride", "REG_SZ", &over);
+        wininet_refresh();
     }
 
     fn windows_restore(&self, saved: &Map<String, Value>) {
@@ -532,6 +533,42 @@ impl SystemProxy {
                     );
                 }
             }
+        }
+        wininet_refresh();
+    }
+}
+
+/// Windows: programs told the Internet Settings changed (WinINet reads
+/// them again), so the proxy set or put back takes effect at once, not at
+/// their next start. Elsewhere nothing.
+fn wininet_refresh() {
+    #[cfg(windows)]
+    {
+        #[link(name = "wininet")]
+        extern "system" {
+            fn InternetSetOptionW(
+                internet: *mut std::ffi::c_void,
+                option: u32,
+                buffer: *mut std::ffi::c_void,
+                length: u32,
+            ) -> i32;
+        }
+        const INTERNET_OPTION_SETTINGS_CHANGED: u32 = 39;
+        const INTERNET_OPTION_REFRESH: u32 = 37;
+        // SAFETY: both options take no buffer (null, 0) and no handle.
+        unsafe {
+            InternetSetOptionW(
+                std::ptr::null_mut(),
+                INTERNET_OPTION_SETTINGS_CHANGED,
+                std::ptr::null_mut(),
+                0,
+            );
+            InternetSetOptionW(
+                std::ptr::null_mut(),
+                INTERNET_OPTION_REFRESH,
+                std::ptr::null_mut(),
+                0,
+            );
         }
     }
 }

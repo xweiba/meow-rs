@@ -25,19 +25,44 @@
 //! `meow service-call --socket PATH --op start --config … --dir …` is the
 //! client: prints the reply, exits non-zero only when the helper can't be
 //! reached.
+//!
+//! Windows ([`win`]): the same ops over the named pipe `\\.\pipe\paopao-core`
+//! (its DACL: SYSTEM, Administrators and the one user), served by the
+//! Windows service `PaoPaoCore` (LocalSystem, auto start) that `meow
+//! service-install` sets up once (one UAC prompt), its own copy under
+//! `%ProgramData%\PaoPao`.
 
-use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::io::BufRead;
+#[cfg(unix)]
+use std::io::BufReader;
+use std::io::Read;
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
-use anyhow::{Context, Result};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::Result;
 use serde_json::{json, Value};
 
+#[cfg(windows)]
+pub mod win;
+#[cfg(windows)]
+pub use win::{call, install, serve, uninstall};
+
 /// The connecting process's user id.
+#[cfg(unix)]
 fn peer_uid(stream: &UnixStream) -> Option<u32> {
     let fd = stream.as_raw_fd();
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
@@ -98,8 +123,17 @@ fn trusted_dir() -> std::path::PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(|d| d.join("core")))
-        .unwrap_or_else(|| "/Library/Application Support/PaoPao/core".into())
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                win::install_dir().join("core")
+            } else {
+                "/Library/Application Support/PaoPao/core".into()
+            }
+        })
 }
+
+/// The core's file name in [`trusted_dir`].
+const CORE_NAME: &str = if cfg!(windows) { "meow.exe" } else { "meow" };
 
 /// The app's core at `path`, made root's own copy and checked: the copy
 /// (which the user cannot change any more) must be signed by the same
@@ -114,22 +148,24 @@ fn trusted_core(path: &str) -> Result<std::path::PathBuf, String> {
     }
     let dir = trusted_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let copy = dir.join("meow");
+    let copy = dir.join(CORE_NAME);
     let tmp = dir.join("meow.check");
     let _ = std::fs::remove_file(&tmp);
     {
-        use std::os::unix::fs::OpenOptionsExt as _;
         let mut from = std::fs::File::open(src).map_err(|e| format!("{path}: {e}"))?;
         if !from.metadata().is_ok_and(|m| m.is_file()) {
             return Err(format!("{path}: not a file"));
         }
-        // Root's alone until it passed (whatever was named is not shown).
-        let mut to = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .open(&tmp)
-            .map_err(|e| e.to_string())?;
+        // Root's alone until it passed (whatever was named is not shown;
+        // Windows: the folder is SYSTEM's and the administrators').
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o700);
+        }
+        let mut to = opts.open(&tmp).map_err(|e| e.to_string())?;
         std::io::copy(&mut from, &mut to).map_err(|e| e.to_string())?;
     }
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -141,6 +177,7 @@ fn trusted_core(path: &str) -> Result<std::path::PathBuf, String> {
         let _ = std::fs::remove_file(&tmp);
         return Err("the core is not signed as this helper is".into());
     }
+    #[cfg(unix)]
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
         .map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &copy).map_err(|e| e.to_string())?;
@@ -207,6 +244,15 @@ impl Core {
         }
     }
 
+    #[cfg(windows)]
+    fn stop(&mut self) {
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
+    #[cfg(unix)]
     fn stop(&mut self) {
         if let Some(mut c) = self.child.take() {
             #[allow(clippy::cast_possible_wrap, reason = "pids fit in pid_t")]
@@ -248,12 +294,20 @@ impl Core {
             Err(e) => return json!({"ok": false, "error": format!("{}: {e}", log_path.display())}),
         };
         let err = log.try_clone().ok();
-        let child = Command::new(exe)
-            .args(["-f", config, "-d", dir])
+        let mut cmd = Command::new(&exe);
+        cmd.args(["-f", config, "-d", dir])
             .stdin(Stdio::null())
             .stdout(log)
-            .stderr(err.map_or_else(Stdio::null, Stdio::from))
-            .spawn();
+            .stderr(err.map_or_else(Stdio::null, Stdio::from));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            if let Some(d) = exe.parent() {
+                cmd.current_dir(d);
+            }
+        }
+        let child = cmd.spawn();
         let mut child = match child {
             Ok(c) => c,
             Err(e) => return json!({"ok": false, "error": e.to_string()}),
@@ -273,6 +327,7 @@ impl Core {
     }
 }
 
+#[cfg(unix)]
 fn handle(core: &mut Core, stream: UnixStream, uid: u32) -> Result<()> {
     if peer_uid(&stream) != Some(uid) && peer_uid(&stream) != Some(0) {
         let mut s = stream;
@@ -282,6 +337,14 @@ fn handle(core: &mut Core, stream: UnixStream, uid: u32) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut line = String::new();
     BufReader::new(&stream).read_line(&mut line)?;
+    let reply = answer(core, &line);
+    let mut s = stream;
+    writeln!(s, "{reply}")?;
+    Ok(())
+}
+
+/// The reply to one request line.
+fn answer(core: &mut Core, line: &str) -> Value {
     let req: Value = serde_json::from_str(line.trim()).unwrap_or(Value::Null);
     let text = |k: &str| {
         req.get(k)
@@ -289,7 +352,7 @@ fn handle(core: &mut Core, stream: UnixStream, uid: u32) -> Result<()> {
             .unwrap_or_default()
             .to_string()
     };
-    let reply = match text("op").as_str() {
+    match text("op").as_str() {
         "start" => {
             let c = text("core");
             core.start(
@@ -311,10 +374,7 @@ fn handle(core: &mut Core, stream: UnixStream, uid: u32) -> Result<()> {
         "relocate" => relocate(),
         "wifi" => wifi(),
         other => json!({"ok": false, "error": format!("unknown op '{other}'")}),
-    };
-    let mut s = stream;
-    writeln!(s, "{reply}")?;
-    Ok(())
+    }
 }
 
 /// macOS: `locationd` restarted (launchd brings it back); it then looks up
@@ -354,7 +414,7 @@ fn wifi() -> Value {
 /// when there is no such section/line, or the value says there is no
 /// network (`None`, empty) or is redacted (`<redacted>`).
 #[cfg_attr(
-    not(any(target_os = "macos", test)),
+    not(any(target_os = "macos", all(test, unix))),
     allow(dead_code, reason = "only the macOS wifi op calls it")
 )]
 fn parse_wdutil_ssid(text: &str) -> Option<String> {
@@ -384,6 +444,7 @@ fn parse_wdutil_ssid(text: &str) -> Option<String> {
 }
 
 /// `meow service`: serves [`uid`] on [`socket`] until killed.
+#[cfg(unix)]
 pub fn serve(socket: &str, uid: u32) -> Result<()> {
     let path = Path::new(socket);
     if path.exists() {
@@ -411,6 +472,7 @@ pub fn serve(socket: &str, uid: u32) -> Result<()> {
 }
 
 /// `meow service-call`.
+#[cfg(unix)]
 pub fn call(socket: &str, op: &str, config: Option<&str>, dir: Option<&str>) -> Result<()> {
     let mut s = UnixStream::connect(socket).with_context(|| format!("connecting {socket}"))?;
     s.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -429,7 +491,7 @@ pub fn call(socket: &str, op: &str, config: Option<&str>, dir: Option<&str>) -> 
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

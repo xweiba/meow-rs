@@ -155,6 +155,30 @@ enum Command {
         #[arg(long)]
         uid: u32,
     },
+    /// The privileged helper (Windows): the service `PaoPaoCore` runs the
+    /// core for one user, who asks over a named pipe
+    #[cfg(windows)]
+    Service {
+        #[arg(long, default_value = meow_app::helper::win::PIPE)]
+        socket: String,
+        /// The only user it answers (besides SYSTEM and the administrators)
+        #[arg(long)]
+        sid: String,
+    },
+    /// Installs the privileged helper (Windows): asks for administrator
+    /// rights once (UAC); exit code 1223 when refused
+    #[cfg(windows)]
+    ServiceInstall {
+        #[arg(long, default_value = meow_app::helper::win::PIPE)]
+        socket: String,
+        /// The user it serves (default: the one running this)
+        #[arg(long)]
+        sid: Option<String>,
+    },
+    /// Removes the privileged helper (Windows): the service and
+    /// %ProgramData%\PaoPao
+    #[cfg(windows)]
+    ServiceUninstall,
     /// Makes the MITM certificate authority (if missing) and prints its path,
     /// so an app can have it trusted before the core first runs
     #[cfg(feature = "mitm")]
@@ -177,7 +201,7 @@ enum Command {
     },
     /// Asks the privileged helper: start (with --config / --dir), stop, status,
     /// relocate, wifi
-    #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+    #[cfg(any(windows, all(unix, not(any(target_os = "android", target_os = "ios")))))]
     ServiceCall {
         #[arg(long)]
         socket: String,
@@ -864,7 +888,15 @@ fn handle_service_command(cmd: &Command, args: &Args) -> Result<()> {
         }
         #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
         Command::Service { socket, uid } => meow_app::helper::serve(socket, *uid),
-        #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+        #[cfg(windows)]
+        Command::Service { socket, sid } => meow_app::helper::serve(socket, sid),
+        #[cfg(windows)]
+        Command::ServiceInstall { socket, sid } => {
+            meow_app::helper::install(socket, sid.as_deref())
+        }
+        #[cfg(windows)]
+        Command::ServiceUninstall => meow_app::helper::uninstall(),
+        #[cfg(any(windows, all(unix, not(any(target_os = "android", target_os = "ios")))))]
         Command::ServiceCall {
             socket,
             op,

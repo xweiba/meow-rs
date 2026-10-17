@@ -9,8 +9,9 @@
 pub mod arp;
 pub mod geodata_fetch;
 /// The privileged helper (`meow service` / `meow service-call`): desktops
-/// only — phones take the VPN through the system's own consent.
-#[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+/// only — phones take the VPN through the system's own consent. Windows:
+/// a Windows service on a named pipe (`helper::win`).
+#[cfg(any(windows, all(unix, not(any(target_os = "android", target_os = "ios")))))]
 pub mod helper;
 
 // The binary's startup path, reused when embedded in an app (`embed`):

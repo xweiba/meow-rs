@@ -130,7 +130,20 @@ url = "2"
 [target.'cfg(windows)'.dependencies]
 tracing-appender = "0.2.5"
 windows-service = "0.8.1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    # The privileged helper (src/helper/win.rs): its named pipe and DACL,
+    # the UAC prompt (ShellExecuteExW "runas").
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

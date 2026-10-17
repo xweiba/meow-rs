@@ -23,19 +23,32 @@ use crate::login::{Launch, OsLogin};
 use crate::manager::{Builder, Core, Failure, Manager, Parts, Run};
 use crate::proxy::{Commands, Os, SystemProxy};
 
-/// The privileged helper's socket (macOS).
-pub const HELPER_SOCKET: &str = "/var/run/paopao-core.sock";
+/// The privileged helper's socket (macOS) / named pipe (Windows: the
+/// service `PaoPaoCore`, meow-app `helper::win`).
+pub const HELPER_SOCKET: &str = if cfg!(windows) {
+    r"\\.\pipe\paopao-core"
+} else {
+    "/var/run/paopao-core.sock"
+};
 
 /// The build a core runs, in its run directory: the digest (sha256, hex)
 /// of the binary it was started from, written once it runs.
 const BUILD_FILE: &str = "core.build";
 
 /// The privileged helper's own copy of the app's core, which it runs
-/// (macOS; refreshed at each start).
-#[cfg(target_os = "macos")]
-const HELPER_CORE: Option<&str> = Some("/Library/Application Support/PaoPao/core/meow");
-#[cfg(not(target_os = "macos"))]
-const HELPER_CORE: Option<&str> = None;
+/// (refreshed at each start).
+fn helper_core() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        return Some("/Library/Application Support/PaoPao/core/meow".into());
+    }
+    if cfg!(windows) {
+        let data = std::env::var_os("ProgramData")
+            .filter(|v| !v.is_empty())
+            .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
+        return Some(data.join("PaoPao").join("core").join("meow.exe"));
+    }
+    None
+}
 
 /// The manager's API: where it listens (`{port, token, pid}`).
 pub fn token_file(data: &Path) -> PathBuf {
@@ -78,13 +91,67 @@ impl HelperClient {
         serde_json::from_str(line.trim()).ok()
     }
 
-    #[cfg(not(unix))]
+    /// Windows: the named pipe (one client at a time: a busy one waited
+    /// for), the reply read on a thread of its own so a helper that hangs
+    /// is given up after `timeout`.
+    #[cfg(windows)]
+    pub fn call(&self, req: &Value, timeout: Duration) -> Option<Value> {
+        use std::io::{BufRead as _, BufReader};
+        let deadline = Instant::now() + timeout;
+        let file = loop {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.socket)
+            {
+                Ok(f) => break f,
+                // ERROR_PIPE_BUSY
+                Err(e) if e.raw_os_error() == Some(231) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => return None,
+            }
+        };
+        let line = format!("{req}\n");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut f = file;
+            if f.write_all(line.as_bytes()).is_err() {
+                return;
+            }
+            let mut reply = String::new();
+            if BufReader::new(&f).read_line(&mut reply).is_ok() {
+                let _ = tx.send(reply);
+            }
+        });
+        let reply = rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .ok()?;
+        serde_json::from_str(reply.trim()).ok()
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub fn call(&self, _req: &Value, _timeout: Duration) -> Option<Value> {
         None
     }
 
+    /// Whether there is a helper to ask: its socket is there (Windows: its
+    /// pipe can be opened, or is busy answering another).
+    #[cfg(not(windows))]
     pub fn installed(&self) -> bool {
         self.socket.exists()
+    }
+
+    #[cfg(windows)]
+    pub fn installed(&self) -> bool {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.socket)
+        {
+            Ok(_) => true,
+            Err(e) => e.raw_os_error() == Some(231),
+        }
     }
 
     pub fn running(&self) -> bool {
@@ -344,7 +411,7 @@ impl Core for DesktopCore {
         let mine = self.digests.of(&self.meow)?;
         let theirs = match std::fs::read_to_string(dir.join(BUILD_FILE)) {
             Ok(t) => t.trim().to_owned(),
-            Err(_) if self.on_helper => self.digests.of(Path::new(HELPER_CORE?))?,
+            Err(_) if self.on_helper => self.digests.of(&helper_core()?)?,
             Err(_) => return None,
         };
         Some(theirs == mine)
@@ -468,10 +535,11 @@ fn is_core(pid: u32, meow: &Path) -> bool {
     }
 }
 
-/// 虚拟网卡 can be had: macOS with the helper installed and answering;
-/// Linux when the core binary has its capabilities (or this is root).
+/// 虚拟网卡 can be had: macOS and Windows with the helper installed and
+/// answering; Linux when the core binary has its capabilities (or this is
+/// root).
 pub fn can_tun(meow: &Path, helper: Option<&Path>) -> bool {
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", windows)) {
         return helper.is_some_and(|s| {
             HelperClient {
                 socket: s.to_owned(),
@@ -569,7 +637,7 @@ pub struct Options {
     pub meow: PathBuf,
     /// What starts at login (the tray itself, its arguments).
     pub launch: Launch,
-    /// The privileged helper's socket (macOS: [`HELPER_SOCKET`]).
+    /// The privileged helper's socket (macOS, Windows: [`HELPER_SOCKET`]).
     pub helper: Option<PathBuf>,
 }
 
