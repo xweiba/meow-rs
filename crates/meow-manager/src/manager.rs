@@ -103,6 +103,15 @@ pub trait ProxySwitch: Send + Sync {
     fn disable(&self);
     /// A leftover put back; true when there was one.
     fn recover(&self) -> bool;
+    /// The OS proxy still points at 127.0.0.1:`port` where [`Self::enable`]
+    /// set it (false: another program set its own); None: cannot be told.
+    fn points_here(&self, port: u16) -> Option<bool> {
+        let _ = port;
+        None
+    }
+    /// What was there before [`Self::enable`] dropped, not put back (the
+    /// other program's proxy stays).
+    fn forget(&self) {}
 }
 
 impl ProxySwitch for crate::proxy::SystemProxy {
@@ -116,6 +125,14 @@ impl ProxySwitch for crate::proxy::SystemProxy {
 
     fn recover(&self) -> bool {
         crate::proxy::SystemProxy::recover(self)
+    }
+
+    fn points_here(&self, port: u16) -> Option<bool> {
+        crate::proxy::SystemProxy::points_here(self, port)
+    }
+
+    fn forget(&self) {
+        crate::proxy::SystemProxy::forget(self);
     }
 }
 
@@ -195,6 +212,12 @@ pub struct Manager {
     can_tun: Box<dyn Fn() -> bool + Send>,
     /// The OS proxy points at the running core.
     proxy_on: bool,
+    /// Another program set the system proxy while it pointed at the core:
+    /// 系统代理 went off and theirs stays (the status says so until the
+    /// user switches it again).
+    proxy_taken: bool,
+    /// [`Manager::watch`]es in a row that found the proxy not ours.
+    not_ours: u8,
     /// The running config's few keys ([`Manager::config`]), as last read,
     /// with the file's size and time then: read again only when it changed
     /// (status is asked every second; a config with its lines is MBs).
@@ -211,6 +234,10 @@ struct KeysRead {
     modified: Option<std::time::SystemTime>,
     keys: Map<String, Value>,
 }
+
+/// [`Manager::watch`]es in a row that must find the system proxy set by
+/// another program before 系统代理 goes off for it.
+const NOT_OURS_FOR: u8 = 2;
 
 /// How long the status's `can_tun` is taken as last asked.
 const CAN_TUN_FOR: std::time::Duration = std::time::Duration::from_secs(5);
@@ -263,6 +290,8 @@ impl Manager {
             login,
             can_tun,
             proxy_on: false,
+            proxy_taken: false,
+            not_ours: 0,
             keys: std::cell::RefCell::new(None),
             can_tun_seen: None,
         }
@@ -379,8 +408,10 @@ impl Manager {
             .filter(|&p| p != 0)
     }
 
-    /// `{manager, running, same_core, core, system_proxy, launch_at_login,
-    /// tun, can_tun, config, dir, controller, secret, mixed_port}`.
+    /// `{manager, running, same_core, core, system_proxy,
+    /// system_proxy_taken, launch_at_login, tun, can_tun, config, dir,
+    /// controller, secret, mixed_port}`. `system_proxy_taken`: another
+    /// program set the system proxy, 系统代理 went off for it.
     /// `same_core`: the running core runs the build a start would run
     /// ([`Core::same_build`]); true when it cannot be told or none runs.
     pub fn status(&mut self) -> Value {
@@ -395,6 +426,7 @@ impl Manager {
             "same_core": same_core,
             "core": self.saved.core,
             "system_proxy": self.saved.system_proxy,
+            "system_proxy_taken": self.proxy_taken,
             "launch_at_login": self.login.registered(),
             "tun": Self::tun_in(&config),
             "can_tun": can_tun,
@@ -408,6 +440,7 @@ impl Manager {
 
     /// The OS proxy as [`Saved::system_proxy`] says, for the running core.
     fn follow_proxy(&mut self) {
+        self.not_ours = 0;
         let port = Self::port_in(&self.config());
         match (self.saved.system_proxy, port) {
             (true, Some(port)) => match self.proxy.enable(port) {
@@ -437,6 +470,7 @@ impl Manager {
         }
         if let Some(on) = system_proxy {
             self.saved.system_proxy = on;
+            self.proxy_taken = false;
         }
         self.saved.run = Some(run.clone());
         let started = self.core.start(&run);
@@ -480,6 +514,7 @@ impl Manager {
     pub fn stop(&mut self) -> Value {
         self.proxy.disable();
         self.proxy_on = false;
+        self.proxy_taken = false;
         self.core.stop();
         self.saved.core = false;
         self.save();
@@ -510,6 +545,7 @@ impl Manager {
         }
         if let Some(on) = patch.system_proxy {
             self.saved.system_proxy = on;
+            self.proxy_taken = false;
             mirror.insert("system_proxy".into(), on.into());
             if self.core.running() {
                 self.follow_proxy();
@@ -517,15 +553,21 @@ impl Manager {
         }
         self.save();
         // The stored input says so too: the panel takes its settings from it.
-        if let (false, Some(run)) = (mirror.is_empty(), &self.saved.run) {
-            if let Err(e) =
-                self.builder
-                    .apply(&run.store(), &run.config, &mirror, false, &Map::new())
-            {
-                tracing::debug!("manager: the input keeps the switches as they were: {e}");
-            }
-        }
+        self.mirror(&mirror);
         Ok(self.status())
+    }
+
+    /// The switches in `mirror` written into the stored input too.
+    fn mirror(&self, mirror: &Map<String, Value>) {
+        let (false, Some(run)) = (mirror.is_empty(), &self.saved.run) else {
+            return;
+        };
+        if let Err(e) = self
+            .builder
+            .apply(&run.store(), &run.config, mirror, false, &Map::new())
+        {
+            tracing::debug!("manager: the input keeps the switches as they were: {e}");
+        }
     }
 
     /// 虚拟网卡: the config rebuilt with it (or without) and run where the
@@ -609,6 +651,7 @@ impl Manager {
     pub fn clean_up(&mut self, forget: bool) -> Value {
         self.proxy.disable();
         self.proxy_on = false;
+        self.proxy_taken = false;
         self.core.stop();
         let login_error = self.login.set(false).err();
         let login_removed = !self.login.registered();
@@ -623,17 +666,10 @@ impl Manager {
             }
         } else {
             self.save();
-            if let Some(run) = &self.saved.run {
-                let mut mirror = Map::new();
-                mirror.insert("system_proxy".into(), false.into());
-                mirror.insert("launch_at_login".into(), false.into());
-                if let Err(e) =
-                    self.builder
-                        .apply(&run.store(), &run.config, &mirror, false, &Map::new())
-                {
-                    tracing::debug!("manager: the input keeps the switches as they were: {e}");
-                }
-            }
+            let mut mirror = Map::new();
+            mirror.insert("system_proxy".into(), false.into());
+            mirror.insert("launch_at_login".into(), false.into());
+            self.mirror(&mirror);
         }
         json!({
             "core_stopped": stopped,
@@ -644,13 +680,42 @@ impl Manager {
     }
 
     /// Now and then: a core that ended by itself leaves no proxy pointing
-    /// at nothing.
+    /// at nothing; a proxy another program set (twice in a row, not a
+    /// write half done) is left to it — the core keeps running, 系统代理
+    /// goes off (kept so, the stored input too) and what was there before
+    /// PaoPao is not put back over theirs.
     pub fn watch(&mut self) {
-        if self.proxy_on && !self.core.running() {
+        if !self.proxy_on {
+            self.not_ours = 0;
+            return;
+        }
+        if !self.core.running() {
             tracing::warn!("manager: the core ended; the system proxy put back");
             self.proxy.disable();
             self.proxy_on = false;
+            return;
         }
+        let Some(port) = Self::port_in(&self.config()) else {
+            return;
+        };
+        if self.proxy.points_here(port) != Some(false) {
+            self.not_ours = 0;
+            return;
+        }
+        self.not_ours += 1;
+        if self.not_ours < NOT_OURS_FOR {
+            return;
+        }
+        tracing::warn!("manager: another program set the system proxy; 系统代理 off, theirs kept");
+        self.proxy.forget();
+        self.proxy_on = false;
+        self.not_ours = 0;
+        self.proxy_taken = true;
+        self.saved.system_proxy = false;
+        self.save();
+        let mut mirror = Map::new();
+        mirror.insert("system_proxy".into(), false.into());
+        self.mirror(&mirror);
     }
 
     /// The manager ends (the OS stops it): the proxy put back, the core
@@ -806,6 +871,8 @@ pub(crate) mod tests {
 
     pub struct FakeProxy {
         pub log: Arc<Log>,
+        /// What [`ProxySwitch::points_here`] says.
+        pub here: Arc<Mutex<Option<bool>>>,
     }
 
     impl ProxySwitch for FakeProxy {
@@ -820,6 +887,12 @@ pub(crate) mod tests {
             self.log.push("recover".into());
             false
         }
+        fn points_here(&self, _port: u16) -> Option<bool> {
+            *self.here.lock().unwrap()
+        }
+        fn forget(&self) {
+            self.log.push("proxy forgotten".into());
+        }
     }
 
     pub struct Rig {
@@ -827,6 +900,7 @@ pub(crate) mod tests {
         pub core: Arc<Log>,
         pub build: Arc<Log>,
         pub proxy: Arc<Log>,
+        pub here: Arc<Mutex<Option<bool>>>,
         pub up: Arc<Mutex<bool>>,
         pub refuse: Arc<Mutex<Option<String>>>,
         pub same: Arc<Mutex<Option<bool>>>,
@@ -842,6 +916,7 @@ pub(crate) mod tests {
                 core: Arc::default(),
                 build: Arc::default(),
                 proxy: Arc::default(),
+                here: Arc::default(),
                 up: Arc::default(),
                 refuse: Arc::default(),
                 same: Arc::default(),
@@ -868,6 +943,7 @@ pub(crate) mod tests {
                     }),
                     proxy: Box::new(FakeProxy {
                         log: Arc::clone(&self.proxy),
+                        here: Arc::clone(&self.here),
                     }),
                     login: Box::new(FakeLogin {
                         on: Arc::clone(&self.login),
@@ -1206,5 +1282,62 @@ pub(crate) mod tests {
         m.stop();
         assert!(!state.exists());
         assert!(rig.build.take().is_empty());
+    }
+    #[test]
+    fn another_program_s_system_proxy_is_left_to_it() {
+        let rig = Rig::new();
+        let mut m = rig.manager();
+        m.start(Some(rig.run()), Some(true)).unwrap();
+        rig.proxy.take();
+        rig.build.take();
+        *rig.here.lock().unwrap() = Some(true);
+        m.watch();
+        assert_eq!(m.status()["system_proxy_taken"], false);
+        // Once is not enough (a write half done)…
+        *rig.here.lock().unwrap() = Some(false);
+        m.watch();
+        assert_eq!(m.status()["system_proxy"], true);
+        // …twice in a row is.
+        m.watch();
+        let s = m.status();
+        assert_eq!(s["running"], true);
+        assert_eq!(s["core"], true);
+        assert_eq!(s["system_proxy"], false);
+        assert_eq!(s["system_proxy_taken"], true);
+        // Theirs stays: forgotten, not put back; the core not stopped.
+        assert_eq!(rig.proxy.take(), ["proxy forgotten"]);
+        assert!(!rig.core.take().contains(&"stop".to_string()));
+        assert_eq!(
+            rig.build.take(),
+            [r#"apply {"system_proxy":false} build=false"#]
+        );
+        assert!(!rig.manager().saved().system_proxy);
+        // Not looked at again while it is off.
+        m.watch();
+        assert!(rig.proxy.take().is_empty());
+        // 重新接管: on again, the notice gone.
+        *rig.here.lock().unwrap() = Some(true);
+        let s = m
+            .set(Patch {
+                system_proxy: Some(true),
+                ..Patch::default()
+            })
+            .unwrap();
+        assert_eq!(s["system_proxy"], true);
+        assert_eq!(s["system_proxy_taken"], false);
+        assert_eq!(rig.proxy.take(), ["proxy on 7890"]);
+        // A miss between two not-ours: counted afresh.
+        *rig.here.lock().unwrap() = Some(false);
+        m.watch();
+        *rig.here.lock().unwrap() = None;
+        m.watch();
+        *rig.here.lock().unwrap() = Some(false);
+        m.watch();
+        assert_eq!(m.status()["system_proxy"], true);
+        // Taken again, then the core switched off: the notice goes too.
+        m.watch();
+        assert_eq!(m.status()["system_proxy_taken"], true);
+        m.stop();
+        assert_eq!(m.status()["system_proxy_taken"], false);
     }
 }

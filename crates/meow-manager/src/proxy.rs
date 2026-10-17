@@ -17,7 +17,7 @@
 
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Runs OS commands for [`SystemProxy`].
 pub trait Commands: Send + Sync {
@@ -109,6 +109,20 @@ pub struct SystemProxy {
     run: Arc<dyn Commands>,
     /// KDE 5's tools (`kwriteconfig5`) rather than 6's.
     kde5: bool,
+    /// Where the proxy read back as ours right after [`Self::enable`]:
+    /// only these are looked at by [`Self::points_here`] (a setting that
+    /// never took, or cannot be read, says nothing).
+    ours: Mutex<Vec<Place>>,
+}
+
+/// One place the OS keeps a proxy setting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Place {
+    Windows,
+    Gnome,
+    Kde,
+    /// A macOS network service.
+    Mac(String),
 }
 
 impl SystemProxy {
@@ -118,6 +132,7 @@ impl SystemProxy {
             os,
             run,
             kde5,
+            ours: Mutex::new(Vec::new()),
         }
     }
 
@@ -147,12 +162,94 @@ impl SystemProxy {
             Os::Windows => self.windows_set(port),
             Os::Other => {}
         }
+        let places: Vec<Place> = match self.os {
+            Os::Linux => vec![Place::Gnome, Place::Kde],
+            Os::MacOs => match saved.get("services") {
+                Some(Value::Object(services)) => services.keys().cloned().map(Place::Mac).collect(),
+                _ => Vec::new(),
+            },
+            Os::Windows => vec![Place::Windows],
+            Os::Other => Vec::new(),
+        };
+        let ours = places
+            .into_iter()
+            .filter(|p| self.reads_ours(p, port) == Some(true))
+            .collect();
+        *self.ours.lock().unwrap_or_else(|e| e.into_inner()) = ours;
         Ok(())
+    }
+
+    /// Whether the proxy still points at 127.0.0.1:`port` where
+    /// [`Self::enable`] set it: false as soon as one of those places says
+    /// otherwise (another program set its own proxy); None when nothing
+    /// can be told (never enabled, nothing read back as ours, unreadable).
+    pub fn points_here(&self, port: u16) -> Option<bool> {
+        let ours = self.ours.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut here = None;
+        for place in &ours {
+            match self.reads_ours(place, port) {
+                Some(false) => return Some(false),
+                Some(true) => here = Some(true),
+                None => {}
+            }
+        }
+        here
+    }
+
+    /// What was there before [`Self::enable`] dropped, not put back:
+    /// another program set the proxy since, and its settings stay.
+    pub fn forget(&self) {
+        self.ours.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let _ = std::fs::remove_file(&self.state);
+    }
+
+    /// `place` reads 127.0.0.1:`port` (None: it cannot be read).
+    fn reads_ours(&self, place: &Place, port: u16) -> Option<bool> {
+        let port_s = port.to_string();
+        match place {
+            Place::Windows => {
+                let enable = self.windows_value("ProxyEnable")?;
+                let server = self.windows_value("ProxyServer").unwrap_or_default();
+                Some(
+                    (enable == "0x1" || enable == "1") && server == format!("127.0.0.1:{port}"),
+                )
+            }
+            Place::Gnome => {
+                let get = |schema: &str, key: &str| self.run.out("gsettings", &["get", schema, key]);
+                let mode = get("org.gnome.system.proxy", "mode")?;
+                let host = get("org.gnome.system.proxy.http", "host").unwrap_or_default();
+                let p = get("org.gnome.system.proxy.http", "port").unwrap_or_default();
+                Some(mode == "'manual'" && host == "'127.0.0.1'" && p == port_s)
+            }
+            Place::Kde => {
+                let get = |key: &str| {
+                    self.run.out(
+                        self.kde_read_tool(),
+                        &["--file", "kioslaverc", "--group", "Proxy Settings", "--key", key],
+                    )
+                };
+                let kind = get("ProxyType")?;
+                let http = get("httpProxy").unwrap_or_default();
+                Some(kind == "1" && http == format!("http://127.0.0.1 {port}"))
+            }
+            Place::Mac(service) => {
+                let out = self.run.out(NETWORKSETUP, &["-getwebproxy", service])?;
+                let field = |name: &str| {
+                    out.lines()
+                        .find_map(|l| l.strip_prefix(&format!("{name}: ")))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned()
+                };
+                Some(field("Enabled") == "Yes" && field("Server") == "127.0.0.1" && field("Port") == port_s)
+            }
+        }
     }
 
     /// What was there before [`Self::enable`] put back; nothing saved,
     /// nothing done. Safe at any time.
     pub fn disable(&self) {
+        self.ours.lock().unwrap_or_else(|e| e.into_inner()).clear();
         let Some(saved) = self.read_state() else {
             return;
         };
@@ -448,24 +545,26 @@ impl SystemProxy {
 
     // ----------------------------------------------------------- Windows
 
+    /// A value of the Internet Settings as `reg query` prints it (None:
+    /// not there, or `reg` failed).
+    fn windows_value(&self, name: &str) -> Option<String> {
+        let out = self.run.out("reg", &["query", INET, "/v", name])?;
+        out.lines().find_map(|l| {
+            let mut parts = l.split_whitespace();
+            (parts.next() == Some(name)).then(|| {
+                let _type = parts.next();
+                parts.collect::<Vec<_>>().join(" ")
+            })
+        })
+    }
+
     fn windows_capture(&self) -> Map<String, Value> {
-        let value = |name: &str| -> Value {
-            let Some(out) = self.run.out("reg", &["query", INET, "/v", name]) else {
-                return Value::Null;
-            };
-            out.lines()
-                .find_map(|l| {
-                    let mut parts = l.split_whitespace();
-                    (parts.next() == Some(name)).then(|| {
-                        let _type = parts.next();
-                        parts.collect::<Vec<_>>().join(" ")
-                    })
-                })
-                .map_or(Value::Null, Value::String)
-        };
         let mut m = Map::new();
         for name in ["ProxyEnable", "ProxyServer", "ProxyOverride"] {
-            m.insert(name.into(), value(name));
+            m.insert(
+                name.into(),
+                self.windows_value(name).map_or(Value::Null, Value::String),
+            );
         }
         m
     }
@@ -758,5 +857,69 @@ pub(crate) mod tests {
             "reg add {INET} /v ProxyServer /t REG_SZ /d corp:3128 /f"
         )));
         assert!(calls.contains(&format!("reg delete {INET} /v ProxyOverride /f")));
+    }
+    #[test]
+    fn another_program_s_proxy_is_seen_and_left_as_it_is() {
+        let (_d, run, p) = proxy(Os::Windows);
+        let q = |n: &str| format!("reg query {INET} /v {n}");
+        let line = |n: &str, t: &str, v: &str| format!("\r\n{INET}\r\n    {n}    {t}    {v}\r\n");
+        // Never enabled: nothing to tell.
+        assert_eq!(p.points_here(7890), None);
+        // What was there before is saved already (no capture).
+        std::fs::write(
+            p.state_file(),
+            r#"{"ProxyEnable":"0x1","ProxyServer":"corp:3128","ProxyOverride":null}"#,
+        )
+        .unwrap();
+        run.answer(&q("ProxyEnable"), &line("ProxyEnable", "REG_DWORD", "0x1"));
+        run.answer(&q("ProxyServer"), &line("ProxyServer", "REG_SZ", "127.0.0.1:7890"));
+        p.enable(7890).unwrap();
+        assert_eq!(p.points_here(7890), Some(true));
+        // Another program points it at its own port.
+        run.answer(&q("ProxyServer"), &line("ProxyServer", "REG_SZ", "127.0.0.1:7897"));
+        assert_eq!(p.points_here(7890), Some(false));
+        // Or turns it off.
+        run.answer(&q("ProxyServer"), &line("ProxyServer", "REG_SZ", "127.0.0.1:7890"));
+        run.answer(&q("ProxyEnable"), &line("ProxyEnable", "REG_DWORD", "0x0"));
+        assert_eq!(p.points_here(7890), Some(false));
+        // Left as it is: what was before is not put back over it.
+        p.forget();
+        assert!(!p.state_file().exists());
+        run.take();
+        p.disable();
+        assert!(run.take().is_empty());
+        assert_eq!(p.points_here(7890), None);
+    }
+
+    #[test]
+    fn only_places_that_took_the_proxy_are_looked_at() {
+        let (_d, run, p) = proxy(Os::Linux);
+        std::fs::write(p.state_file(), r#"{"gnome":{},"kde":{}}"#).unwrap();
+        run.answer("gsettings get org.gnome.system.proxy mode", "'manual'");
+        run.answer("gsettings get org.gnome.system.proxy.http host", "'127.0.0.1'");
+        run.answer("gsettings get org.gnome.system.proxy.http port", "7890");
+        // KDE's settings cannot be read here: not looked at.
+        p.enable(7890).unwrap();
+        assert_eq!(p.points_here(7890), Some(true));
+        run.answer("gsettings get org.gnome.system.proxy.http port", "7897");
+        assert_eq!(p.points_here(7890), Some(false));
+        // Put back: nothing looked at any more.
+        p.disable();
+        assert_eq!(p.points_here(7890), None);
+
+        let (_d, run, p) = proxy(Os::MacOs);
+        std::fs::write(p.state_file(), r#"{"services":{"Wi-Fi":{},"USB LAN":{}}}"#).unwrap();
+        run.answer(
+            "/usr/sbin/networksetup -getwebproxy Wi-Fi",
+            "Enabled: Yes\nServer: 127.0.0.1\nPort: 7890\nAuthenticated Proxy Enabled: 0",
+        );
+        // USB LAN never took it (not read back as ours): not looked at.
+        p.enable(7890).unwrap();
+        assert_eq!(p.points_here(7890), Some(true));
+        run.answer(
+            "/usr/sbin/networksetup -getwebproxy Wi-Fi",
+            "Enabled: No\nServer: 127.0.0.1\nPort: 7890",
+        );
+        assert_eq!(p.points_here(7890), Some(false));
     }
 }
