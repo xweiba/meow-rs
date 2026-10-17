@@ -72,6 +72,8 @@ pub fn rule_target_tag(t: &RuleTarget) -> String {
         RuleTarget::Line(tag) => tag.clone(),
         RuleTarget::Iface(name) => iface_tag(name),
         RuleTarget::Proxy => "proxy".into(),
+        // Never a rule line (the builder leaves the rule out).
+        RuleTarget::Unknown(raw) => raw.clone(),
     }
 }
 

@@ -1,0 +1,63 @@
+{
+  "about": "Settings as the app wrote them around 2026-10-05 (0fc1259 .. 830bdf6): the Go core, the old local port, the top-level 速度最快, 🎮 Steam, conditions on each entry, a user group with hand-picked members.",
+  "settings": {
+    "mode": "smart",
+    "selected": "fastest",
+    "mixed_port": 17890,
+    "core": "singbox",
+    "tun": false,
+    "system_proxy": true,
+    "rules": [
+      {"match": "domain", "value": "steampowered.com", "target": "line:policy:steam"},
+      {"match": "domain", "value": "home.lan", "target": "direct", "on": {"name": "HomeWifi"}},
+      {"match": "keyword", "value": "nas", "target": "device:abc"}
+    ],
+    "hosts": [
+      {"match": "exact", "pattern": "nas.lan", "address": "192.168.1.5", "ssid": "HomeWifi"}
+    ],
+    "wifi": [{"ssid": "OfficeWifi", "mode": "direct"}],
+    "group_strategy": {"region:HK": "fastest"},
+    "policies": {"policy:steam": "region:JP", "policy:google": "fastest", "policy:cncdn": "direct"},
+    "custom_groups": [
+      {"id": "g1", "name": "工作", "members": ["ssh:s1", "region:US", "iface:eth1"], "keywords": ["corp"], "pick": "group:g1~fastest"}
+    ],
+    "group_edits": {"policy:foreign": {"add": ["ssh:s1", "region:JP"], "remove": ["region:HK"]}},
+    "ssh": [
+      {"id": "s1", "name": "跳板", "hops": [{"host": "1.2.3.4", "port": 22, "user": "root", "key": "k1"}]}
+    ]
+  },
+  "migrated": {
+    "mode": "smart",
+    "selected": "auto",
+    "mixed_port": 7890,
+    "tun": false,
+    "system_proxy": true,
+    "rules": [
+      {"match": "domain", "value": "steampowered.com", "target": "line:policy:steam"},
+      {"match": "domain", "value": "home.lan", "target": "direct", "network": "net-1"},
+      {"match": "keyword", "value": "nas", "target": "device:abc"}
+    ],
+    "hosts": [
+      {"match": "exact", "pattern": "nas.lan", "address": "192.168.1.5", "network": "net-1"}
+    ],
+    "wifi": [{"mode": "direct", "network": "net-2"}],
+    "group_strategy": {"region:HK": "fastest"},
+    "policies": {"policy:google": "auto", "policy:cncdn": "direct", "policy:games": "region:JP"},
+    "custom_groups": [
+      {"id": "g1", "name": "工作", "pick": "auto", "extras": ["ssh:s1", "iface:eth1"]}
+    ],
+    "group_edits": {"policy:foreign": {"extras": ["ssh:s1"]}},
+    "ssh": [
+      {"id": "s1", "name": "跳板", "hops": [{"host": "1.2.3.4", "port": 22, "user": "root", "key": "k1"}]}
+    ],
+    "networks": [
+      {"id": "net-1", "name": "HomeWifi", "on": {"name": "HomeWifi"}},
+      {"id": "net-2", "name": "OfficeWifi", "on": {"name": "OfficeWifi"}}
+    ],
+    "group_use": {
+      "proxy": {"members": {"auto": {"use": "fastest"}}},
+      "policy:google": {"members": {"auto": {"use": "fastest"}}},
+      "group:g1": {"members": {"auto": {"use": "fastest"}}}
+    }
+  }
+}

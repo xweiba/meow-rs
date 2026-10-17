@@ -893,7 +893,8 @@
             "region:other"
           ],
           "pick": "auto",
-          "card": true
+          "card": true,
+          "stale": "香港 01 IEPL"
         },
         {
           "tag": "auto",

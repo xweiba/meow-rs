@@ -26,6 +26,7 @@ use crate::model::settings::{
     AppMatcher, GroupEdit, ProxyMode, ProxySettings, RuleTarget, SshChain,
 };
 use crate::plan::group_tree::BADGE_SUBSCRIPTION;
+use crate::plan::legacy::{line_candidates, moved_region};
 use crate::plan::{
     final_policy, outbound_tags, AutoStrategy, GroupTree, ImportedSplit, Policy, RoutePolicy,
     RuntimeOptions, POLICIES,
@@ -180,12 +181,34 @@ impl<'a> Plan<'a> {
     }
 
     /// Where a user rule's target is, as the core names it: REJECT for a
-    /// device (none on this path) or a line that no longer exists.
-    fn target(&self, t: &RuleTarget) -> String {
+    /// device (none on this path) or a line that no longer exists (under
+    /// none of its old names either, [`line_candidates`]); None for a
+    /// target this version cannot read: no rule, its sites go on to the
+    /// rules after it.
+    fn target(&self, t: &RuleTarget) -> Option<String> {
+        match self.resolve(t) {
+            TargetState::Same(to) | TargetState::Moved(to) => Some(to),
+            TargetState::Gone => Some("REJECT".into()),
+            TargetState::Unknown => None,
+        }
+    }
+
+    fn resolve(&self, t: &RuleTarget) -> TargetState {
         match t {
-            RuleTarget::Device(_) => "REJECT".into(),
-            RuleTarget::Line(tag) if !self.choices.contains(tag) => "REJECT".into(),
-            _ => rule_target_tag(t),
+            RuleTarget::Device(_) => TargetState::Gone,
+            RuleTarget::Unknown(_) => TargetState::Unknown,
+            RuleTarget::Line(tag) if !self.choices.contains(tag) => {
+                let pool = self.input.pool;
+                std::iter::once(tag.clone())
+                    .chain(line_candidates(tag))
+                    .flat_map(|c| {
+                        let region = moved_region(&c, pool);
+                        std::iter::once(c).chain(region)
+                    })
+                    .find(|c| c != tag && self.choices.contains(c))
+                    .map_or(TargetState::Gone, TargetState::Moved)
+            }
+            _ => TargetState::Same(rule_target_tag(t)),
         }
     }
 
@@ -294,7 +317,7 @@ impl<'a> Plan<'a> {
         let user: Vec<String> = s
             .rules
             .iter()
-            .filter_map(|r| custom_rule_line(r, &self.target(&r.target)))
+            .filter_map(|r| custom_rule_line(r, &self.target(&r.target)?))
             .collect();
         out.extend(user.iter().cloned());
         out.extend(module_rules.iter().cloned());
@@ -384,6 +407,38 @@ impl<'a> Plan<'a> {
             self.input.utc_offset,
         )
     }
+}
+
+/// Where a user rule's saved target leads in this build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TargetState {
+    /// There, as saved.
+    Same(String),
+    /// Saved under an old name of this group (see [`line_candidates`]).
+    Moved(String),
+    /// A line or group there is none of now: its sites are refused.
+    Gone,
+    /// A target this version cannot read: the rule makes no line.
+    Unknown,
+}
+
+/// The user rules' targets that do not lead where they say, by their
+/// saved form (`line:…`, as in proxy.json) → `{"state": "moved", "to":
+/// tag}`, `{"state": "gone"}` (refused) or `{"state": "unknown"}` (no rule:
+/// the sites go on to the rules after it). The rules page marks them.
+pub fn rule_target_states(input: &EmitInput<'_>) -> Map<String, Value> {
+    let plan = Plan::new(input);
+    let mut out = Map::new();
+    for r in &input.settings.rules {
+        let state = match plan.resolve(&r.target) {
+            TargetState::Same(_) => continue,
+            TargetState::Moved(to) => serde_json::json!({"state": "moved", "to": to}),
+            TargetState::Gone => serde_json::json!({"state": "gone"}),
+            TargetState::Unknown => serde_json::json!({"state": "unknown"}),
+        };
+        out.insert(r.target.encode(), state);
+    }
+    out
 }
 
 /// The meow config (Dart: `buildClashConfig`), keys in Dart's order.

@@ -141,6 +141,10 @@ pub struct GroupSpec {
     /// A group's own copy of a member ([`with_group_use`]): the member
     /// it stands for in that group.
     pub origin: Option<String>,
+    /// The pick the user saved for it that it does not offer now (an
+    /// older version's, a line or group gone): it runs on its default and
+    /// the screen says so ([`mark_stale`]).
+    pub stale: Option<String>,
 }
 
 impl GroupSpec {
@@ -159,6 +163,7 @@ impl GroupSpec {
             raw_type: None,
             edited: false,
             origin: None,
+            stale: None,
         }
     }
 
@@ -197,6 +202,9 @@ impl GroupSpec {
         }
         if let Some(o) = &self.origin {
             m.insert("origin".into(), o.clone().into());
+        }
+        if let Some(o) = &self.stale {
+            m.insert("stale".into(), o.clone().into());
         }
         Value::Object(m)
     }
@@ -1206,6 +1214,58 @@ fn automatic_in_use<'a>(
         g = next;
     }
     Some(path)
+}
+
+/// Marks each card whose saved pick it does not offer ([`GroupSpec::stale`]):
+/// 🚀 节点选择's `selected` (a single line of the pool is its region's
+/// pick, not stale), a built-in policy's `policies` (the old 固定出口 pick
+/// `<tag>~sticky` is the switch), a user group's `pick` / `group_pick`,
+/// any other selector's `group_pick`. Offered: a member, a mode, or the
+/// group's own copy of it.
+pub fn mark_stale(tree: &mut GroupTree, s: &ProxySettings, lines: &[String]) {
+    for g in &mut tree.groups {
+        if g.kind != GroupKind::Select || !g.card || g.origin.is_some() || g.raw_type.is_some() {
+            continue;
+        }
+        let tag = g.tag.as_str();
+        let saved: Vec<&str> = if tag == outbound_tags::PROXY {
+            Some(s.selected.as_str())
+                .filter(|v| !lines.iter().any(|l| l == v))
+                .into_iter()
+                .collect()
+        } else if policy_by_tag(tag).is_some() {
+            s.policies
+                .get(tag)
+                .map(String::as_str)
+                .filter(|v| v.strip_prefix(tag) != Some("~sticky"))
+                .into_iter()
+                .collect()
+        } else if let Some(c) = s.custom_groups.iter().find(|c| c.tag() == tag) {
+            s.group_picks
+                .get(tag)
+                .into_iter()
+                .chain(c.pick.as_ref())
+                .map(String::as_str)
+                .collect()
+        } else {
+            s.group_picks
+                .get(tag)
+                .map(String::as_str)
+                .into_iter()
+                .collect()
+        };
+        let Some(first) = saved.first().map(|v| clash_name(v)) else {
+            continue;
+        };
+        let offered = saved.iter().map(|v| clash_name(v)).any(|want| {
+            g.pick.as_deref() == Some(want)
+                || g.choices()
+                    .any(|m| m == want || copy_origin(tag, m) == Some(want))
+        });
+        if !offered {
+            g.stale = Some(first.to_owned());
+        }
+    }
 }
 
 /// Our outbound names as the core's: `direct` → DIRECT, `block` → REJECT.

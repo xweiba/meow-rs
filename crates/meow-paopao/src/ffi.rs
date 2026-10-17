@@ -1,7 +1,7 @@
 //! C ABI over [`crate::api`] for the Dart app (dart:ffi, synchronous):
 //! NUL-terminated UTF-8 JSON in, a string this library allocated out, freed
 //! with [`paopao_free`]. Entry points: `paopao_parse`, `paopao_build`,
-//! `paopao_explain`. Built into `libmeow_mobile.so` on Android and into
+//! `paopao_explain`, `paopao_migrate`. Built into `libmeow_mobile.so` on Android and into
 //! the desktop `meow_paopao` library.
 
 use std::ffi::{c_char, CStr, CString};
@@ -73,6 +73,17 @@ pub unsafe extern "C" fn paopao_build(input: *const c_char) -> *mut c_char {
 #[no_mangle]
 pub unsafe extern "C" fn paopao_explain(input: *const c_char, query: *const c_char) -> *mut c_char {
     call2(input, query, crate::api::explain_json)
+}
+
+/// Settings an older app wrote → the current format: `{"settings": {...}}`
+/// → `{settings, changes, version}` (see [`crate::api::migrate_json`]).
+///
+/// # Safety
+/// `input` is a valid NUL-terminated string; free the result with
+/// [`paopao_free`].
+#[no_mangle]
+pub unsafe extern "C" fn paopao_migrate(input: *const c_char) -> *mut c_char {
+    call(input, crate::api::migrate_json)
 }
 
 /// Frees a string returned by this library; null is ignored.

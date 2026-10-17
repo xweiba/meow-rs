@@ -1,0 +1,52 @@
+{
+  "about": "Settings from just before 94d7024 (2026-10-16): 🚀 节点选择 on 直连, ♻️ 自动选择's modes picked in other groups, a use 'auto', a rule to a region that now has one line.",
+  "settings": {
+    "mode": "smart",
+    "selected": "DIRECT",
+    "mixed_port": 7890,
+    "rules": [
+      {"match": "domain", "value": "a.com", "target": "proxy"},
+      {"match": "domain", "value": "b.com", "target": "line:region:JP"},
+      {"match": "domain", "value": "c.com", "target": "block"}
+    ],
+    "policies": {"policy:youtube": "auto~fastest", "policy:telegram": "proxy", "policy:social": "region:HK"},
+    "group_defaults": {"policy:media": "select"},
+    "custom_groups": [
+      {"id": "g2", "name": "游戏", "pick": "auto~fastest"},
+      {"id": "g3", "name": "下载"}
+    ],
+    "group_pick": {"region:JP": "region:JP~fastest", "auto": "auto~balance"},
+    "group_use": {"policy:dev": {"members": {"auto": {"use": "auto"}}}}
+  },
+  "migrated": {
+    "mode": "smart",
+    "selected": "auto",
+    "mixed_port": 7890,
+    "rules": [
+      {"match": "domain", "value": "a.com", "target": "direct"},
+      {"match": "domain", "value": "b.com", "target": "line:region:JP"},
+      {"match": "domain", "value": "c.com", "target": "block"}
+    ],
+    "policies": {
+      "policy:youtube": "auto",
+      "policy:telegram": "direct",
+      "policy:social": "region:HK",
+      "policy:netflix": "direct",
+      "policy:media": "direct",
+      "policy:dev": "direct",
+      "policy:foreign": "direct",
+      "policy:final": "direct"
+    },
+    "group_defaults": {"policy:media": "select"},
+    "custom_groups": [
+      {"id": "g2", "name": "游戏", "pick": "auto"},
+      {"id": "g3", "name": "下载", "pick": "DIRECT"}
+    ],
+    "group_pick": {"region:JP": "region:JP~fastest", "auto": "auto~balance"},
+    "group_use": {
+      "policy:dev": {"members": {"auto": {"use": "smart"}}},
+      "policy:youtube": {"members": {"auto": {"use": "fastest"}}},
+      "group:g2": {"members": {"auto": {"use": "fastest"}}}
+    }
+  }
+}

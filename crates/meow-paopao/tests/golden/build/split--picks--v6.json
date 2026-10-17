@@ -302,8 +302,8 @@
           "name": "proxy",
           "type": "select",
           "proxies": [
-            "auto",
-            "region:other"
+            "region:other",
+            "auto"
           ]
         },
         {
@@ -348,10 +348,10 @@
           "name": "policy:ai",
           "type": "select",
           "proxies": [
-            "policy:ai@auto~auto",
+            "policy:ai@region:other~auto",
             "DIRECT",
             "REJECT",
-            "policy:ai@region:other~auto"
+            "policy:ai@auto~auto"
           ]
         },
         {
@@ -880,7 +880,7 @@
             "auto",
             "region:other"
           ],
-          "pick": "auto",
+          "pick": "region:other",
           "card": true
         },
         {
@@ -947,7 +947,7 @@
             "policy:ai@auto~auto",
             "policy:ai@region:other~auto"
           ],
-          "pick": "policy:ai@auto~auto",
+          "pick": "policy:ai@region:other~auto",
           "card": true,
           "badge": "内置"
         },
@@ -1156,7 +1156,8 @@
             "region:other~fastest"
           ],
           "pick": "region:other~auto",
-          "card": true
+          "card": true,
+          "stale": "香港 02"
         },
         {
           "tag": "region:other~auto",

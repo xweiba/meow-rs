@@ -13,7 +13,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::emit::{build_clash_config, effective_rules, EmitInput};
+use crate::emit::{build_clash_config, effective_rules, rule_target_states, EmitInput};
 use crate::plan::{
     imported_split, offered_route_policies, route_catalog, tree_for, BuildInput, GroupTree,
     RoutePolicy,
@@ -57,6 +57,9 @@ pub struct BuildOutput {
     /// What the route API offers (Dart `ProxyController.routePolicies`):
     /// only policies the config has a target for (B29).
     pub route_policies: Vec<RoutePolicy>,
+    /// The user rules whose target does not lead where it says
+    /// ([`rule_target_states`]): saved target → `{state, to?}`.
+    pub rule_targets: Map<String, Value>,
 }
 
 impl BuildOutput {
@@ -78,6 +81,10 @@ impl BuildOutput {
                     .collect(),
             ),
         );
+        m.insert(
+            "ruleTargets".into(),
+            Value::Object(self.rule_targets.clone()),
+        );
         Value::Object(m)
     }
 }
@@ -90,6 +97,7 @@ impl std::fmt::Debug for BuildOutput {
             .field("tree", &self.tree)
             .field("rules", &self.rules)
             .field("route_policies", &self.route_policies)
+            .field("rule_targets", &self.rule_targets)
             .finish()
     }
 }
@@ -104,7 +112,7 @@ impl std::fmt::Debug for BuildOutput {
 /// raw settings, B30).
 pub fn build(input: &BuildInput) -> BuildOutput {
     let pool = build_pool(&input.pool_input());
-    let settings = input.effective();
+    let settings = crate::plan::legacy::for_lines(input.effective(), &pool);
     let split = imported_split(input, &pool, &settings);
     // One tree: the screen's and the config's (B2).
     let tree = tree_for(&settings, &pool, &split);
@@ -136,13 +144,21 @@ pub fn build(input: &BuildInput) -> BuildOutput {
     };
     let config = build_clash_config(&emit).config;
     let rules = effective_rules(&config);
+    let rule_targets = rule_target_states(&emit);
     BuildOutput {
         config,
         pool,
         tree,
         rules,
         route_policies,
+        rule_targets,
     }
+}
+
+/// Settings an older app wrote (`{"settings": {...}}`) in the current
+/// format → `{settings, changes, version}` ([`crate::model::migrate`]).
+pub fn migrate_json(input: &str) -> Value {
+    crate::model::migrate::migrate_json(input)
 }
 
 /// `ProxyController.configInput()` as JSON → [`BuildOutput::to_json`], or

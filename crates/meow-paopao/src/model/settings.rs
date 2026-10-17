@@ -210,6 +210,10 @@ pub enum RuleTarget {
     Line(String),
     /// Direct, but out of network interface `name` (another VPN's `utun6`).
     Iface(String),
+    /// A target this version does not know, as saved: kept and written
+    /// back, but no rule is made of it (its sites follow the rules after
+    /// it). Never [`RuleTarget::Proxy`] unseen (Dart `RuleTarget.unknown`).
+    Unknown(String),
 }
 
 impl RuleTarget {
@@ -221,13 +225,16 @@ impl RuleTarget {
             Self::Device(id) => format!("device:{id}"),
             Self::Line(tag) => format!("line:{tag}"),
             Self::Iface(name) => format!("iface:{name}"),
+            Self::Unknown(raw) => raw.clone(),
         }
     }
 
-    /// Anything unrecognised is [`RuleTarget::Proxy`].
+    /// Anything unrecognised is [`RuleTarget::Unknown`], kept as it is.
     pub fn decode(v: &str) -> Self {
         if v == "direct" {
             Self::Direct
+        } else if v == "proxy" {
+            Self::Proxy
         } else if v == "block" {
             Self::Block
         } else if let Some(id) = v.strip_prefix("device:") {
@@ -237,7 +244,7 @@ impl RuleTarget {
         } else if let Some(name) = v.strip_prefix("iface:") {
             Self::Iface(name.into())
         } else {
-            Self::Proxy
+            Self::Unknown(v.into())
         }
     }
 }
@@ -1356,7 +1363,11 @@ mod tests {
         ] {
             assert_eq!(RuleTarget::decode(t).encode(), t);
         }
-        assert_eq!(RuleTarget::decode("whatever"), RuleTarget::Proxy);
+        assert_eq!(
+            RuleTarget::decode("whatever"),
+            RuleTarget::Unknown("whatever".into())
+        );
+        assert_eq!(RuleTarget::decode("whatever").encode(), "whatever");
     }
 
     /// B14: no `group_edits: {}` when every edit is empty.

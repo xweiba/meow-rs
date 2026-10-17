@@ -1,0 +1,36 @@
+{
+  "about": "Settings from the few hours of policy_use (ce1cf46 .. 24c3e42, 2026-10-16): 固定出口 as a member, a policy's own automatic children, a policy's copy of a region.",
+  "settings": {
+    "mode": "smart",
+    "selected": "auto~balance",
+    "mixed_port": 7890,
+    "rules": [
+      {"match": "domain", "value": "openai.com", "target": "line:policy:ai~sticky"},
+      {"match": "domain", "value": "example.org", "target": "line:policy:google~fastest"}
+    ],
+    "policies": {
+      "policy:ai": "policy:ai~sticky",
+      "policy:google": "policy:google~fastest",
+      "policy:youtube": "policy:youtube@region:US~fastest"
+    },
+    "group_defaults": {"policy:netflix": "region:SG"},
+    "policy_use": {"policy:ai": {"sticky": true, "groups": {"region:US": {"use": "fastest"}}}}
+  },
+  "migrated": {
+    "mode": "smart",
+    "selected": "auto",
+    "mixed_port": 7890,
+    "rules": [
+      {"match": "domain", "value": "openai.com", "target": "line:policy:ai~sticky"},
+      {"match": "domain", "value": "example.org", "target": "line:policy:google~fastest"}
+    ],
+    "policies": {"policy:ai": "policy:ai~sticky", "policy:google": "auto", "policy:youtube": "region:US"},
+    "group_defaults": {"policy:netflix": "region:SG"},
+    "group_use": {
+      "policy:ai": {"sticky": true, "members": {"region:US": {"use": "fastest"}}},
+      "proxy": {"members": {"auto": {"use": "balance"}}},
+      "policy:google": {"members": {"auto": {"use": "fastest"}}},
+      "policy:youtube": {"members": {"region:US": {"use": "fastest"}}}
+    }
+  }
+}

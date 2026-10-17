@@ -1,0 +1,21 @@
+{
+  "about": "Settings with parts this version cannot read (a newer version's, or damaged): every part is kept as it was, and the rest is read.",
+  "settings": {
+    "mode": "smart",
+    "selected": "auto",
+    "mixed_port": "7890",
+    "future_key": {"x": 1},
+    "rules": [
+      {"match": "domain", "value": "ok.com", "target": "direct"},
+      {"match": "future-match", "value": "x", "target": "direct"},
+      {"match": "domain", "value": "later.com", "target": "policy:x"},
+      "not a rule",
+      {"match": "keyword", "value": "  ", "target": "proxy"}
+    ],
+    "hosts": [{"match": "exact", "pattern": "a.lan", "address": "10.0.0.1"}, {"match": "?", "pattern": "b"}],
+    "ssh": [{"id": "s1", "name": "x", "hops": [{"host": "h", "port": "22", "user": "u", "key": "k"}]}],
+    "group_defaults": {"policy:ai": "region:US", "policy:steam": "fastest", "policy:ads": "region:US"},
+    "group_pick": "not a map",
+    "policies": {"policy:ai": "region:US"}
+  }
+}

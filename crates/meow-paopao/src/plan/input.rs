@@ -386,7 +386,11 @@ impl BuildInput {
                 .and_then(Value::as_array)
                 .map(|a| a.iter().filter_map(Subscription::from_json).collect())
                 .unwrap_or_default(),
-            settings: ProxySettings::from_json(v.get("settings").unwrap_or(&Value::Null)),
+            // An older app's settings (a core keeps what it was given).
+            settings: ProxySettings::from_json(
+                &crate::model::migrate::migrate_settings(v.get("settings").unwrap_or(&Value::Null))
+                    .settings,
+            ),
             network: v
                 .get("network")
                 .and_then(|n| serde_json::from_value(n.clone()).ok())

@@ -16,6 +16,7 @@ pub mod custom_groups;
 pub mod group_defaults;
 pub mod group_tree;
 mod input;
+pub mod legacy;
 mod route;
 pub mod sub_rules;
 
@@ -141,7 +142,7 @@ pub fn imported_split(input: &BuildInput, pool: &Pool, settings: &ProxySettings)
 /// The group tree of a build ([`tree_for`] with the effective settings
 /// and the subscriptions' split).
 pub fn build_tree(input: &BuildInput, pool: &Pool) -> GroupTree {
-    let s = input.effective();
+    let s = legacy::for_lines(input.effective(), pool);
     tree_for(&s, pool, &imported_split(input, pool, &s))
 }
 
@@ -154,12 +155,14 @@ pub fn build_tree(input: &BuildInput, pool: &Pool) -> GroupTree {
 /// core ran the provider's groups).
 pub fn tree_for(s: &ProxySettings, pool: &Pool, split: &ImportedSplit) -> GroupTree {
     let extras: Vec<String> = s.ssh_chains.iter().map(SshChain::tag).collect();
-    build_group_tree(&TreeInput {
+    let mut tree = build_group_tree(&TreeInput {
         lines: &pool.tags,
         base: &pool.groups,
         settings: s,
         split,
         extras: &extras,
         smart_mode: s.mode == ProxyMode::Smart,
-    })
+    });
+    group_tree::mark_stale(&mut tree, s, &pool.tags);
+    tree
 }

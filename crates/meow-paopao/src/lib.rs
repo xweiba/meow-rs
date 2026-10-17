@@ -34,11 +34,14 @@ pub mod pool;
 pub mod refresh;
 pub mod rules;
 
-pub use api::{build, build_json, explain, explain_json, parse_json, BuildOutput, Explanation};
+pub use api::{
+    build, build_json, explain, explain_json, migrate_json, parse_json, BuildOutput, Explanation,
+};
 pub use emit::{build_clash_config, effective_rules, own_app_rule, ClashConfig, EmitInput};
 pub use ingest::{
     parse_share_link, parse_share_links, parse_subscription, usage_from_names, ParseError,
 };
+pub use model::migrate::{migrate_settings, Migrated, SETTINGS_VERSION};
 pub use model::network::{effective_settings, NetworkInfo, NetworkKind};
 pub use model::node::{ParseResult, ProxyNode, SUPPORTED_NODE_TYPES};
 pub use model::settings::ProxySettings;
