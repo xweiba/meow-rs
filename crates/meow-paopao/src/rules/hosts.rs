@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use crate::model::settings::{HostEntry, HostMatch};
 
-/// meow-rs `paopao-hosts`: the entries in order (the first match wins),
+/// meow-rs `paopao-hosts`: preserve the user's order to break specificity ties,
 /// each `{type, value, address?}` with type `exact` / `suffix` / `keyword`
 /// / `regex` / `wildcard`; no `address` = let the name through unchanged.
 ///

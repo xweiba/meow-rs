@@ -461,6 +461,7 @@ impl Manager {
         run: Option<Run>,
         system_proxy: Option<bool>,
     ) -> Result<Value, Refusal> {
+        let reuse = run.is_none();
         let run = match run.or_else(|| self.saved.run.clone()) {
             Some(r) => r,
             None => return Err(Refusal::NoRun),
@@ -473,6 +474,28 @@ impl Manager {
             self.proxy_taken = false;
         }
         self.saved.run = Some(run.clone());
+        // A tray-only cold start/restart must reread the editable DNS
+        // policy too. A config just supplied by the panel is already built
+        // from its latest settings and must never be rebuilt from old input.
+        if reuse
+            && std::fs::read(run.store().join("input.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|v| {
+                    v.pointer("/runtime/rulesFile").is_some()
+                        || v.pointer("/runtime/encryptedDnsRulesFile").is_some()
+                })
+        {
+            let keep = Self::read_keys(&run.config);
+            let next = self
+                .builder
+                .apply(&run.store(), &run.config, &Map::new(), true, &keep)
+                .map_err(|e| Refusal::Failed(Failure::new(e)))?;
+            if let Some(next) = next {
+                replace(&next, &run.config)
+                    .map_err(|e| Refusal::Failed(Failure::new(e.to_string())))?;
+            }
+        }
         let started = self.core.start(&run);
         self.saved.core = started.is_ok();
         if let Err(f) = started {
@@ -982,6 +1005,28 @@ pub(crate) mod tests {
         // Cannot be told: the same (no restart on doubt).
         *rig.same.lock().unwrap() = None;
         assert_eq!(m.status()["same_core"], true);
+    }
+
+    #[test]
+    fn tray_restart_rebuilds_file_backed_dns_rules_but_new_panel_config_does_not() {
+        let rig = Rig::new();
+        let mut manager = rig.manager();
+        let run = rig.run();
+        std::fs::create_dir_all(run.store()).unwrap();
+        std::fs::write(
+            run.store().join("input.json"),
+            r#"{"runtime":{"encryptedDnsRulesFile":"/unused/test.json"}}"#,
+        )
+        .unwrap();
+        manager.start(Some(run.clone()), None).unwrap();
+        assert!(rig.build.take().is_empty());
+        manager.restart().unwrap();
+        assert_eq!(rig.build.take(), ["apply {} build=true"]);
+        manager.start(Some(run), None).unwrap();
+        assert!(
+            rig.build.take().is_empty(),
+            "a new panel config must not use stale stored input"
+        );
     }
 
     #[test]

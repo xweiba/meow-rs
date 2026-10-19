@@ -111,6 +111,70 @@ pub(super) fn parse_resolv_conf(text: &str) -> (Vec<IpAddr>, Vec<String>) {
     (servers, domains)
 }
 
+/// Per-link DNS as exposed by resolved's public CLI (its internal netif
+/// state files are absent on many distributions). Global servers have no
+/// interface and are attributed by the original route snapshot.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+pub(super) fn parse_resolvectl(dns: &str, domains: &str) -> Vec<Found> {
+    fn row(line: &str) -> Option<(Option<String>, &str)> {
+        let (label, values) = line.split_once(':')?;
+        if label.trim() == "Global" {
+            return Some((None, values));
+        }
+        if !label.trim().starts_with("Link ") {
+            return None;
+        }
+        let iface = label.split_once('(')?.1.split_once(')')?.0;
+        Some((Some(iface.to_owned()), values))
+    }
+    dns.lines()
+        .filter_map(|line| {
+            let (iface, values) = row(line)?;
+            let servers: Vec<_> = values
+                .split_whitespace()
+                .filter_map(|s| {
+                    let s = s.split('#').next()?;
+                    s.parse::<std::net::SocketAddr>()
+                        .ok()
+                        .map(|a| a.ip())
+                        .or_else(|| parse_ip(s))
+                })
+                .collect();
+            if servers.is_empty() {
+                return None;
+            }
+            let domains = domains
+                .lines()
+                .filter_map(row)
+                .filter(|(name, _)| *name == iface)
+                .flat_map(|(_, values)| values.split_whitespace().filter_map(clean_domain))
+                .collect();
+            Some(Found {
+                iface,
+                servers,
+                domains,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod resolved_cli_tests {
+    use super::*;
+    #[test]
+    fn physical_and_vpn_dns_keep_their_interface_and_search_domains() {
+        let rows = parse_resolvectl(
+            "Global:\nLink 2 (enp0s31f6): 192.168.1.1\nLink 4 (tun0): 10.8.0.1 fd00::53\n",
+            "Global:\nLink 2 (enp0s31f6): ~.\nLink 4 (tun0): ~corp.example\n",
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].iface.as_deref(), Some("enp0s31f6"));
+        assert!(rows[0].domains.is_empty());
+        assert_eq!(rows[1].servers.len(), 2);
+        assert_eq!(rows[1].domains, ["corp.example"]);
+    }
+}
+
 /// The `search` / `domain` lines of a `resolv.conf`, verbatim — what our
 /// own rewrite of the file keeps, so short names still expand.
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
@@ -395,6 +459,32 @@ mod platform {
         if !found.is_empty() {
             return found;
         }
+        // Only read-only queries. The core never changes resolved's DNS
+        // configuration; cache subprocess results to keep the monitor cheap.
+        static CACHE: parking_lot::Mutex<Option<(std::time::Instant, Vec<Found>)>> =
+            parking_lot::Mutex::new(None);
+        let mut cache = CACHE.lock();
+        if cache
+            .as_ref()
+            .is_none_or(|(at, _)| at.elapsed().as_secs() >= 5)
+        {
+            let query = |what| {
+                let mut cmd = std::process::Command::new("resolvectl");
+                cmd.arg(what);
+                run_with_timeout(cmd, std::time::Duration::from_secs(2))
+                    .ok()
+                    .filter(|(s, _)| s.success())
+                    .map(|(_, out)| String::from_utf8_lossy(&out).into_owned())
+            };
+            if let Some(dns) = query("dns") {
+                let domains = query("domain").unwrap_or_default();
+                *cache = Some((std::time::Instant::now(), parse_resolvectl(&dns, &domains)));
+            }
+        }
+        if let Some((_, rows)) = cache.as_ref() {
+            found.extend(rows.iter().cloned());
+        }
+        drop(cache);
         let Some(text) = super::super::dns::original_resolv_conf() else {
             return found;
         };

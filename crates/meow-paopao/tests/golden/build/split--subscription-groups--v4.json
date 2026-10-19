@@ -197,15 +197,18 @@
       },
       "dns": {
         "enable": true,
-        "ipv6": false,
         "nameserver": [
-          "https://223.5.5.5/dns-query",
-          "223.5.5.5"
+          "https://1.1.1.1/dns-query#proxy",
+          "https://8.8.8.8/dns-query#proxy"
         ],
         "default-nameserver": [
-          "223.5.5.5",
-          "119.29.29.29"
-        ]
+          "https://1.1.1.1/dns-query"
+        ],
+        "proxy-server-nameserver": [
+          "https://223.5.5.5/dns-query",
+          "https://1.1.1.1/dns-query"
+        ],
+        "ipv6": false
       },
       "sniffer": {
         "enable": true,
@@ -348,6 +351,38 @@
         "IP-CIDR6,fc00::/7,DIRECT,no-resolve",
         "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
         "IP-CIDR6,::1/128,DIRECT,no-resolve",
+        "DOMAIN-SUFFIX,dns.google,proxy",
+        "DOMAIN-SUFFIX,cloudflare-dns.com,proxy",
+        "DOMAIN-SUFFIX,one.one.one.one,proxy",
+        "DOMAIN-SUFFIX,dns.quad9.net,proxy",
+        "DOMAIN-SUFFIX,dns.nextdns.io,proxy",
+        "DOMAIN-SUFFIX,dns.adguard-dns.com,proxy",
+        "DOMAIN-SUFFIX,dns.adguard.com,proxy",
+        "DOMAIN-SUFFIX,doh.opendns.com,proxy",
+        "DOMAIN-SUFFIX,doh.cleanbrowsing.org,proxy",
+        "DOMAIN-SUFFIX,dns.controld.com,proxy",
+        "DOMAIN-SUFFIX,doh.pub,proxy",
+        "DOMAIN-SUFFIX,dns.alidns.com,proxy",
+        "AND,((DST-PORT,443),(IP-CIDR,1.1.1.1/32,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR,1.0.0.1/32,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR,8.8.8.8/32,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR,8.8.4.4/32,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR,9.9.9.9/32,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR,149.112.112.112/32,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR,94.140.14.14/32,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR,94.140.15.15/32,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR,208.67.222.222/32,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR,208.67.220.220/32,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR,223.5.5.5/32,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR,223.6.6.6/32,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR,119.29.29.29/32,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR6,2606:4700:4700::1111/128,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR6,2606:4700:4700::1001/128,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR6,2001:4860:4860::8888/128,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR6,2001:4860:4860::8844/128,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR6,2620:fe::fe/128,no-resolve)),proxy",
+        "AND,((DST-PORT,443),(IP-CIDR6,2620:fe::9/128,no-resolve)),proxy",
+        "DST-PORT,853,proxy",
         "AND,((NETWORK,UDP),(DST-PORT,3478/5349/19302-19309)),proxy",
         "DOMAIN-SUFFIX,netflix.com,sub:🎥 奈飞",
         "DOMAIN-SUFFIX,hbo.com,sub:Media",

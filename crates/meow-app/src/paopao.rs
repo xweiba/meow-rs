@@ -373,6 +373,9 @@ fn apply(input: &str) -> (Value, i32) {
     }
     // Built at the time it runs (usage running out, plans ending).
     input["now"] = req.now.into();
+    if let Err(e) = meow_paopao::rule_profile::load(&mut input) {
+        return invalid(e);
+    }
     let built = meow_paopao::build(&meow_paopao::BuildInput::from_json(&input));
     drop(input);
     let policies: Vec<Value> = built

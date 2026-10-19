@@ -65,6 +65,38 @@ use parking_lot::RwLock;
 
 use crate::outbound_balance::Balancer;
 
+/// Dedicated bypass bit for the native DNS capture. Other routing-mark
+/// bits are preserved. Its lifetime follows the TUN capture, not the UI.
+#[cfg(target_os = "linux")]
+pub const DNS_CAPTURE_MARK: u32 = 1 << 29;
+#[cfg(target_os = "linux")]
+static DNS_CAPTURES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Marks outbound sockets while a Linux DNS interception is active.
+#[cfg(target_os = "linux")]
+pub struct DnsCaptureBypass;
+#[cfg(target_os = "linux")]
+impl DnsCaptureBypass {
+    pub fn install() -> Self {
+        DNS_CAPTURES.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+#[cfg(target_os = "linux")]
+impl Drop for DnsCaptureBypass {
+    fn drop(&mut self) {
+        DNS_CAPTURES.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn protect_dns_capture_socket(socket: &socket2::Socket) -> io::Result<()> {
+    if DNS_CAPTURES.load(Ordering::SeqCst) != 0 {
+        socket.set_mark(socket.mark()? | DNS_CAPTURE_MARK)?;
+    }
+    Ok(())
+}
+
 /// One live owner of the binding.
 struct Owner {
     id: u64,
@@ -506,6 +538,8 @@ pub(crate) fn bind_outbound(
     tried: &mut u32,
     record_member: bool,
 ) -> io::Result<BoundMember> {
+    #[cfg(target_os = "linux")]
+    protect_dns_capture_socket(socket)?;
     use crate::outbound_balance::{sticky_key, DialOutcome, DialScope};
 
     let Some((default_name, default_index, follow, balancer)) = OWNERS
@@ -599,6 +633,8 @@ pub fn bind_socket_to_interface(
     domain: socket2::Domain,
     name: &str,
 ) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    protect_dns_capture_socket(socket)?;
     let index = interface_index(name)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,

@@ -28,39 +28,27 @@ use crate::model::settings::{
 use crate::plan::group_tree::BADGE_SUBSCRIPTION;
 use crate::plan::legacy::{line_candidates, moved_region};
 use crate::plan::{
-    final_policy, outbound_tags, AutoStrategy, GroupTree, ImportedSplit, Policy, RoutePolicy,
-    RuntimeOptions, POLICIES,
+    outbound_tags, AutoStrategy, GroupTree, ImportedSplit, RoutePolicy, RuntimeOptions,
 };
 use crate::pool::{clash_proxy_for, Pool};
 use crate::rules::{
-    custom_rule_line, geo_rule, iface_tag, module_config, private_cidr_rules, rule_matcher,
-    rule_target, rule_target_tag, ssh_proxies, without_sites, ModuleConfig, ScriptModule,
-    SshSecrets, PRIVATE_RULE_SET,
+    custom_rule_line, iface_tag, module_config, rule_matcher, rule_target, rule_target_tag,
+    ssh_proxies, without_sites, ModuleConfig, ScriptModule, SshSecrets,
 };
 
 pub use groups::{clash_auto_group, clash_group};
 
-/// The order rule lines are written in, as named stages (Dart: the
-/// `rules:` list of `buildClashConfig`):
-///
-/// 1. the speed test's inbound to its selector;
-/// 2. the app's own connections through the TUN direct ([`own_app_rule`]);
-/// 3. the route API's users (`IN-USER`) to their policies;
-/// 4. private and loopback ranges direct;
-/// 5. the user's rules (a target that no longer exists: REJECT);
-/// 6. the rewrite modules' rules;
-/// 7. smart mode only: STUN over the proxy, the built-in service groups
-///    (QUIC refused first, sites left out by the user excluded), the
-///    subscriptions' rules to those groups, the subscriptions' rules to
-///    their own groups, then — unless the subscriptions' groups are used
-///    exactly as written — local names direct and the basic split;
-/// 8. `MATCH`, the catch-all.
-pub const RULE_ORDER: [&str; 8] = [
+/// Supported interpreter stages (schema identifiers, not routing data).
+/// The profile's `order` chooses their actual execution order. Privacy
+/// rules run in every mode; only service/subscription splitting is smart-only.
+pub const RULE_ORDER: [&str; 10] = [
     "speedtest-in",
     "own-app",
     "in-user",
     "private",
     "user",
+    "encrypted-dns",
+    "stun",
     "modules",
     "smart",
     "match",
@@ -68,10 +56,6 @@ pub const RULE_ORDER: [&str; 8] = [
 
 /// The speed test's inbound (Dart `OutboundTags.speedTestIn`).
 pub const SPEED_TEST_IN: &str = "speedtest-in";
-
-/// How [`own_app_rule`] starts: through the TUN, whose inbound the core
-/// names `meow-tun` (meow-common `TUN_INBOUND_NAME`).
-const OWN_APP_PREFIX: &str = "AND,((IN-NAME,meow-tun),";
 
 /// The app's own connections that came in through the TUN go direct
 /// (`self_app`: `RuntimeOptions::self_app`); through a local port — the
@@ -83,12 +67,8 @@ pub fn own_app_rule(self_app: &str) -> Option<String> {
     if app.contains(['(', ')']) {
         return None;
     }
-    Some(format!("{OWN_APP_PREFIX}({app})),DIRECT"))
+    crate::rule_profile::RuleProfile::shipped().template("ownApp", &[("app", &app)])
 }
-
-/// STUN / TURN ports (RFC 8489 3478 and 5349 for TLS; Google's
-/// 19302-19309).
-const STUN_PORTS: &str = "3478/5349/19302-19309";
 
 /// What [`build_clash_config`] reads (Dart `buildClashConfig`'s parameters
 /// as `ProxyController._launch` passes them).
@@ -221,6 +201,34 @@ impl<'a> Plan<'a> {
         self.tree.by_tag(tag).is_some()
     }
 
+    fn profile(&self) -> &crate::rule_profile::RuleProfile {
+        self.input
+            .runtime
+            .rules_profile
+            .as_ref()
+            .unwrap_or_else(|| crate::rule_profile::RuleProfile::shipped())
+    }
+
+    /// Removed groups follow the file's ordered fallback list. With no
+    /// usable configured group, refuse DNS rather than silently bypass it.
+    fn dns_policy(&self) -> &str {
+        let selected = if self.settings().dns_policy.is_empty() {
+            &self.profile().default_dns_policy
+        } else {
+            &self.settings().dns_policy
+        };
+        if self.known(selected) {
+            selected
+        } else {
+            self.profile()
+                .dns_fallbacks
+                .iter()
+                .find(|t| self.known(t))
+                .map(String::as_str)
+                .unwrap_or("REJECT")
+        }
+    }
+
     /// Exactly as the subscriptions wrote it: none of our groups.
     fn as_written(&self) -> bool {
         !self.tree.groups.is_empty()
@@ -231,52 +239,30 @@ impl<'a> Plan<'a> {
                 .all(|g| g.badge == Some(BADGE_SUBSCRIPTION))
     }
 
-    /// A built-in policy's rules: QUIC to its sites refused first (they fall
-    /// back to TCP on the same group), the domestic part of its sites to
-    /// 国内网站 ([`Policy::domestic_first`]), its rule sets, domains,
-    /// programs and ranges; each minus the sites the user left out of it.
-    fn policy_rules(&self, p: &Policy) -> Vec<String> {
-        let tag = p.tag();
-        let mut out = Vec::new();
-        if p.block_quic {
-            for r in p.rule_sets {
-                if let Some(site) = r.strip_prefix("geosite-") {
-                    out.push(format!(
-                        "AND,((NETWORK,UDP),(DST-PORT,443),(GEOSITE,{site})),REJECT"
-                    ));
-                }
+    /// Match conditions, targets and order all come from the profile;
+    /// runtime group exclusions still apply to that group's whole block.
+    fn policy_rules(&self, p: &crate::rule_profile::PolicyRules) -> Vec<String> {
+        let domestic = if self.known(&self.profile().domestic_policy) {
+            &self.profile().domestic_policy
+        } else {
+            &self.profile().domestic_fallback
+        };
+        p.rules
+            .iter()
+            .map(|r| {
+                let line =
+                    crate::rule_profile::RuleProfile::expand(r, &[("domesticPolicy", domestic)]);
+                self.excluded(&p.group, line)
+            })
+            .collect()
+    }
+
+    fn excluded(&self, target: &str, line: String) -> String {
+        match self.settings().group_edits.get(target) {
+            Some(e) if !e.exclude.is_empty() && GroupEdit::editable(target) => {
+                without_sites(&line, &e.exclude)
             }
-        }
-        if !p.domestic_first.is_empty() {
-            let china = POLICIES
-                .iter()
-                .find(|c| c.id == "china")
-                .map(Policy::tag)
-                .filter(|c| self.has_group(c))
-                .unwrap_or_else(|| "DIRECT".to_owned());
-            out.extend(p.domestic_first.iter().map(|r| geo_rule(r, &china)));
-        }
-        out.extend(p.rule_sets.iter().map(|r| geo_rule(r, &tag)));
-        out.extend(p.domains.iter().map(|d| format!("DOMAIN-SUFFIX,{d},{tag}")));
-        out.extend(
-            p.processes
-                .iter()
-                .map(|n| format!("PROCESS-NAME,{n},{tag}")),
-        );
-        out.extend(p.ip_cidrs.iter().map(|c| {
-            let kind = if c.contains(':') {
-                "IP-CIDR6"
-            } else {
-                "IP-CIDR"
-            };
-            format!("{kind},{c},{tag},no-resolve")
-        }));
-        // Only a group that takes edits leaves sites out (B25).
-        match self.settings().group_edits.get(&tag) {
-            Some(e) if !e.exclude.is_empty() && GroupEdit::editable(&tag) => {
-                out.iter().map(|r| without_sites(r, &e.exclude)).collect()
-            }
-            _ => out,
+            _ => line,
         }
     }
 
@@ -293,90 +279,151 @@ impl<'a> Plan<'a> {
     ) -> Vec<String> {
         let s = self.settings();
         let split = self.input.split;
-        let mut out = Vec::new();
+        let profile = self.profile();
+        let mut stages: indexmap::IndexMap<&str, Vec<String>> = indexmap::IndexMap::new();
         if speed_test {
-            out.push(format!(
-                "IN-NAME,{SPEED_TEST_IN},{}",
-                outbound_tags::SPEED_TEST
-            ));
+            stages
+                .entry("speedtest-in")
+                .or_default()
+                .extend(profile.template(
+                    "speedtest",
+                    &[
+                        ("inbound", SPEED_TEST_IN),
+                        ("target", outbound_tags::SPEED_TEST),
+                    ],
+                ));
         }
-        out.extend(own_app);
-        // `rule` (no target) is left to the rules.
+        stages.insert("own-app", own_app.into_iter().collect());
         for p in route
             .unwrap_or_default()
             .iter()
             .filter(|p| !p.target.is_empty())
         {
-            let t = match p.target.as_str() {
+            let target = match p.target.as_str() {
                 outbound_tags::DIRECT => "DIRECT",
-                t => t,
+                target => target,
             };
-            out.push(format!("IN-USER,{},{t}", p.id));
+            stages
+                .entry("in-user")
+                .or_default()
+                .extend(profile.template("inUser", &[("user", &p.id), ("target", target)]));
         }
-        out.extend(private_cidr_rules());
+        stages.insert("private", profile.private_rules.clone());
         let user: Vec<String> = s
             .rules
             .iter()
             .filter_map(|r| custom_rule_line(r, &self.target(&r.target)?))
             .collect();
-        out.extend(user.iter().cloned());
-        out.extend(module_rules.iter().cloned());
+        stages.insert("user", user.clone());
+        let target = self.dns_policy();
+        // Legacy API callers may still provide only the former resolver list.
+        let encrypted = self
+            .input
+            .runtime
+            .encrypted_dns_rules
+            .as_ref()
+            .filter(|_| self.input.runtime.rules_profile.is_none())
+            .map(|dns| dns.lines(target))
+            .unwrap_or_else(|| {
+                profile
+                    .encrypted_dns_rules
+                    .iter()
+                    .map(|r| crate::rule_profile::RuleProfile::expand(r, &[("dnsPolicy", target)]))
+                    .collect()
+            });
+        stages.insert(
+            "encrypted-dns",
+            encrypted
+                .into_iter()
+                .map(|r| self.excluded(target, r))
+                .collect(),
+        );
+        stages.insert(
+            "stun",
+            profile
+                .stun_rules
+                .iter()
+                .map(|r| {
+                    self.excluded(
+                        target,
+                        crate::rule_profile::RuleProfile::expand(r, &[("dnsPolicy", target)]),
+                    )
+                })
+                .collect(),
+        );
+        stages.insert("modules", module_rules.to_vec());
         let as_written = self.as_written();
+        let mut smart = Vec::new();
         if s.mode == ProxyMode::Smart {
-            out.push(format!(
-                "AND,((NETWORK,UDP),(DST-PORT,{STUN_PORTS})),{}",
-                outbound_tags::PROXY
-            ));
-            for p in POLICIES
+            for p in profile
+                .policies
                 .iter()
-                .filter(|p| !p.base && self.has_group(&p.tag()))
+                .filter(|p| !p.base && self.has_group(&p.group))
             {
-                out.extend(self.policy_rules(p));
+                smart.extend(self.policy_rules(p));
             }
-            let built_in: HashSet<String> = POLICIES
+            let built_in: HashSet<&str> = profile
+                .policies
                 .iter()
-                .filter(|p| !p.base && self.has_group(&p.tag()))
-                .map(Policy::tag)
+                .filter(|p| !p.base && self.has_group(&p.group))
+                .map(|p| p.group.as_str())
                 .collect();
-            let is_built_in = |r: &str| built_in.contains(rule_target(r));
-            // The user's matchers drop the subscriptions' same ones.
             let user_matchers: HashSet<String> = user.iter().map(|r| rule_matcher(r)).collect();
             let fresh = |r: &str| !user_matchers.contains(&rule_matcher(r));
-            out.extend(
+            smart.extend(
                 split
                     .rules
                     .iter()
-                    .filter(|r| is_built_in(r) && fresh(r))
+                    .filter(|r| built_in.contains(rule_target(r)) && fresh(r))
                     .cloned(),
             );
-            out.extend(
+            smart.extend(
                 split
                     .rules
                     .iter()
-                    .filter(|r| !is_built_in(r) && self.known(rule_target(r)) && fresh(r))
+                    .filter(|r| {
+                        !built_in.contains(rule_target(r)) && self.known(rule_target(r)) && fresh(r)
+                    })
                     .cloned(),
             );
             if !as_written {
-                out.push(geo_rule(PRIVATE_RULE_SET, "DIRECT"));
-                for p in POLICIES
+                smart.extend(profile.private_sites.clone());
+                for p in profile
+                    .policies
                     .iter()
-                    .filter(|p| p.base && self.has_group(&p.tag()))
+                    .filter(|p| p.base && self.has_group(&p.group))
                 {
-                    out.extend(self.policy_rules(p));
+                    smart.extend(self.policy_rules(p));
                 }
             }
         }
-        let catch_all = match s.mode {
-            ProxyMode::Direct => "DIRECT".to_owned(),
-            ProxyMode::Global => outbound_tags::PROXY.to_owned(),
-            ProxyMode::Smart if as_written => split
-                .final_target
-                .clone()
-                .unwrap_or_else(|| outbound_tags::PROXY.to_owned()),
-            ProxyMode::Smart => final_policy().tag(),
+        stages.insert("smart", smart);
+        let mode = match s.mode {
+            ProxyMode::Direct => "direct",
+            ProxyMode::Global => "global",
+            ProxyMode::Smart => "smart",
         };
-        out.push(format!("MATCH,{catch_all}"));
-        out
+        let catch_all = if s.mode == ProxyMode::Smart && as_written {
+            split
+                .final_target
+                .as_deref()
+                .or_else(|| profile.final_targets.get(mode).map(String::as_str))
+        } else {
+            profile.final_targets.get(mode).map(String::as_str)
+        }
+        .unwrap_or("REJECT");
+        stages.insert(
+            "match",
+            profile
+                .template("match", &[("target", catch_all)])
+                .into_iter()
+                .collect(),
+        );
+        profile
+            .order
+            .iter()
+            .flat_map(|key| stages.shift_remove(key.as_str()).unwrap_or_default())
+            .collect()
     }
 
     /// Interfaces direct traffic leaves by (rules and groups sending sites
@@ -495,7 +542,7 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
     );
     c.insert("secret".into(), rt.secret.clone().into());
     c.insert("profile".into(), sections::profile());
-    c.insert("geodata".into(), sections::geodata());
+    c.insert("geodata".into(), plan.profile().geodata.clone());
     if !s.hosts.is_empty() {
         c.insert(
             "paopao-hosts".into(),
@@ -508,8 +555,17 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
             .and_then(|g| g.pick.as_deref())
             .is_some_and(|p| p == "DIRECT" || p == outbound_tags::DIRECT)
     };
-    c.insert("dns".into(), sections::dns(rt.ipv6, s.tun, direct_pick));
-    c.insert("sniffer".into(), sections::sniffer());
+    c.insert(
+        "dns".into(),
+        sections::dns(
+            rt.ipv6,
+            s.tun,
+            plan.dns_policy(),
+            plan.profile(),
+            direct_pick,
+        ),
+    );
+    c.insert("sniffer".into(), plan.profile().sniffer.clone());
     if s.tun {
         c.insert(
             "tun".into(),
@@ -582,11 +638,13 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
 
     let route_policies = route.map(|_| input.route_policies);
     // Only the TUN brings the app's own connections in.
-    let own_app = rt
-        .self_app
-        .as_deref()
-        .filter(|_| s.tun)
-        .and_then(own_app_rule);
+    let own_app = rt.self_app.as_deref().filter(|_| s.tun).and_then(|name| {
+        let app = AppMatcher::parse(name)?.condition();
+        if app.contains(['(', ')']) {
+            return None;
+        }
+        plan.profile().template("ownApp", &[("app", &app)])
+    });
     let rules = plan.rules(speed_test.is_some(), own_app, route_policies, &mods.rules);
     c.insert("rules".into(), rules.into());
     ClashConfig {
@@ -602,6 +660,11 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
 /// with the config (B28): Dart built them apart with no MITM port, so the
 /// rules page and the conflict check missed the modules' MITM rules.
 pub fn effective_rules(config: &Map<String, Value>) -> Vec<String> {
+    let own_prefix = crate::rule_profile::RuleProfile::shipped()
+        .templates
+        .get("ownApp")
+        .and_then(|s| s.split("{app}").next())
+        .filter(|s| !s.is_empty());
     config
         .get("rules")
         .and_then(Value::as_array)
@@ -609,7 +672,7 @@ pub fn effective_rules(config: &Map<String, Value>) -> Vec<String> {
         .flatten()
         .filter_map(Value::as_str)
         .filter(|r| !r.starts_with("IN-USER,") && !r.starts_with("IN-NAME,"))
-        .filter(|r| !r.starts_with(OWN_APP_PREFIX))
+        .filter(|r| !own_prefix.is_some_and(|prefix| r.starts_with(prefix)))
         .map(str::to_owned)
         .collect()
 }

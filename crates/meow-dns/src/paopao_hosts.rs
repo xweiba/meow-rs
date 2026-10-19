@@ -3,8 +3,10 @@
 //!
 //! mihomo's `hosts:` is a [`meow_trie::DomainTrie`]: the most specific
 //! pattern wins, there are no mid-label wildcards and no way to exempt a
-//! subset of names. `paopao-hosts:` is an **ordered list** instead: the
-//! first entry whose pattern matches the queried name decides.
+//! subset of names. `paopao-hosts:` also supports mid-label wildcards and
+//! pass-through entries. Exact names win, then suffix/glob patterns with
+//! more literal characters, then keyword/regex patterns. Equal specificity
+//! retains configuration order, including pass-through exceptions.
 //!
 //! - an entry with an `address` rewrites the name to that address (DNS
 //!   answers it; the tunnel dials it, and routes LAN addresses DIRECT);
@@ -53,6 +55,21 @@ pub struct PaopaoHostRule {
 }
 
 impl PaopaoHostRule {
+    /// Rank exact names above domain patterns, and domain patterns above
+    /// arbitrary keyword/regex matches. More literal characters narrow a
+    /// suffix/glob; ties retain user order. Keep Dart hosts.dart in sync.
+    fn specificity(&self) -> (u8, usize) {
+        match &self.pattern {
+            Pattern::Exact(_) => (2, 0),
+            Pattern::Suffix(value) => (1, value.len()),
+            Pattern::Wildcard(value) => (
+                1,
+                value.bytes().filter(|c| !matches!(c, b'*' | b'?')).count(),
+            ),
+            Pattern::Keyword(_) | Pattern::Regex(_) => (0, 0),
+        }
+    }
+
     /// Build an entry. `kind` is `exact` | `suffix` | `keyword` | `regex` |
     /// `wildcard` (case-insensitive). Errors carry a human-readable reason.
     pub fn new(kind: &str, value: &str, address: Option<IpAddr>) -> Result<Self, String> {
@@ -105,8 +122,8 @@ impl PaopaoHostRule {
     }
 }
 
-/// The ordered `paopao-hosts:` list — first match wins. Build once per
-/// config and share it (`Arc`) between the DNS resolver and the tunnel.
+/// Hosts sorted by specificity, with configuration order breaking ties.
+/// Build once per config and share (`Arc`) between DNS and the tunnel.
 #[derive(Debug, Default)]
 pub struct PaopaoHosts {
     rules: Vec<PaopaoHostRule>,
@@ -117,9 +134,11 @@ impl PaopaoHosts {
         Self::default()
     }
 
-    /// Append an entry (lowest priority so far).
+    /// Insert by specificity, after existing entries of equal priority.
     pub fn push(&mut self, rule: PaopaoHostRule) {
-        self.rules.push(rule);
+        let priority = rule.specificity();
+        let at = self.rules.partition_point(|r| r.specificity() >= priority);
+        self.rules.insert(at, rule);
     }
 
     pub fn len(&self) -> usize {
@@ -306,11 +325,23 @@ mod tests {
     }
 
     #[test]
-    fn order_decides_not_specificity() {
+    fn specificity_wins_regardless_of_configuration_order() {
         let mut h = PaopaoHosts::new();
+        h.push(rule("keyword", "example", Some("10.0.0.9")));
         h.push(rule("suffix", "example.com", Some("10.0.0.1")));
+        h.push(rule("wildcard", "*.example.com", Some("10.0.0.3")));
+        h.push(rule("wildcard", "node*.example.com", None));
+        h.push(rule("suffix", "sub.example.com", Some("10.0.0.4")));
         h.push(rule("exact", "a.example.com", Some("10.0.0.2")));
-        assert_eq!(h.address_for("a.example.com"), Some(ip("10.0.0.1")));
+        h.push(rule("exact", "a.example.com", Some("10.0.0.8")));
+        assert_eq!(h.address_for("a.example.com"), Some(ip("10.0.0.2")));
+        assert_eq!(h.address_for("b.example.com"), Some(ip("10.0.0.3")));
+        assert_eq!(
+            h.lookup("node1.example.com"),
+            Some(PaopaoHostsMatch::PassThrough)
+        );
+        assert_eq!(h.address_for("a.sub.example.com"), Some(ip("10.0.0.4")));
+        assert_eq!(h.address_for("example.com"), Some(ip("10.0.0.1")));
     }
 
     #[test]

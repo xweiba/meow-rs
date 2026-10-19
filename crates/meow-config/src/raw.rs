@@ -231,7 +231,7 @@ pub struct RawConfig {
     /// Static host mappings, preferred over upstream DNS lookups. Values may
     /// be a single IP, a list of IPs, or one domain-name alias.
     pub hosts: Option<HashMap<String, HostsValue>>,
-    /// PaoPao extension: ordered hosts, first match wins (see
+    /// PaoPao extension: most-specific hosts, list order breaks ties (see
     /// `meow_dns::paopao_hosts`). Checked before `hosts:` and fake-IP by the
     /// DNS resolver, and by the tunnel before rule matching.
     pub paopao_hosts: Option<Vec<RawPaopaoHost>>,

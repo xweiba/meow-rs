@@ -531,6 +531,28 @@ impl Service {
         Ok(report)
     }
 
+    /// Reload editable rules through the same serialized native rebuild
+    /// path as subscriptions. A failed parse/reload leaves the live config.
+    pub(super) async fn apply_rules(&self) -> Result<Report, JobError> {
+        let runner = self.runner.clone().ok_or(JobError::Unavailable)?;
+        let _job = self.job.lock().await;
+        if !self.store.input().exists() {
+            return Err(JobError::NoInput);
+        }
+        let mut report = Report::default();
+        self.rebuild(
+            &runner,
+            Change {
+                always: true,
+                ..Change::default()
+            },
+            &mut report,
+        )
+        .await;
+        super::give_back();
+        Ok(report)
+    }
+
     /// A pick made in the running core (`PUT /proxies/{group}`) kept in the
     /// stored input's settings, so the configs built from it later keep it
     /// (`meow_paopao::model::settings::record_pick`). Off the request path:

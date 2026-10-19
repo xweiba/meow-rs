@@ -363,6 +363,14 @@ fn pick_of(s: &ProxySettings, tag: &str, members: &[String], fallback: &str) -> 
 /// groups. With [`GroupMode::Subscription`] and a split that has its own
 /// 节点选择: the subscription's groups as written, then the user's own.
 pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
+    build_group_tree_with_dns(
+        input,
+        &crate::rule_profile::RuleProfile::shipped().dns_fallbacks,
+    )
+}
+
+/// Same tree with the file's fallback groups retained in every mode.
+pub(super) fn build_group_tree_with_dns(input: &TreeInput<'_>, dns_groups: &[String]) -> GroupTree {
     let s = input.settings;
     let extras = input.extras;
     let own_base = |extras: &[String]| {
@@ -567,7 +575,7 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
     out.push(select);
 
     // 3. Service groups.
-    if input.smart_mode {
+    {
         let shared: HashMap<String, GroupSpec> = std::iter::once(&auto)
             .chain(&base_specs)
             .map(|g| (g.tag.clone(), g.clone()))
@@ -582,7 +590,14 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
             extras,
         };
         for p in &POLICIES {
-            if !p.base && !s.built_in_groups {
+            // DNS keeps its policy even when ordinary traffic uses global
+            // or direct mode; otherwise switching modes silently changes
+            // the DNS/STUN egress back to the general proxy selector.
+            let needed_for_dns = p.tag() == s.dns_policy || dns_groups.contains(&p.tag());
+            if !input.smart_mode && !needed_for_dns {
+                continue;
+            }
+            if !p.base && !s.built_in_groups && !needed_for_dns {
                 continue;
             }
             let g = b.policy_group(p, s, &c);
@@ -591,7 +606,12 @@ pub fn build_group_tree(input: &TreeInput<'_>) -> GroupTree {
         // The subscriptions' own groups, with their own automatic children.
         let line_set: HashSet<&str> = input.lines.iter().map(String::as_str).collect();
         // A group with no members can't run (B24).
-        for g in input.split.groups.iter().filter(|g| !g.members.is_empty()) {
+        for g in input
+            .split
+            .groups
+            .iter()
+            .filter(|g| !g.members.is_empty() && (input.smart_mode || g.tag == s.dns_policy))
+        {
             let own: Vec<String> = g
                 .members
                 .iter()

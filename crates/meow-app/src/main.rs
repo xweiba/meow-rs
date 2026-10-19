@@ -118,6 +118,13 @@ pub(crate) struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Native DNS interception owner; its stdin lifetime follows the core.
+    #[cfg(all(target_os = "linux", feature = "listener-tun"))]
+    #[command(hide = true)]
+    DnsCaptureWatch {
+        #[arg(long)]
+        port: u16,
+    },
     /// Send one unicast ARP reply to a selected LAN client (Linux only)
     #[cfg(target_os = "linux")]
     ArpReply {
@@ -849,6 +856,11 @@ fn tun_feature_gate(enable: bool) -> Option<&'static str> {
 
 fn handle_service_command(cmd: &Command, args: &Args) -> Result<()> {
     match cmd {
+        #[cfg(all(target_os = "linux", feature = "listener-tun"))]
+        Command::DnsCaptureWatch { port } => {
+            meow_listener::tun::dns_capture::watch(*port)?;
+            Ok(())
+        }
         #[cfg(target_os = "linux")]
         Command::ArpReply {
             interface,

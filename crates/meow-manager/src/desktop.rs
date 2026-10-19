@@ -155,8 +155,15 @@ impl HelperClient {
     }
 
     pub fn running(&self) -> bool {
-        self.call(&json!({"op": "status"}), Duration::from_secs(2))
-            .is_some_and(|v| v["running"] == true)
+        self.running_status() == Some(true)
+    }
+
+    /// A helper timeout is unknown, not proof that a running core exited.
+    /// The panel opening can contend with a helper request on macOS.
+    fn running_status(&self) -> Option<bool> {
+        self.call(&json!({"op": "status"}), Duration::from_secs(2))?
+            .get("running")?
+            .as_bool()
     }
 }
 
@@ -430,7 +437,11 @@ impl Core for DesktopCore {
             }
             self.adopted = None;
         }
-        self.on_helper && self.helper.as_ref().is_some_and(HelperClient::running)
+        self.on_helper
+            && self
+                .helper
+                .as_ref()
+                .is_some_and(|h| h.running_status() != Some(false))
     }
 
     fn place(&self, tun: bool) -> Option<Run> {
@@ -806,6 +817,28 @@ impl Embedded {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn helper_unknown_status_keeps_the_confirmed_core_running() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("helper.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            for reply in ["{\"error\":\"temporarily busy\"}", "{\"running\":false}"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                std::io::BufRead::read_line(&mut std::io::BufReader::new(&stream), &mut request).unwrap();
+                writeln!(stream, "{reply}").unwrap();
+            }
+        });
+        let mut core = DesktopCore::new(dir.path().join("meow"), dir.path().to_owned(), None);
+        core.helper = Some(HelperClient { socket: path });
+        core.on_helper = true;
+        assert!(core.running(), "an unknown helper reply is not a crash");
+        assert!(!core.running(), "a confirmed exit must still be reported");
+        server.join().unwrap();
+    }
 
     /// A stand-in core: a shell script that writes its arguments and waits
     /// (or exits at once when the config says so).

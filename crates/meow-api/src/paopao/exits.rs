@@ -816,34 +816,14 @@ pub fn real_ask(tunnel: meow_tunnel::Tunnel) -> Ask {
     })
 }
 
-/// A server's address (Dart `_resolveHost`): DNS-over-HTTPS (Alibaba's,
-/// then Cloudflare's), then the system resolver; a fake-ip answer is none.
+/// Node metadata uses the same file-configured proxy-host resolver as
+/// actual outbound dials. No independent DNS providers or OS fallback.
 pub fn real_resolve() -> Resolve {
     Arc::new(|host: String| {
         Box::pin(async move {
-            for url in [
-                format!("https://223.5.5.5/resolve?name={host}&type=A"),
-                format!("https://1.1.1.1/dns-query?name={host}&type=A"),
-            ] {
-                let headers = [("Accept".to_owned(), "application/dns-json".to_owned())];
-                let got = tokio::time::timeout(
-                    Duration::from_secs(8),
-                    meow_config::internal_http::fetch_response(&url, None, &headers, MAX_ANSWER),
-                )
-                .await;
-                if let Ok(Ok(res)) = got {
-                    if let Some(ip) = (res.status == 200).then(|| doh_answer(&res.body)).flatten() {
-                        return Some(ip);
-                    }
-                }
-            }
-            let found = tokio::time::timeout(
-                Duration::from_secs(4),
-                tokio::net::lookup_host((host.as_str(), 0)),
-            )
-            .await;
-            match found {
-                Ok(Ok(addrs)) => addrs.map(|a| a.ip().to_string()).find(|ip| !is_fake_ip(ip)),
+            let resolver = meow_common::host_resolver()?;
+            match tokio::time::timeout(Duration::from_secs(8), resolver.resolve(&host)).await {
+                Ok(Ok(ip)) if !is_fake_ip(&ip.to_string()) => Some(ip.to_string()),
                 _ => None,
             }
         })

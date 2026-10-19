@@ -330,6 +330,14 @@ fn pieces_match_build_goldens() {
             }
             at += 1;
         }
+        // File-backed privacy rules precede modules. Verify the module
+        // block is still contiguous and after user rules, without baking
+        // a distribution profile's length into this L4 helper test.
+        if let Some(first) = mods.rules.first() {
+            if let Some(offset) = rules[at..].iter().position(|r| *r == first) {
+                at += offset;
+            }
+        }
         for m in &mods.rules {
             if rules.get(at) != Some(&m.as_str()) {
                 fail(format!(

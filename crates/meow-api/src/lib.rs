@@ -469,6 +469,7 @@ impl ApiServer {
         // trip, with or without the app.
         if paopao.can_run() {
             tokio::spawn(paopao::run_schedule(Arc::clone(&paopao)));
+            tokio::spawn(paopao::run_rules_watch(Arc::clone(&paopao)));
             tokio::spawn(paopao::run_exits(Arc::clone(&paopao)));
             tokio::spawn(paopao::run_network(Arc::clone(&paopao)));
             tokio::spawn(paopao::run_track(Arc::clone(&paopao)));

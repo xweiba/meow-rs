@@ -57,6 +57,10 @@
 
 mod device;
 mod dns;
+#[cfg(target_os = "linux")]
+pub mod dns_capture;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod dns_routes;
 mod iface_dns;
 #[cfg(target_os = "windows")]
 mod local_dns;
@@ -744,6 +748,7 @@ impl TunListener {
         #[cfg(target_os = "windows")]
         let local_dns_sockets = if cfg.dns_hijack
             && cfg.auto_route
+            && cfg.route_scope != TunRouteScope::Global
             && self.tunnel.resolver().fake_ip_v4_gateway().is_some()
         {
             Some(local_dns::bind().await.map_err(|e| {
@@ -759,28 +764,44 @@ impl TunListener {
         // which can take tens of seconds on Windows, so run them on a
         // blocking thread. The outer TUN_STARTUP_TIMEOUT guards the overall
         // startup.
-        let _dns_guard = if cfg.dns_hijack && cfg.auto_route {
-            let t_dns = Instant::now();
-            let guard = match self.tunnel.resolver().fake_ip_v4_gateway() {
-                Some(gateway) => {
-                    let g = tokio::task::spawn_blocking(move || dns::DnsGuard::setup(gateway))
-                        .await
-                        .map_err(|join_err| {
-                            Box::new(io::Error::other(format!(
-                                "dns-guard spawn_blocking panicked: {join_err}"
-                            )))
-                        })?;
-                    let dns_ms = t_dns.elapsed().as_secs_f64() * 1000.0;
-                    let dns_active = g.is_some();
-                    info!("dns-guard setup took {dns_ms:.0}ms (active: {dns_active})");
-                    g
-                }
-                None => None,
-            };
-            guard
+        // Desktop global TUN: capture the original upstream DNS with
+        // temporary routes. No resolv.conf/networksetup/adapter DNS writes.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let _dns_routes = if cfg.dns_hijack
+            && cfg.auto_route
+            && cfg.route_scope == TunRouteScope::Global
+            && !cfg!(target_os = "linux")
+        {
+            Some(dns_routes::DnsRoutes::setup(
+                if_index,
+                cfg.inet6_address.is_some(),
+            )?)
         } else {
             None
         };
+        let _dns_guard =
+            if cfg.dns_hijack && cfg.auto_route && cfg.route_scope != TunRouteScope::Global {
+                let t_dns = Instant::now();
+                let guard = match self.tunnel.resolver().fake_ip_v4_gateway() {
+                    Some(gateway) => {
+                        let g = tokio::task::spawn_blocking(move || dns::DnsGuard::setup(gateway))
+                            .await
+                            .map_err(|join_err| {
+                                Box::new(io::Error::other(format!(
+                                    "dns-guard spawn_blocking panicked: {join_err}"
+                                )))
+                            })?;
+                        let dns_ms = t_dns.elapsed().as_secs_f64() * 1000.0;
+                        let dns_active = g.is_some();
+                        info!("dns-guard setup took {dns_ms:.0}ms (active: {dns_active})");
+                        g
+                    }
+                    None => None,
+                };
+                guard
+            } else {
+                None
+            };
 
         // lwIP answers ICMP echo itself. The core task is spawned inside
         // `NetStack::new` (one live stack per process — await `core_done`
@@ -835,6 +856,17 @@ impl TunListener {
         info!("lwIP netstack built in {stack_ms:.0}ms");
 
         let mut tasks = TaskGroup::new();
+
+        #[cfg(target_os = "linux")]
+        if cfg.dns_hijack && cfg.auto_route && cfg.route_scope == TunRouteScope::Global {
+            let capture = dns_capture::Capture::setup().await?;
+            let tunnel = self.tunnel.clone();
+            tasks.spawn(async move {
+                if let Err(e) = capture.run(tunnel).await {
+                    warn!("system DNS capture stopped: {e}");
+                }
+            });
+        }
 
         // Windows: start the local DNS server on the sockets bound earlier
         // (before DnsGuard repointed system DNS at 127.0.0.1 / ::1). The
@@ -910,6 +942,25 @@ impl TunListener {
             tokio::select! {
                 accepted = tcp_listener.next() => match accepted {
                     Some((stream, src, dst)) => {
+                        // DNS-over-TCP uses length-prefixed DNS frames,
+                        // never TLS sniffing or ordinary private-IP rules.
+                        if cfg.dns_hijack && dst.port() == 53 {
+                            let tunnel = self.tunnel.clone();
+                            let sem = conn_limit.clone();
+                            tasks.spawn(async move {
+                                let _permit = if let Some(sem) = sem {
+                                    match sem.try_acquire_owned() { Ok(p) => Some(p), Err(_) => return }
+                                } else { None };
+                                let real = tunnel.inner().is_vpn_client_source(Network::Tcp, src).await;
+                                let mut stream = stream;
+                                if let Err(e) = meow_dns::server::serve_tcp(
+                                    &mut stream, tunnel.resolver_slot(), real,
+                                ).await {
+                                    debug!("tun TCP DNS {src} -> {dst}: {e}");
+                                }
+                            });
+                            continue;
+                        }
                         // Same loop guard as the UDP path: a dial to the
                         // TUN's own subnet routes back into the device.
                         if udp::is_looping_dst(dst.ip(), tun_net) {

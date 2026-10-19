@@ -294,7 +294,7 @@ impl CustomRule {
 }
 
 /// "Send this name to that address" (like /etc/hosts, with more ways to
-/// match). In a list the first entry matching a name decides it.
+/// match). Specific names beat broader patterns; list order breaks ties.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HostEntry {
     pub matches: HostMatch,
@@ -806,6 +806,9 @@ pub struct ProxySettings {
     /// Networks named once (家里, 公司); entries refer to them by id.
     pub networks: Vec<NamedNetwork>,
     pub hosts: Vec<HostEntry>,
+    /// Group carrying application DNS and STUN. Empty follows the rule
+    /// file's default; unavailable groups use its ordered fallback list.
+    pub dns_policy: String,
     /// A different mode on certain networks; the first match wins.
     pub wifi_profiles: Vec<WifiProfile>,
     /// Group tag → how it picks (missing = balance).
@@ -850,6 +853,7 @@ impl Default for ProxySettings {
             ssh_chains: Vec::new(),
             networks: Vec::new(),
             hosts: Vec::new(),
+            dns_policy: String::new(),
             wifi_profiles: Vec::new(),
             group_strategies: IndexMap::new(),
             group_picks: IndexMap::new(),
@@ -895,6 +899,9 @@ impl ProxySettings {
         }
         if !self.hosts.is_empty() {
             m.insert("hosts".into(), array(&self.hosts, HostEntry::to_json));
+        }
+        if !self.dns_policy.is_empty() {
+            m.insert("dns_policy".into(), self.dns_policy.clone().into());
         }
         if !self.wifi_profiles.is_empty() {
             m.insert(
@@ -1031,6 +1038,7 @@ impl ProxySettings {
                 .iter()
                 .filter_map(HostEntry::from_json)
                 .collect(),
+            dns_policy: string_field(o.get("dns_policy")).unwrap_or_default(),
             wifi_profiles: entries("wifi")
                 .iter()
                 .filter_map(WifiProfile::from_json)

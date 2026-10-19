@@ -321,6 +321,7 @@
         "us:<routekey>",
         "other:<routekey>",
         "dedicated:<routekey>",
+        "ai:<routekey>",
         "foreign:<routekey>",
         "china:<routekey>"
       ],
@@ -348,15 +349,18 @@
       },
       "dns": {
         "enable": true,
-        "ipv6": false,
         "nameserver": [
-          "https://223.5.5.5/dns-query",
-          "223.5.5.5"
+          "https://1.1.1.1/dns-query#policy:ai",
+          "https://8.8.8.8/dns-query#policy:ai"
         ],
         "default-nameserver": [
-          "223.5.5.5",
-          "119.29.29.29"
-        ]
+          "https://1.1.1.1/dns-query"
+        ],
+        "proxy-server-nameserver": [
+          "https://223.5.5.5/dns-query",
+          "https://1.1.1.1/dns-query"
+        ],
+        "ipv6": false
       },
       "sniffer": {
         "enable": true,
@@ -580,6 +584,20 @@
             "auto~smart",
             "auto~balance",
             "auto~fastest"
+          ]
+        },
+        {
+          "name": "policy:ai",
+          "type": "select",
+          "proxies": [
+            "policy:ai@region:US~sticky",
+            "DIRECT",
+            "REJECT",
+            "policy:ai@auto~auto",
+            "region:TW",
+            "region:JP",
+            "region:SG",
+            "region:other"
           ]
         },
         {
@@ -1036,6 +1054,40 @@
           "url": "https://www.gstatic.com/generate_204"
         },
         {
+          "name": "policy:ai@auto~auto",
+          "type": "smart",
+          "proxies": [
+            "台湾 01",
+            "TW 02",
+            "日本 01 中转",
+            "JP 02",
+            "HY 日本",
+            "新加坡 01",
+            "SG 02 专线",
+            "TJ 新加坡",
+            "美国 01",
+            "🇺🇸 美国 02 0.5x",
+            "韩国 01",
+            "英国 01",
+            "德国 01",
+            "土耳其 01",
+            "马来西亚 01",
+            "越南 01",
+            "无名节点"
+          ],
+          "url": "https://www.gstatic.com/generate_204"
+        },
+        {
+          "name": "policy:ai@region:US~sticky",
+          "type": "smart",
+          "proxies": [
+            "美国 01",
+            "🇺🇸 美国 02 0.5x"
+          ],
+          "strategy": "sticky",
+          "url": "https://www.gstatic.com/generate_204"
+        },
+        {
           "name": "speedtest",
           "type": "select",
           "proxies": [
@@ -1076,6 +1128,7 @@
         "IN-USER,us,region:US",
         "IN-USER,other,region:other",
         "IN-USER,dedicated,kind:dedicated",
+        "IN-USER,ai,policy:ai",
         "IN-USER,foreign,policy:foreign",
         "IN-USER,china,policy:china",
         "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
@@ -1087,7 +1140,85 @@
         "IP-CIDR6,fc00::/7,DIRECT,no-resolve",
         "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
         "IP-CIDR6,::1/128,DIRECT,no-resolve",
-        "AND,((NETWORK,UDP),(DST-PORT,3478/5349/19302-19309)),proxy",
+        "DOMAIN-SUFFIX,dns.google,policy:ai",
+        "DOMAIN-SUFFIX,cloudflare-dns.com,policy:ai",
+        "DOMAIN-SUFFIX,one.one.one.one,policy:ai",
+        "DOMAIN-SUFFIX,dns.quad9.net,policy:ai",
+        "DOMAIN-SUFFIX,dns.nextdns.io,policy:ai",
+        "DOMAIN-SUFFIX,dns.adguard-dns.com,policy:ai",
+        "DOMAIN-SUFFIX,dns.adguard.com,policy:ai",
+        "DOMAIN-SUFFIX,doh.opendns.com,policy:ai",
+        "DOMAIN-SUFFIX,doh.cleanbrowsing.org,policy:ai",
+        "DOMAIN-SUFFIX,dns.controld.com,policy:ai",
+        "DOMAIN-SUFFIX,doh.pub,policy:ai",
+        "DOMAIN-SUFFIX,dns.alidns.com,policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR,1.1.1.1/32,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR,1.0.0.1/32,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR,8.8.8.8/32,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR,8.8.4.4/32,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR,9.9.9.9/32,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR,149.112.112.112/32,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR,94.140.14.14/32,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR,94.140.15.15/32,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR,208.67.222.222/32,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR,208.67.220.220/32,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR,223.5.5.5/32,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR,223.6.6.6/32,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR,119.29.29.29/32,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR6,2606:4700:4700::1111/128,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR6,2606:4700:4700::1001/128,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR6,2001:4860:4860::8888/128,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR6,2001:4860:4860::8844/128,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR6,2620:fe::fe/128,no-resolve)),policy:ai",
+        "AND,((DST-PORT,443),(IP-CIDR6,2620:fe::9/128,no-resolve)),policy:ai",
+        "DST-PORT,853,policy:ai",
+        "AND,((NETWORK,UDP),(DST-PORT,3478/5349/19302-19309)),policy:ai",
+        "GEOSITE,openai,policy:ai",
+        "GEOSITE,anthropic,policy:ai",
+        "GEOSITE,category-ai-!cn,policy:ai",
+        "GEOSITE,perplexity,policy:ai",
+        "GEOSITE,xai,policy:ai",
+        "DOMAIN-SUFFIX,challenges.cloudflare.com,policy:ai",
+        "DOMAIN-SUFFIX,arkoselabs.com,policy:ai",
+        "DOMAIN-SUFFIX,statsig.com,policy:ai",
+        "DOMAIN-SUFFIX,statsigapi.net,policy:ai",
+        "DOMAIN-SUFFIX,featuregates.org,policy:ai",
+        "DOMAIN-SUFFIX,featureassets.org,policy:ai",
+        "DOMAIN-SUFFIX,sentry.io,policy:ai",
+        "DOMAIN-SUFFIX,intercom.io,policy:ai",
+        "DOMAIN-SUFFIX,intercomcdn.com,policy:ai",
+        "DOMAIN-SUFFIX,intercomassets.com,policy:ai",
+        "DOMAIN-SUFFIX,stripe.com,policy:ai",
+        "DOMAIN-SUFFIX,stripe.network,policy:ai",
+        "DOMAIN-SUFFIX,auth0.com,policy:ai",
+        "DOMAIN-SUFFIX,ipinfo.io,policy:ai",
+        "DOMAIN-SUFFIX,ipapi.co,policy:ai",
+        "DOMAIN-SUFFIX,ipapi.is,policy:ai",
+        "DOMAIN-SUFFIX,ip-api.com,policy:ai",
+        "DOMAIN-SUFFIX,ipify.org,policy:ai",
+        "DOMAIN-SUFFIX,ipwho.is,policy:ai",
+        "DOMAIN-SUFFIX,ip.sb,policy:ai",
+        "DOMAIN-SUFFIX,ifconfig.me,policy:ai",
+        "DOMAIN-SUFFIX,ifconfig.co,policy:ai",
+        "DOMAIN-SUFFIX,icanhazip.com,policy:ai",
+        "DOMAIN-SUFFIX,ipdata.co,policy:ai",
+        "DOMAIN-SUFFIX,ipgeolocation.io,policy:ai",
+        "DOMAIN-SUFFIX,ipregistry.co,policy:ai",
+        "DOMAIN-SUFFIX,ip2location.io,policy:ai",
+        "DOMAIN-SUFFIX,ip2location.com,policy:ai",
+        "DOMAIN-SUFFIX,iplocation.net,policy:ai",
+        "DOMAIN-SUFFIX,country.is,policy:ai",
+        "DOMAIN-SUFFIX,myip.com,policy:ai",
+        "DOMAIN-SUFFIX,whatismyip.com,policy:ai",
+        "DOMAIN-SUFFIX,whatismyipaddress.com,policy:ai",
+        "DOMAIN-SUFFIX,ipleak.net,policy:ai",
+        "DOMAIN-SUFFIX,browserleaks.com,policy:ai",
+        "DOMAIN-SUFFIX,whoer.net,policy:ai",
+        "DOMAIN-SUFFIX,scamalytics.com,policy:ai",
+        "DOMAIN-SUFFIX,ipqualityscore.com,policy:ai",
+        "DOMAIN-SUFFIX,ping0.cc,policy:ai",
+        "DOMAIN-SUFFIX,ippure.com,policy:ai",
+        "DOMAIN-SUFFIX,ip.skk.moe,policy:ai",
         "GEOSITE,private,DIRECT",
         "GEOSITE,geolocation-!cn,policy:foreign",
         "GEOSITE,category-games@cn,policy:china",
@@ -1471,6 +1602,24 @@
           ],
           "pick": "auto~smart",
           "card": true
+        },
+        {
+          "tag": "policy:ai",
+          "label": "🤖 AI 服务",
+          "kind": "select",
+          "members": [
+            "DIRECT",
+            "REJECT",
+            "policy:ai@auto~auto",
+            "region:TW",
+            "region:JP",
+            "region:SG",
+            "policy:ai@region:US~sticky",
+            "region:other"
+          ],
+          "pick": "policy:ai@region:US~sticky",
+          "card": true,
+          "badge": "内置"
         },
         {
           "tag": "policy:foreign",
@@ -2000,6 +2149,43 @@
             "无名节点"
           ],
           "card": false
+        },
+        {
+          "tag": "policy:ai@auto~auto",
+          "label": "♻️ 自动选择 · 智能选择",
+          "kind": "smart",
+          "members": [
+            "台湾 01",
+            "TW 02",
+            "日本 01 中转",
+            "JP 02",
+            "HY 日本",
+            "新加坡 01",
+            "SG 02 专线",
+            "TJ 新加坡",
+            "美国 01",
+            "🇺🇸 美国 02 0.5x",
+            "韩国 01",
+            "英国 01",
+            "德国 01",
+            "土耳其 01",
+            "马来西亚 01",
+            "越南 01",
+            "无名节点"
+          ],
+          "card": false,
+          "origin": "auto"
+        },
+        {
+          "tag": "policy:ai@region:US~sticky",
+          "label": "🇺🇸 美国 · 智能选择 · 固定节点",
+          "kind": "sticky",
+          "members": [
+            "美国 01",
+            "🇺🇸 美国 02 0.5x"
+          ],
+          "card": false,
+          "origin": "region:US"
         }
       ]
     },

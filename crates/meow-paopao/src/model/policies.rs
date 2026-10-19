@@ -80,11 +80,6 @@ pub struct Policy {
     pub name: &'static str,
     /// Emoji before the name.
     pub icon: &'static str,
-    /// Rule sets (sing-box tags, `geosite-…` / `geoip-…`) whose traffic
-    /// this policy decides.
-    pub rule_sets: &'static [&'static str],
-    /// Address ranges it decides (Telegram's).
-    pub ip_cidrs: &'static [&'static str],
     /// Where its traffic goes until the user picks otherwise: `proxy`,
     /// `direct` or `block` (our outbound tags, not Clash's names).
     pub fallback: &'static str,
@@ -111,18 +106,8 @@ pub struct Policy {
     /// a mode of its own, anything else follows 自动选择's own). A 分组默认
     /// of the user's replaces it.
     pub auto_mode: Option<GroupDefaultKind>,
-    /// QUIC (UDP 443) to its sites refused so they fall back to TCP.
-    pub block_quic: bool,
     /// 固定出口 as its default: the whole service on one line.
     pub sticky_exit: bool,
-    /// Extra names (and their subdomains) it decides beyond its rule sets.
-    pub domains: &'static [&'static str],
-    /// Programs whose every connection goes here (`PROCESS-NAME`).
-    pub processes: &'static [&'static str],
-    /// Rule sets matched just before its own and sent to 🇨🇳 国内网站
-    /// (直连 without that group): the domestic part of what its own rule
-    /// sets cover (游戏平台: `geosite-category-games@cn`).
-    pub domestic_first: &'static [&'static str],
 }
 
 impl Policy {
@@ -152,8 +137,6 @@ impl Policy {
             id,
             name,
             icon,
-            rule_sets: &[],
-            ip_cidrs: &[],
             fallback,
             blockable: false,
             avoid_regions: &[],
@@ -163,112 +146,10 @@ impl Policy {
             prefer_region: None,
             prefer_pick: None,
             auto_mode: None,
-            block_quic: false,
             sticky_exit: false,
-            domains: &[],
-            processes: &[],
-            domestic_first: &[],
         }
     }
 }
-
-/// Telegram's own address ranges (its apps connect by IP).
-pub const TELEGRAM_IPS: [&str; 14] = [
-    "91.105.192.0/23",
-    "91.108.4.0/22",
-    "91.108.8.0/22",
-    "91.108.12.0/22",
-    "91.108.16.0/22",
-    "91.108.20.0/22",
-    "91.108.56.0/22",
-    "149.154.160.0/20",
-    "185.76.151.0/24",
-    "2001:67c:4e8::/48",
-    "2001:b28:f23c::/48",
-    "2001:b28:f23d::/48",
-    "2001:b28:f23f::/48",
-    "2a0a:f280::/32",
-];
-
-/// IP lookup and IP quality sites, routed with 🤖 AI 服务 (CN-only ones are
-/// left out: they check the domestic address).
-pub const IP_CHECK_DOMAINS: [&str; 28] = [
-    "ipinfo.io",
-    "ipapi.co",
-    "ipapi.is",
-    "ip-api.com",
-    "ipify.org",
-    "ipwho.is",
-    "ip.sb",
-    "ifconfig.me",
-    "ifconfig.co",
-    "icanhazip.com",
-    "ipdata.co",
-    "ipgeolocation.io",
-    "ipregistry.co",
-    "ip2location.io",
-    "ip2location.com",
-    "iplocation.net",
-    "country.is",
-    "myip.com",
-    "whatismyip.com",
-    "whatismyipaddress.com",
-    "ipleak.net",
-    "browserleaks.com",
-    "whoer.net",
-    "scamalytics.com",
-    "ipqualityscore.com",
-    "ping0.cc",
-    "ippure.com",
-    "ip.skk.moe",
-];
-
-/// AI's own extra names (captchas, feature flags, error reports, support
-/// chat, payment, sign-in), then [`IP_CHECK_DOMAINS`].
-const AI_DOMAINS: [&str; 41] = [
-    "challenges.cloudflare.com",
-    "arkoselabs.com",
-    "statsig.com",
-    "statsigapi.net",
-    "featuregates.org",
-    "featureassets.org",
-    "sentry.io",
-    "intercom.io",
-    "intercomcdn.com",
-    "intercomassets.com",
-    "stripe.com",
-    "stripe.network",
-    "auth0.com",
-    // IP_CHECK_DOMAINS (Dart spreads the list here).
-    "ipinfo.io",
-    "ipapi.co",
-    "ipapi.is",
-    "ip-api.com",
-    "ipify.org",
-    "ipwho.is",
-    "ip.sb",
-    "ifconfig.me",
-    "ifconfig.co",
-    "icanhazip.com",
-    "ipdata.co",
-    "ipgeolocation.io",
-    "ipregistry.co",
-    "ip2location.io",
-    "ip2location.com",
-    "iplocation.net",
-    "country.is",
-    "myip.com",
-    "whatismyip.com",
-    "whatismyipaddress.com",
-    "ipleak.net",
-    "browserleaks.com",
-    "whoer.net",
-    "scamalytics.com",
-    "ipqualityscore.com",
-    "ping0.cc",
-    "ippure.com",
-    "ip.skk.moe",
-];
 
 /// Regions most AI / Google services refuse.
 const AVOID_CN_HK_MO_RU: [&str; 4] = ["HK", "MO", "CN", "RU"];
@@ -280,7 +161,6 @@ use AliasTerm::{Plural, Text, Word};
 /// subscriptions' rules; the basic split ([`Policy::base`]) after.
 pub static POLICIES: [Policy; 16] = [
     Policy {
-        rule_sets: &["geosite-category-ads-all", "geosite-category-httpdns-cn"],
         blockable: true,
         aliases: Some(r"广告|拦截广告|AdBlock|ads?\b|劫持|hijack"),
         alias_terms: &[
@@ -295,30 +175,19 @@ pub static POLICIES: [Policy; 16] = [
     },
     // Before Google: geosite-google includes YouTube.
     Policy {
-        rule_sets: &["geosite-youtube"],
         prefer_pick: Some(outbound_tags::AUTO),
         auto_mode: Some(GroupDefaultKind::Fastest),
-        block_quic: true,
         aliases: Some("youtube|油管"),
         alias_terms: &[Word("youtube"), Text("油管")],
         ..Policy::new("youtube", "YouTube", "📹", outbound_tags::PROXY)
     },
     Policy {
-        rule_sets: &["geosite-google-gemini", "geosite-google"],
         avoid_regions: &AVOID_CN_HK_MO_RU,
         aliases: Some("google|谷歌|gemini"),
         alias_terms: &[Word("google"), Text("谷歌"), Word("gemini")],
         ..Policy::new("google", "Google + Gemini", "💡", outbound_tags::PROXY)
     },
     Policy {
-        rule_sets: &[
-            "geosite-openai",
-            "geosite-anthropic",
-            "geosite-category-ai-!cn",
-            "geosite-perplexity",
-            "geosite-xai",
-        ],
-        domains: &AI_DOMAINS,
         avoid_regions: &AVOID_CN_HK_MO_RU,
         prefer_region: Some("US"),
         sticky_exit: true,
@@ -337,22 +206,11 @@ pub static POLICIES: [Policy; 16] = [
         ..Policy::new("ai", "AI 服务", "🤖", outbound_tags::PROXY)
     },
     Policy {
-        rule_sets: &["geosite-telegram"],
-        ip_cidrs: &TELEGRAM_IPS,
         aliases: Some(r"telegram|电报|\btg\b"),
         alias_terms: &[Word("telegram"), Text("电报"), Word("tg")],
         ..Policy::new("telegram", "Telegram", "📲", outbound_tags::PROXY)
     },
     Policy {
-        rule_sets: &[
-            "geosite-twitter",
-            "geosite-facebook",
-            "geosite-instagram",
-            "geosite-discord",
-            "geosite-reddit",
-            "geosite-whatsapp",
-            "geosite-line",
-        ],
         aliases: Some("twitter|推特|facebook|脸书|instagram|discord|社交"),
         alias_terms: &[
             Word("twitter"),
@@ -366,19 +224,11 @@ pub static POLICIES: [Policy; 16] = [
         ..Policy::new("social", "社交媒体", "💬", outbound_tags::PROXY)
     },
     Policy {
-        rule_sets: &["geosite-netflix"],
         aliases: Some("netflix|奈飞|网飞"),
         alias_terms: &[Word("netflix"), Text("奈飞"), Text("网飞")],
         ..Policy::new("netflix", "Netflix", "🎥", outbound_tags::PROXY)
     },
     Policy {
-        rule_sets: &[
-            "geosite-steam",
-            "geosite-epicgames",
-            "geosite-playstation",
-            "geosite-xbox",
-            "geosite-nintendo",
-        ],
         aliases: Some("steam|游戏|game|epic|playstation|xbox|nintendo|switch"),
         alias_terms: &[
             Word("steam"),
@@ -392,16 +242,9 @@ pub static POLICIES: [Policy; 16] = [
         ],
         // Domestic game downloads (Steam's China CDN …) are matched first
         // and go as 国内网站 does.
-        domestic_first: &["geosite-category-games@cn"],
         ..Policy::new("games", "游戏平台", "🎮", outbound_tags::DIRECT)
     },
     Policy {
-        rule_sets: &[
-            "geosite-category-media-cn",
-            "geosite-bilibili",
-            "geosite-iqiyi",
-            "geosite-youku",
-        ],
         aliases: Some("国内媒体|哔哩|bilibili|爱奇艺|iqiyi|港澳台"),
         alias_terms: &[
             Text("国内媒体"),
@@ -414,14 +257,6 @@ pub static POLICIES: [Policy; 16] = [
         ..Policy::new("cnmedia", "国内媒体", "🌏", outbound_tags::DIRECT)
     },
     Policy {
-        rule_sets: &[
-            "geosite-spotify",
-            "geosite-disney",
-            "geosite-hbo",
-            "geosite-primevideo",
-            "geosite-tiktok",
-            "geosite-category-entertainment",
-        ],
         aliases: Some("国外媒体|海外媒体|流媒体|spotify|disney|hbo|tiktok|global ?media|streaming"),
         alias_terms: &[
             Text("国外媒体"),
@@ -438,13 +273,11 @@ pub static POLICIES: [Policy; 16] = [
         ..Policy::new("media", "国外媒体", "📺", outbound_tags::PROXY)
     },
     Policy {
-        rule_sets: &["geosite-github", "geosite-huggingface"],
         aliases: Some("github|开发"),
         alias_terms: &[Word("github"), Text("开发")],
         ..Policy::new("dev", "开发者服务", "💻", outbound_tags::PROXY)
     },
     Policy {
-        rule_sets: &["geosite-microsoft", "geosite-onedrive", "geosite-bing"],
         aliases: Some("microsoft|微软|onedrive|bing|azure"),
         alias_terms: &[
             Word("microsoft"),
@@ -456,28 +289,17 @@ pub static POLICIES: [Policy; 16] = [
         ..Policy::new("microsoft", "微软服务", "Ⓜ️", outbound_tags::DIRECT)
     },
     Policy {
-        rule_sets: &["geosite-apple"],
         aliases: Some("apple|苹果|icloud"),
         alias_terms: &[Word("apple"), Text("苹果"), Word("icloud")],
         ..Policy::new("apple", "苹果服务", "🍎", outbound_tags::DIRECT)
     },
     Policy {
-        rule_sets: &["geosite-geolocation-!cn"],
         base: true,
         ..Policy::new("foreign", "国外网站", "🌐", outbound_tags::PROXY)
     },
     Policy {
-        rule_sets: &["geosite-category-games@cn", "geosite-cn", "geoip-cn"],
         // WeChat dials its own addresses (HTTPDNS), Tencent's abroad too:
         // the whole program follows this group.
-        processes: &[
-            "WeChat",
-            "WeChatAppEx Helper",
-            "Weixin.exe",
-            "WeChat.exe",
-            "WeChatAppEx.exe",
-            "com.tencent.mm",
-        ],
         base: true,
         ..Policy::new("china", "国内网站", "🇨🇳", outbound_tags::DIRECT)
     },

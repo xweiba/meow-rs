@@ -23,30 +23,14 @@ pub use ssh::{ssh_proxies, SshProxy, SshSecrets};
 use crate::model::settings::{AppMatcher, CustomRule, RuleMatch, RuleTarget};
 use crate::plan::custom_groups::exclude_match;
 
-/// Private and loopback ranges: they always go direct (the first rules).
-pub const PRIVATE_CIDRS: [&str; 9] = [
-    "10.0.0.0/8",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-    "127.0.0.0/8",
-    "169.254.0.0/16",
-    "100.64.0.0/10",
-    "fc00::/7",
-    "fe80::/10",
-    "::1/128",
-];
-
-/// The rule set of local names (`geosite:private`), sent direct by the
-/// basic split.
-pub const PRIVATE_RULE_SET: &str = "geosite-private";
-
-/// [`PRIVATE_CIDRS`] as rules: `IP-CIDR[6],<range>,DIRECT,no-resolve`.
+/// Distribution private-range rules. Runtime emission reads the selected
+/// profile directly; this helper preserves the public defaults API.
 pub fn private_cidr_rules() -> Vec<String> {
-    PRIVATE_CIDRS
-        .iter()
-        .map(|c| format!("{},{c},DIRECT,no-resolve", ip_cidr_type(c)))
-        .collect()
+    crate::rule_profile::RuleProfile::shipped().private_rules.clone()
 }
+
+/// Distribution local-name rule-set label, for legacy helper callers.
+pub const PRIVATE_RULE_SET: &str = "geosite-private";
 
 /// `IP-CIDR6` for an address or range with a `:`, else `IP-CIDR`.
 fn ip_cidr_type(v: &str) -> &'static str {

@@ -15,7 +15,7 @@ use serde_json::{json, Map, Value};
 
 use crate::emit::{build_clash_config, effective_rules, rule_target_states, EmitInput};
 use crate::plan::{
-    imported_split, offered_route_policies, route_catalog, tree_for, BuildInput, GroupTree,
+    imported_split, offered_route_policies, route_catalog, tree_for_profile, BuildInput, GroupTree,
     RoutePolicy,
 };
 use crate::pool::{build_pool, Pool};
@@ -115,7 +115,7 @@ pub fn build(input: &BuildInput) -> BuildOutput {
     let settings = crate::plan::legacy::for_lines(input.effective(), &pool);
     let split = imported_split(input, &pool, &settings);
     // One tree: the screen's and the config's (B2).
-    let tree = tree_for(&settings, &pool, &split);
+    let tree = tree_for_profile(&settings, &pool, &split, input.runtime.profile());
     let route_policies = offered_route_policies(
         route_catalog(&pool.groups, !pool.nodes.is_empty(), &settings.ssh_chains),
         &tree,
@@ -165,7 +165,39 @@ pub fn migrate_json(input: &str) -> Value {
 /// `{"error": ...}` when the input is not a JSON object.
 pub fn build_json(input: &str) -> Value {
     match serde_json::from_str::<Value>(input) {
-        Ok(v) if v.is_object() => build(&BuildInput::from_json(&v)).to_json(),
+        Ok(mut v) if v.is_object() => {
+            match crate::rule_profile::load(&mut v) {
+                Ok(document) => {
+                    let mut out = build(&BuildInput::from_json(&v)).to_json();
+                    if let Some((key, document)) = document {
+                        out[key] = document;
+                    }
+                    if v.pointer("/runtime/rulesProfile").is_some()
+                        || v.get("includeRuleCatalog") == Some(&Value::Bool(true))
+                    {
+                        let input = BuildInput::from_json(&v);
+                        let profile = input.runtime.profile();
+                        out["defaultDnsPolicy"] = profile.default_dns_policy.clone().into();
+                        out["bootstrapJsonUrls"] = json!(profile.bootstrap_json_urls);
+                        out["ruleCatalog"] = json!(profile
+                            .policies
+                            .iter()
+                            .map(|p| (&p.group, &p.rules))
+                            .collect::<indexmap::IndexMap<_, _>>());
+                    }
+                    out
+                }
+                Err(e) => {
+                    // Keep the pool/tree available to a reopening panel.
+                    // Bad editable rules refuse application without hiding
+                    // the nodes and reclaiming a healthy resident core.
+                    let mut out = build(&BuildInput::from_json(&v)).to_json();
+                    out["config"] = Value::Null;
+                    out["configError"] = e.into();
+                    out
+                }
+            }
+        }
         Ok(_) => json!({ "error": "input is not a JSON object" }),
         Err(e) => json!({ "error": format!("input is not JSON: {e}") }),
     }
@@ -262,11 +294,14 @@ fn group_path(tree: &GroupTree, target: &str) -> Vec<String> {
 /// default or `udp`) → [`Explanation::to_json`], `null` when no rule takes it, or
 /// `{"error": ...}`.
 pub fn explain_json(input: &str, query: &str) -> Value {
-    let input = match serde_json::from_str::<Value>(input) {
+    let mut input = match serde_json::from_str::<Value>(input) {
         Ok(v) if v.is_object() => v,
         Ok(_) => return json!({ "error": "input is not a JSON object" }),
         Err(e) => return json!({ "error": format!("input is not JSON: {e}") }),
     };
+    if let Err(e) = crate::rule_profile::load(&mut input) {
+        return json!({"error": e});
+    }
     let q = match serde_json::from_str::<Value>(query) {
         Ok(v) if v.is_object() => v,
         _ => return json!({ "error": "query is not a JSON object" }),

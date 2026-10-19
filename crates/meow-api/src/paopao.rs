@@ -107,6 +107,8 @@ pub use exits::run_exits;
 pub use network::run_network;
 pub use route::start_route;
 pub use service::{run_schedule, JobError, Reload, Report, ScheduleChange, Service};
+mod rule_watch;
+pub use rule_watch::run_rules_watch;
 pub use track::run_track;
 
 /// The child's exit codes: its answer is the result.

@@ -143,7 +143,12 @@ pub fn imported_split(input: &BuildInput, pool: &Pool, settings: &ProxySettings)
 /// and the subscriptions' split).
 pub fn build_tree(input: &BuildInput, pool: &Pool) -> GroupTree {
     let s = legacy::for_lines(input.effective(), pool);
-    tree_for(&s, pool, &imported_split(input, pool, &s))
+    tree_for_profile(
+        &s,
+        pool,
+        &imported_split(input, pool, &s),
+        input.runtime.profile(),
+    )
 }
 
 /// The one group tree (B2): what the screen shows and the config runs,
@@ -154,15 +159,28 @@ pub fn build_tree(input: &BuildInput, pool: &Pool) -> GroupTree {
 /// (so with `group_mode = subscription` it showed our layers while the
 /// core ran the provider's groups).
 pub fn tree_for(s: &ProxySettings, pool: &Pool, split: &ImportedSplit) -> GroupTree {
+    tree_for_profile(s, pool, split, crate::rule_profile::RuleProfile::shipped())
+}
+
+/// Group retention follows the same profile as the DNS and rule emitter.
+pub fn tree_for_profile(
+    s: &ProxySettings,
+    pool: &Pool,
+    split: &ImportedSplit,
+    profile: &crate::rule_profile::RuleProfile,
+) -> GroupTree {
     let extras: Vec<String> = s.ssh_chains.iter().map(SshChain::tag).collect();
-    let mut tree = build_group_tree(&TreeInput {
-        lines: &pool.tags,
-        base: &pool.groups,
-        settings: s,
-        split,
-        extras: &extras,
-        smart_mode: s.mode == ProxyMode::Smart,
-    });
+    let mut tree = group_tree::build_group_tree_with_dns(
+        &TreeInput {
+            lines: &pool.tags,
+            base: &pool.groups,
+            settings: s,
+            split,
+            extras: &extras,
+            smart_mode: s.mode == ProxyMode::Smart,
+        },
+        &profile.dns_fallbacks,
+    );
     group_tree::mark_stale(&mut tree, s, &pool.tags);
     tree
 }

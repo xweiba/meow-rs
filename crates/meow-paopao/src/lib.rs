@@ -1,4 +1,5 @@
-//! PaoPao's config generation as pure functions: no IO, no async, no clock.
+//! PaoPao's config planner is pure. JSON/CLI boundaries load editable rule
+//! files before passing plain data to the planner.
 //!
 //! Ported from the Dart app (`paopao_proxy`) layer by layer; every layer's
 //! output must equal the Dart code's for the same input (golden tests under
@@ -29,6 +30,7 @@ mod dart;
 /// app (`paopao_data_dir`), the tray and PaoPao Menu find it one way.
 #[path = "../../meow-manager/src/data.rs"]
 pub mod data;
+pub mod dns_rules;
 pub mod emit;
 pub mod ffi;
 pub mod ingest;
@@ -36,6 +38,7 @@ pub mod model;
 pub mod plan;
 pub mod pool;
 pub mod refresh;
+pub mod rule_profile;
 pub mod rules;
 
 pub use api::{

@@ -94,6 +94,10 @@ pub struct RuntimeOptions {
     /// TUN). None (phones, an older controller, nothing chosen) = the tun
     /// section as before.
     pub outbound: Option<OutboundOptions>,
+    /// Materialized encrypted DNS rules; None preserves legacy configs.
+    pub encrypted_dns_rules: Option<crate::dns_rules::EncryptedDnsRules>,
+    /// Materialized network policy; absent uses the distribution template.
+    pub rules_profile: Option<crate::rule_profile::RuleProfile>,
 }
 
 /// `runtime.outbound`: the physical interfaces the user chose for outbound
@@ -282,6 +286,8 @@ impl Default for RuntimeOptions {
             self_app: None,
             vpn: None,
             outbound: None,
+            encrypted_dns_rules: None,
+            rules_profile: None,
         }
     }
 }
@@ -309,6 +315,13 @@ fn strings_of(v: Option<&Value>) -> IndexMap<String, String> {
 }
 
 impl RuntimeOptions {
+    /// The file materialized by the boundary, or the distribution template.
+    pub fn profile(&self) -> &crate::rule_profile::RuleProfile {
+        self.rules_profile
+            .as_ref()
+            .unwrap_or_else(|| crate::rule_profile::RuleProfile::shipped())
+    }
+
     /// Reads `runtime`; missing or mistyped fields take the defaults.
     pub fn from_json(v: &Value) -> Self {
         let d = Self::default();
@@ -335,6 +348,12 @@ impl RuntimeOptions {
             self_app: str_of(v.get("selfApp")),
             vpn: v.get("vpn").and_then(VpnOptions::from_json),
             outbound: v.get("outbound").and_then(OutboundOptions::from_json),
+            encrypted_dns_rules: v
+                .get("encryptedDnsRules")
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            rules_profile: v
+                .get("rulesProfile")
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
         }
     }
 }
@@ -421,6 +440,9 @@ impl BuildInput {
     /// with no system proxy.
     pub fn effective(&self) -> ProxySettings {
         let mut e = effective_settings(&self.settings, &self.network);
+        if e.dns_policy.is_empty() {
+            e.dns_policy = self.runtime.profile().default_dns_policy.clone();
+        }
         if self.vpn_only {
             e.tun = true;
             e.system_proxy = false;

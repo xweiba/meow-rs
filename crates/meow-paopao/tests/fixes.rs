@@ -205,10 +205,9 @@ fn b28_rules_are_the_configs() {
     assert_eq!(out.rules, want);
 }
 
-/// B29: in global mode there is no 🤖 AI 服务 group; Dart still let
-/// `ai:<key>` authenticate (no IN-USER line: the normal rules decided).
-/// With one line there is no 速度最快 either, and its region (美国) is in
-/// 其他地区.
+/// B29: authentication offers only groups that actually exist. The DNS
+/// policy is now retained in global mode too; a single line still offers
+/// neither 速度最快 nor its own region group.
 #[test]
 fn b29_only_policies_the_config_has() {
     let mut v = input(
@@ -219,14 +218,17 @@ fn b29_only_policies_the_config_has() {
     v["runtime"]["route"] = json!({"key": "k"});
     let out = run(&v);
     let ids: Vec<&str> = out.route_policies.iter().map(|p| p.id.as_str()).collect();
-    assert_eq!(ids, ["auto", "rule", "proxy", "direct", "other"]);
+    assert_eq!(ids, ["auto", "rule", "proxy", "direct", "other", "ai"]);
     let auth: Vec<&str> = out.config["authentication"]
         .as_array()
         .expect("auth")
         .iter()
         .filter_map(|a| a.as_str())
         .collect();
-    assert_eq!(auth, ["auto:k", "rule:k", "proxy:k", "direct:k", "other:k"]);
+    assert_eq!(
+        auth,
+        ["auto:k", "rule:k", "proxy:k", "direct:k", "other:k", "ai:k"]
+    );
     // Every policy but `rule` has its IN-USER line.
     let users: Vec<String> = config_rules(&out)
         .into_iter()
@@ -238,7 +240,8 @@ fn b29_only_policies_the_config_has() {
             "IN-USER,auto,auto",
             "IN-USER,proxy,proxy",
             "IN-USER,direct,DIRECT",
-            "IN-USER,other,region:other"
+            "IN-USER,other,region:other",
+            "IN-USER,ai,policy:ai"
         ]
     );
 
@@ -348,6 +351,7 @@ fn b5_explain_walks_the_real_rules() {
             &BuildInput::from_json(v),
             &Connection {
                 host: host.into(),
+                port: Some(443),
                 ..Connection::default()
             },
         )

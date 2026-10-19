@@ -42,6 +42,58 @@ const OPT_RECORD: &[u8] = &[
 /// rebind, no in-flight query disruption (issue #514).
 pub type ResolverSlot = Arc<parking_lot::RwLock<Arc<Resolver>>>;
 
+/// Serve DNS-over-TCP on a local or TUN stream. Each two-byte length prefix
+/// bounds its frame; a timeout and request cap bound idle/long-lived peers.
+/// The live resolver slot is read for each query so reloads do not retain
+/// stale hosts. `real` preserves the VPN client's existing bypass policy.
+pub async fn serve_tcp<S>(stream: &mut S, slot: ResolverSlot, real: bool) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::{timeout, Duration};
+    for _ in 0..128 {
+        let exchange = async {
+            let len = stream.read_u16().await? as usize;
+            if len < 12 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "short DNS TCP frame",
+                ));
+            }
+            let mut data = vec![0; len];
+            stream.read_exact(&mut data).await?;
+            let resolver = Arc::clone(&slot.read());
+            let response = if real {
+                DnsServer::handle_query_real(&data, &resolver).await
+            } else {
+                DnsServer::handle_query(&data, &resolver).await
+            }
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            let size = u16::try_from(response.len()).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "oversized DNS TCP response",
+                )
+            })?;
+            stream.write_u16(size).await?;
+            stream.write_all(&response).await?;
+            stream.flush().await
+        };
+        match timeout(Duration::from_secs(15), exchange).await {
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "DNS TCP exchange timed out",
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build a fresh slot holding `resolver`. Every component that should
 /// observe resolver hot-swaps (DNS servers, the built-in DIRECT adapter,
 /// the TUN loopback DNS) must share the *same* slot — pass clones of the
@@ -1633,6 +1685,64 @@ mod tests {
             false,
             true,
         )
+    }
+
+    #[tokio::test]
+    async fn tcp_dns_frames_share_hosts_and_observe_resolver_reload() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let make = |ip: &str| {
+            let mut resolver = empty_resolver();
+            let mut hosts = crate::paopao_hosts::PaopaoHosts::new();
+            hosts.push(
+                crate::paopao_hosts::PaopaoHostRule::new(
+                    "exact",
+                    "example.com",
+                    Some(ip.parse().unwrap()),
+                )
+                .unwrap(),
+            );
+            resolver.set_paopao_hosts(Some(Arc::new(hosts)));
+            Arc::new(resolver)
+        };
+        let slot = new_resolver_slot(make("192.0.2.1"));
+        let (mut client, mut server) = tokio::io::duplex(65536);
+        let current = Arc::clone(&slot);
+        let task = tokio::spawn(async move { serve_tcp(&mut server, current, false).await });
+        for (id, ip) in [(7, "192.0.2.1"), (8, "192.0.2.2")] {
+            *slot.write() = make(ip);
+            let query = sample_query(id, 1);
+            client.write_u16(query.len() as u16).await.unwrap();
+            // Split a frame across writes: TCP segmentation is not framing.
+            client.write_all(&query[..5]).await.unwrap();
+            client.write_all(&query[5..]).await.unwrap();
+            let len = client.read_u16().await.unwrap() as usize;
+            let mut answer = vec![0; len];
+            client.read_exact(&mut answer).await.unwrap();
+            assert_eq!(
+                answer,
+                DnsServer::handle_query(&query, &make(ip)).await.unwrap()
+            );
+        }
+        drop(client);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_dns_rejects_short_frames() {
+        use tokio::io::AsyncWriteExt;
+        let (mut client, mut server) = tokio::io::duplex(16);
+        client.write_u16(1).await.unwrap();
+        assert_eq!(
+            serve_tcp(
+                &mut server,
+                new_resolver_slot(Arc::new(empty_resolver())),
+                false
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 
     async fn resolver_with_upstream_rcode(code: ResponseCode) -> crate::resolver::Resolver {
