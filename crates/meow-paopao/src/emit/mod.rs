@@ -41,9 +41,16 @@ pub use groups::{clash_auto_group, clash_group};
 /// Supported interpreter stages (schema identifiers, not routing data).
 /// The profile's `order` chooses their actual execution order. Privacy
 /// rules run in every mode; only service/subscription splitting is smart-only.
-/// `defaultDnsPolicy` / `dns_policy`: the exit `MATCH` uses in the current
-/// mode, not a group of its own.
+/// `defaultDnsPolicy` / `dns_policy` (the shipped default): the exit
+/// `MATCH` (漏网之鱼) uses in the current mode, not a group of its own.
 pub const FOLLOW_FINAL: &str = "final";
+
+/// `dns_policy` (a choice in the DNS settings): in smart mode
+/// the fastest of all lines, as 智能选择 measures them per destination
+/// (DNS asks the same two resolvers, so it learns which line answers
+/// first), unaffected by a line picked by hand in 节点选择; in global mode
+/// the global exit, as everything else there.
+pub const FASTEST_LINE: &str = "auto";
 
 pub const RULE_ORDER: [&str; 10] = [
     "speedtest-in",
@@ -254,10 +261,16 @@ impl<'a> Plan<'a> {
         } else {
             &self.settings().dns_policy
         };
-        let selected = if selected == FOLLOW_FINAL {
-            self.final_target()
-        } else {
-            selected
+        let selected = match selected.as_str() {
+            FASTEST_LINE if self.settings().mode == ProxyMode::Smart => {
+                [outbound_tags::SMART, outbound_tags::AUTO]
+                    .into_iter()
+                    .find(|t| self.known(t))
+                    .unwrap_or_else(|| self.final_target())
+            }
+            // Global mode, or following the rules.
+            FASTEST_LINE | FOLLOW_FINAL => self.final_target(),
+            other => other,
         };
         if self.known(selected) {
             selected

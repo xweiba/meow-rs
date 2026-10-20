@@ -65,6 +65,27 @@ fn unplaced_names_and_stun_follow_where_match_sends_in_each_mode() {
 }
 
 #[test]
+fn the_fastest_line_is_smart_selection_whatever_is_picked_by_hand() {
+    let mut value = input();
+    value["settings"]["dns_policy"] = "auto".into();
+    value["settings"]["mode"] = "smart".into();
+    assert_policy(&value, "auto~smart");
+    value["settings"]["selected"] = "region:US".into();
+    assert_policy(&value, "auto~smart");
+    // Global mode: the global exit, as everything else there.
+    value["settings"]["mode"] = "global".into();
+    let global = catch_all(&value);
+    assert_policy(&value, &global);
+}
+
+#[test]
+fn direct_is_a_choice_too() {
+    let mut value = input();
+    value["settings"]["dns_policy"] = "DIRECT".into();
+    assert_policy(&value, "DIRECT");
+}
+
+#[test]
 fn selected_group_changes_external_dns_and_stun_except_in_direct_mode() {
     let mut value = input();
     value["settings"]["dns_policy"] = "policy:google".into();
