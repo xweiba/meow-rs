@@ -401,16 +401,38 @@
       "geodata": {
         "background-fetch": true,
         "auto-update": true,
+        "auto-update-interval": 24,
+        "proxy": "proxy",
+        "mirrors": [],
+        "sources": {
+          "mmdb": [
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb",
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/country.mmdb"
+          ],
+          "asn": [
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb",
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/GeoLite2-ASN.mmdb"
+          ],
+          "geosite": [
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat",
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geosite.dat"
+          ]
+        },
         "url": {
           "mmdb": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb",
+          "asn": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb",
           "geosite": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
         }
       },
       "dns": {
         "enable": true,
+        "direct-nameserver": [
+          "system"
+        ],
+        "follow-domain-rules": true,
         "nameserver": [
-          "https://1.1.1.1/dns-query#policy:ai",
-          "https://8.8.8.8/dns-query#policy:ai"
+          "tcp://1.1.1.1:53#policy:ai",
+          "tcp://8.8.8.8:53#policy:ai"
         ],
         "default-nameserver": [
           "https://1.1.1.1/dns-query"
@@ -1464,6 +1486,106 @@
           ]
         }
       ],
+      "rule-providers": {
+        "geosite-openai": {
+          "type": "http",
+          "background-fetch": true,
+          "behavior": "domain",
+          "format": "mrs",
+          "interval": 86400,
+          "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/openai.mrs",
+          "proxy": "proxy",
+          "sources": [
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/openai.mrs",
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/openai.mrs"
+          ],
+          "path": "rule-providers/paopao-a592ce3b6a9f4e02.mrs"
+        },
+        "geosite-anthropic": {
+          "type": "http",
+          "background-fetch": true,
+          "behavior": "domain",
+          "format": "mrs",
+          "interval": 86400,
+          "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/anthropic.mrs",
+          "proxy": "proxy",
+          "sources": [
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/anthropic.mrs",
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/anthropic.mrs"
+          ],
+          "path": "rule-providers/paopao-16934faf91198e08.mrs"
+        },
+        "geosite-ai": {
+          "type": "http",
+          "background-fetch": true,
+          "behavior": "domain",
+          "format": "yaml",
+          "interval": 86400,
+          "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ai-!cn.yaml",
+          "proxy": "proxy",
+          "sources": [
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/category-ai-!cn.yaml",
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/category-ai-!cn.yaml"
+          ],
+          "path": "rule-providers/paopao-091639a242ca3c82.yaml"
+        },
+        "geosite-perplexity": {
+          "type": "http",
+          "background-fetch": true,
+          "behavior": "domain",
+          "format": "mrs",
+          "interval": 86400,
+          "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/perplexity.mrs",
+          "proxy": "proxy",
+          "sources": [
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/perplexity.mrs",
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/perplexity.mrs"
+          ],
+          "path": "rule-providers/paopao-6f065012d4c8502a.mrs"
+        },
+        "geosite-xai": {
+          "type": "http",
+          "background-fetch": true,
+          "behavior": "domain",
+          "format": "mrs",
+          "interval": 86400,
+          "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/xai.mrs",
+          "proxy": "proxy",
+          "sources": [
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/xai.mrs",
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/xai.mrs"
+          ],
+          "path": "rule-providers/paopao-018290b7ede01532.mrs"
+        },
+        "geosite-private": {
+          "type": "http",
+          "background-fetch": true,
+          "behavior": "domain",
+          "format": "text",
+          "interval": 86400,
+          "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/private.list",
+          "proxy": "proxy",
+          "sources": [
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/private.list",
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/private.list"
+          ],
+          "path": "rule-providers/paopao-582107823a653a5f.text"
+        },
+        "geosite-cn": {
+          "type": "http",
+          "background-fetch": true,
+          "behavior": "domain",
+          "format": "mrs",
+          "interval": 86400,
+          "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.mrs",
+          "proxy": "proxy",
+          "sources": [
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/cn.mrs",
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/cn.mrs"
+          ],
+          "path": "rule-providers/paopao-091d14a242d01c51.mrs"
+        }
+      },
       "rules": [
         "IN-NAME,speedtest-in,speedtest",
         "IN-USER,auto,auto",
@@ -1538,17 +1660,54 @@
         "AND,((DST-PORT,443),(IP-CIDR6,2620:fe::9/128,no-resolve),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
         "AND,((DST-PORT,853),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
         "AND,((NETWORK,UDP),(DST-PORT,3478/5349/19302-19309),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((NETWORK,UDP),(DST-PORT,3478/5349/19302-19309),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),REJECT",
         "GEOSITE,category-ads-all,policy:ads",
         "GEOSITE,category-httpdns-cn,policy:ads",
         "AND,((NETWORK,UDP),(DST-PORT,443),(GEOSITE,youtube)),REJECT",
         "GEOSITE,youtube,policy:youtube",
         "GEOSITE,google-gemini,policy:google",
         "GEOSITE,google,policy:google",
-        "AND,((GEOSITE,openai),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
-        "AND,((GEOSITE,anthropic),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
-        "AND,((GEOSITE,category-ai-!cn),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
-        "AND,((GEOSITE,perplexity),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
-        "AND,((GEOSITE,xai),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((RULE-SET,geosite-openai),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((RULE-SET,geosite-anthropic),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((RULE-SET,geosite-ai),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((RULE-SET,geosite-perplexity),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((RULE-SET,geosite-xai),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,anthropic.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,claude.ai),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,claude.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,clau.de),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,claudemcpclient.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,claudemcpcontent.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,claudeusercontent.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN,servd-anthropic-website.b-cdn.net),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN,anthropic.com.cdn.cloudflare.net),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN,anthropic.auth0.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN,anthropic-com.ghost.io),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN,browser-intake-us5-datadoghq.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN,browser-intake-datadoghq.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-KEYWORD,datadog),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-KEYWORD,sift),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN,cdn.usefathom.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,openai.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,chatgpt.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,chat.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,sora.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,oaistatic.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,oaiusercontent.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,crixet.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN,openai.com.cdn.cloudflare.net),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN,openaicom.imgix.net),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN,openaiapi-site.azureedge.net),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN,production-openaicom-storage.azureedge.net),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN,openaicomproductionae4b.blob.core.windows.net),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN,openaicom-api-bdcpf8c6d2e9atf6.z01.azurefd.net),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,webpubsub.azure.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,chatgpt.livekit.cloud),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,host.livekit.cloud),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((DOMAIN-SUFFIX,turn.livekit.cloud),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((IP-CIDR,160.79.104.0/21,no-resolve),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((IP-CIDR6,2607:6bc0::/32,no-resolve),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
+        "AND,((IP-ASN,399358,no-resolve),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
         "AND,((DOMAIN-SUFFIX,challenges.cloudflare.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
         "AND,((DOMAIN-SUFFIX,arkoselabs.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
         "AND,((DOMAIN-SUFFIX,statsig.com),(NOT,((OR,((DOMAIN-SUFFIX,claude.ai),(IP-CIDR,1.2.3.4/32,no-resolve),(DOMAIN-KEYWORD,chat)))))),policy:ai",
@@ -1635,10 +1794,10 @@
         "GEOSITE,onedrive,policy:microsoft",
         "GEOSITE,bing,policy:microsoft",
         "GEOSITE,apple,policy:apple",
-        "GEOSITE,private,DIRECT",
+        "RULE-SET,geosite-private,DIRECT",
         "GEOSITE,geolocation-!cn,policy:foreign",
         "GEOSITE,category-games@cn,policy:china",
-        "GEOSITE,cn,policy:china",
+        "RULE-SET,geosite-cn,policy:china",
         "GEOIP,cn,policy:china",
         "PROCESS-NAME,WeChat,policy:china",
         "PROCESS-NAME,WeChatAppEx Helper,policy:china",

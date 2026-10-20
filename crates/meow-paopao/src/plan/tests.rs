@@ -242,10 +242,12 @@ fn sites_and_excludes_like_dart() {
 #[test]
 fn rule_lines_parse_like_dart() {
     let rules = SubRules {
+        providers: Default::default(),
         groups: vec![SubGroup {
             name: "G".into(),
             kind: "select".into(),
             members: s(&["n1", "n2"]),
+            interval: None,
         }],
         rules: s(&[
             " DOMAIN-SUFFIX , a.com , G ",
@@ -275,6 +277,7 @@ fn rule_lines_parse_like_dart() {
     ]);
     let merged = merge_subscription_splits(
         &[SubSplit {
+            namespace: "test",
             rules: &rules,
             line_of: &line_of,
         }],
@@ -293,6 +296,7 @@ fn rule_lines_parse_like_dart() {
             "GEOIP,CN,DIRECT",
             "DOMAIN,d.com,REJECT",
             "DOMAIN,e.com,DIRECT",
+            "RULE-SET,sub-provider:dGVzdA:eA,policy:final",
             "DOMAIN,g.com,policy:final,src,no-resolve,src",
         ])
     );
@@ -827,6 +831,7 @@ fn sub_group(name: &str, kind: &str, members: &[&str]) -> SubGroup {
         name: name.into(),
         kind: kind.into(),
         members: s(members),
+        interval: None,
     }
 }
 
@@ -839,6 +844,7 @@ fn subscription_groups_kept_same_names_merged_conflicts_merged() {
         ("b-us", "US 2"),
     ]);
     let a = SubRules {
+        providers: Default::default(),
         groups: vec![
             sub_group("🚀 节点选择", "select", &["a-hk", "a-us", "b-hk"]),
             sub_group("🎥 NETFLIX", "select", &["a-hk", "a-us"]),
@@ -850,6 +856,7 @@ fn subscription_groups_kept_same_names_merged_conflicts_merged() {
         ]),
     };
     let b = SubRules {
+        providers: Default::default(),
         groups: vec![
             sub_group("🚀 节点选择", "select", &["b-hk", "b-us", "a-us"]),
             sub_group("🎥 NETFLIX", "select", &["b-hk"]),
@@ -864,10 +871,12 @@ fn subscription_groups_kept_same_names_merged_conflicts_merged() {
     let split = merge_subscription_splits(
         &[
             SubSplit {
+                namespace: "a",
                 rules: &a,
                 line_of: &line_of,
             },
             SubSplit {
+                namespace: "b",
                 rules: &b,
                 line_of: &line_of,
             },
@@ -912,6 +921,7 @@ fn subscription_groups_kept_same_names_merged_conflicts_merged() {
 #[test]
 fn no_loops_a_member_leading_back_is_dropped() {
     let split = ImportedSplit {
+        providers: Default::default(),
         groups: vec![
             ImportedGroup::new("sub:A", "A", &["sub:B", "HK 1"]),
             ImportedGroup::new("sub:B", "B", &["sub:A", "US 1"]),
@@ -996,10 +1006,12 @@ fn merge_maps_groups_onto_ours_by_priority() {
     let merged = merge_subscription_splits(
         &[
             SubSplit {
+                namespace: "a",
                 rules: &a,
                 line_of: &la,
             },
             SubSplit {
+                namespace: "b",
                 rules: &b,
                 line_of: &lb,
             },
@@ -1023,6 +1035,7 @@ fn merge_maps_groups_onto_ours_by_priority() {
             "DOMAIN-KEYWORD,baidu,DIRECT",
             "IP-CIDR,10.9.0.0/16,DIRECT,no-resolve",
             "AND,((DOMAIN,quic.example),(NETWORK,UDP)),REJECT",
+            "RULE-SET,sub-provider:YQ:c29tZXByb3ZpZGVy,sub:🎥 NETFLIX",
             "DOMAIN-SUFFIX,steampowered.com,sub:🎮 Steam",
             "DOMAIN-SUFFIX,fast.com,sub:🎥 NETFLIX",
         ])
@@ -1037,6 +1050,7 @@ fn merge_with_built_in_groups_supplements_ours() {
     let built_in = |name: &str| alias_of(name);
     let split = merge_subscription_splits(
         &[SubSplit {
+            namespace: "test",
             rules: &a,
             line_of: &la,
         }],
@@ -1056,6 +1070,7 @@ fn merge_raw_keeps_groups_as_written() {
     let la = map(&[("香港 01", "香港 01"), ("日本 01", "日本 01")]);
     let split = merge_subscription_splits(
         &[SubSplit {
+            namespace: "test",
             rules: &a,
             line_of: &la,
         }],
@@ -1097,6 +1112,7 @@ fn merge_raw_keeps_groups_as_written() {
 #[test]
 fn b23_a_cut_pick_is_cleared() {
     let split = ImportedSplit {
+        providers: Default::default(),
         groups: vec![
             ImportedGroup::new("proxy", "🚀 节点选择", &["sub:A", "HK 1"]),
             ImportedGroup::new("sub:A", "A", &["sub:B"]),
@@ -1129,10 +1145,12 @@ fn b23_a_cut_pick_is_cleared() {
 #[test]
 fn b24_both_subscriptions_select_groups_merge() {
     let one = SubRules {
+        providers: Default::default(),
         groups: vec![sub_group("🚀 节点选择", "select", &["HK 01", "JP 01"])],
         rules: s(&["MATCH,🚀 节点选择"]),
     };
     let two = SubRules {
+        providers: Default::default(),
         groups: vec![sub_group("🚀 Proxy", "select", &["US 01"])],
         rules: s(&["DOMAIN,x.example,🚀 Proxy", "MATCH,🚀 Proxy"]),
     };
@@ -1141,10 +1159,12 @@ fn b24_both_subscriptions_select_groups_merge() {
     let split = merge_subscription_splits(
         &[
             SubSplit {
+                namespace: "one",
                 rules: &one,
                 line_of: &l1,
             },
             SubSplit {
+                namespace: "two",
                 rules: &two,
                 line_of: &l2,
             },
@@ -1167,6 +1187,7 @@ fn b24_both_subscriptions_select_groups_merge() {
 #[test]
 fn b24_empty_groups_are_skipped() {
     let split = ImportedSplit {
+        providers: Default::default(),
         groups: vec![
             ImportedGroup::new("proxy", "🚀 节点选择", &["HK 1"]),
             ImportedGroup::new("sub:Empty", "Empty", &[]),

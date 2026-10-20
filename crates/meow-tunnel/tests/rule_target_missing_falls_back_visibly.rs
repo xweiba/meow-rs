@@ -65,6 +65,7 @@ async fn a_matched_rule_with_a_missing_target_is_skipped_to_the_tail() {
         rule_name: rule,
         rule_payload: _payload,
         route: _route,
+        ..
     } = tunnel
         .inner()
         .resolve_proxy(&metadata())
@@ -112,6 +113,7 @@ async fn a_later_rule_still_matches_after_a_skipped_dead_target() {
         rule_name: rule,
         rule_payload: _payload,
         route: _route,
+        ..
     } = tunnel
         .inner()
         .resolve_proxy(&metadata())
@@ -136,6 +138,7 @@ async fn the_lazy_resolve_path_skips_the_same_way() {
         rule_name: rule,
         rule_payload: _payload,
         route: _route,
+        ..
     } = tunnel
         .inner()
         .resolve_proxy_lazy(&mut md)
@@ -161,6 +164,7 @@ async fn a_target_the_registry_holds_is_used_as_is() {
         rule_name: _rule,
         rule_payload: _payload,
         route: _route,
+        ..
     } = tunnel
         .inner()
         .resolve_proxy(&metadata())
@@ -190,6 +194,7 @@ async fn a_rule_naming_direct_needs_no_registry_entry() {
         rule_name: _rule,
         rule_payload: _payload,
         route: _route,
+        ..
     } = tunnel
         .inner()
         .resolve_proxy(&metadata())
@@ -216,6 +221,7 @@ async fn no_rule_matching_still_falls_through_to_direct() {
         rule_name: rule,
         rule_payload: _payload,
         route: _route,
+        ..
     } = tunnel
         .inner()
         .resolve_proxy(&metadata())
@@ -258,6 +264,7 @@ async fn udp_flow_skips_a_target_without_udp_support() {
         rule_name: rule,
         rule_payload: _payload,
         route: _route,
+        ..
     } = tunnel
         .inner()
         .resolve_proxy(&udp_meta)
@@ -274,6 +281,7 @@ async fn udp_flow_skips_a_target_without_udp_support() {
         rule_name: _r,
         rule_payload: _p,
         route: _route,
+        ..
     } = tunnel
         .inner()
         .resolve_proxy(&metadata())

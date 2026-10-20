@@ -553,6 +553,208 @@ impl Service {
         Ok(report)
     }
 
+    /// The profile location comes exclusively from the already stored
+    /// native build input, never from a path supplied to the HTTP endpoint.
+    async fn profile_input(&self) -> Result<(PathBuf, Value), JobError> {
+        use tokio::io::AsyncReadExt;
+        let file = tokio::fs::File::open(self.store.input())
+            .await
+            .map_err(|_| JobError::NoInput)?;
+        let mut bytes = Vec::new();
+        file.take(super::MAX_INPUT as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| JobError::Failed(e.to_string()))?;
+        if bytes.len() > super::MAX_INPUT {
+            return Err(JobError::Invalid("build input exceeds size limit".into()));
+        }
+        let input: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| JobError::Invalid("invalid stored input".into()))?;
+        let path = input
+            .pointer("/runtime/rulesFile")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| JobError::Invalid("editable rule profile is not configured".into()))?;
+        let path = PathBuf::from(path);
+        let home = self.store.home();
+        let app_home = if matches!(
+            home.file_name().and_then(|n| n.to_str()),
+            Some("meow" | "core-service")
+        ) {
+            home.parent().unwrap_or(home)
+        } else {
+            home
+        };
+        let allowed = tokio::fs::canonicalize(app_home)
+            .await
+            .map_err(|_| JobError::NoInput)?;
+        let path = tokio::fs::canonicalize(&path)
+            .await
+            .map_err(|_| JobError::NoInput)?;
+        if !path.starts_with(&allowed) {
+            return Err(JobError::Invalid(
+                "editable rule profile must remain inside application data".into(),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let owner = tokio::fs::metadata(&allowed)
+                .await
+                .map_err(|_| JobError::NoInput)?
+                .uid();
+            let file_owner = tokio::fs::metadata(&path)
+                .await
+                .map_err(|_| JobError::NoInput)?
+                .uid();
+            if owner != file_owner {
+                return Err(JobError::Invalid(
+                    "editable rule profile has a different owner".into(),
+                ));
+            }
+        }
+        Ok((path, input))
+    }
+
+    /// Bounded file read. In particular, an accidentally configured pipe
+    /// must not park a control request forever.
+    pub async fn rule_profile(&self) -> Result<Value, JobError> {
+        let (path, _) = self.profile_input().await?;
+        let mut result = self.profile_file(&path, None).await?;
+        Ok(result["document"].take())
+    }
+
+    async fn profile_file(
+        &self,
+        path: &std::path::Path,
+        bytes: Option<&[u8]>,
+    ) -> Result<Value, JobError> {
+        use base64::Engine;
+        let runner = self.runner.as_ref().ok_or(JobError::Unavailable)?;
+        #[cfg(unix)]
+        let owner_runner = {
+            use std::os::unix::fs::MetadataExt;
+            let meta = tokio::fs::metadata(path)
+                .await
+                .map_err(|_| JobError::NoInput)?;
+            runner.for_file_owner(meta.uid(), meta.gid())
+        };
+        #[cfg(unix)]
+        let runner = &owner_runner;
+        #[cfg(not(unix))]
+        let runner = runner.as_ref();
+        let mut request = json!({"path":path});
+        if let Some(bytes) = bytes {
+            request["raw"] = base64::engine::general_purpose::STANDARD
+                .encode(bytes)
+                .into();
+        }
+        small(runner, "profile", request, APPLY_TIMEOUT)
+            .await
+            .map_err(JobError::Failed)
+    }
+
+    /// Validate with the same native builder before saving. A refused live
+    /// reload restores the previous profile while holding the job lane, so
+    /// the file watcher cannot apply a partially completed API operation.
+    pub async fn set_rule_profile(&self, document: Value) -> Result<Report, JobError> {
+        let runner = self.runner.clone().ok_or(JobError::Unavailable)?;
+        let _job = self.job.try_lock().map_err(|_| JobError::Busy)?;
+        let _input = self.input.lock().await;
+        let bytes =
+            serde_json::to_vec_pretty(&document).map_err(|e| JobError::Invalid(e.to_string()))?;
+        if bytes.len() > 512 * 1024 || !document.is_object() {
+            return Err(JobError::Invalid(
+                "rule profile must be an object of at most 512 KiB".into(),
+            ));
+        }
+        let (path, mut input) = self.profile_input().await?;
+        use base64::Engine;
+        let previous = self.profile_file(&path, None).await?;
+        let previous = previous
+            .get("raw")
+            .and_then(Value::as_str)
+            .and_then(|raw| base64::engine::general_purpose::STANDARD.decode(raw).ok())
+            .ok_or_else(|| JobError::Failed("cannot keep previous profile bytes".into()))?;
+        let runtime = input
+            .get_mut("runtime")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| JobError::Invalid("invalid runtime input".into()))?;
+        runtime.remove("rulesFile");
+        runtime.insert("rulesProfile".into(), document);
+        let built = small(&runner, "build", input, APPLY_TIMEOUT)
+            .await
+            .map_err(JobError::Invalid)?;
+        if let Some(error) = built.get("configError").and_then(Value::as_str) {
+            return Err(JobError::Invalid(error.to_owned()));
+        }
+        let mut config = built
+            .get("config")
+            .filter(|v| v.is_object())
+            .cloned()
+            .ok_or_else(|| {
+                JobError::Invalid("native builder did not return a configuration".into())
+            })?;
+        if let (Some(config), Some(keep)) = (config.as_object_mut(), self.own_runtime().as_object())
+        {
+            config.extend(keep.clone());
+        }
+        let raw: RawConfig = serde_json::from_value(config.clone())
+            .map_err(|_| JobError::Invalid("invalid native rule configuration".into()))?;
+        let geo = meow_config::geodata::parse_geodata(raw.geodata.as_ref())
+            .map_err(|e| JobError::Invalid(e.to_string()))?;
+        if let Some(proxy) = geo.proxy.as_deref().filter(|s| *s != "DIRECT") {
+            let known = ["proxies", "proxy-groups"].into_iter().any(|key| {
+                config
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|p| p.get("name").and_then(Value::as_str) == Some(proxy))
+                    })
+            });
+            if !known {
+                return Err(JobError::Invalid(
+                    "data download exit does not exist".into(),
+                ));
+            }
+        }
+        let next = self.store.next_config();
+        let candidate = serde_json::to_vec(&config).map_err(|e| JobError::Failed(e.to_string()))?;
+        super::store::write_atomic(&next, &candidate, true)
+            .map_err(|e| JobError::Failed(e.to_string()))?;
+        if let Err(error) = self.profile_file(&path, Some(&bytes)).await {
+            let _ = tokio::fs::remove_file(&next).await;
+            return Err(JobError::Failed(error.to_string()));
+        }
+        if let Err(error) = (self.reload)(next.clone()).await {
+            let restored = self.profile_file(&path, Some(&previous)).await;
+            let _ = tokio::fs::remove_file(&next).await;
+            return Err(JobError::Failed(if restored.is_ok() {
+                format!("profile refused; previous file retained: {error}")
+            } else {
+                "profile refused and restoring its file failed".into()
+            }));
+        }
+        let mut report = Report {
+            rebuilt: true,
+            reloaded: true,
+            ..Report::default()
+        };
+        if let Some(path) = &self.config_path {
+            if let Err(error) = replace(&next, path).await {
+                report.error = Some(format!(
+                    "profile is active but config persistence failed: {error}"
+                ));
+            }
+        } else {
+            let _ = tokio::fs::remove_file(&next).await;
+        }
+        super::give_back();
+        Ok(report)
+    }
+
     /// A pick made in the running core (`PUT /proxies/{group}`) kept in the
     /// stored input's settings, so the configs built from it later keep it
     /// (`meow_paopao::model::settings::record_pick`). Off the request path:
@@ -705,6 +907,7 @@ impl Service {
     }
 }
 
+/// What `PUT /paopao/schedule` changes (None: as it is).
 /// What `PUT /paopao/schedule` changes (None: as it is).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ScheduleChange {

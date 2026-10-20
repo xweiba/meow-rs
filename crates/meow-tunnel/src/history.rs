@@ -7,9 +7,9 @@
 //!
 //! Memory: a record shares the connection's `Arc<Metadata>` (no copy), and
 //! holds a few short strings beside it — about 0.5 KB each on a 64-bit
-//! target. The list never grows past [`ConnectionHistory::hard_limit`]
-//! (six times the limit set): 500 → at most 3000 records, ~1.5 MB, and
-//! ~0.25 MB in the steady state.
+//! target. The configured limit is strict, including recent bursts:
+//! 1500 records use approximately 0.75 MB. Active connections live in a
+//! separate registry and are never evicted to make room for history.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -23,13 +23,9 @@ use smol_str::SmolStr;
 use uuid::Uuid;
 
 /// Kept when nothing says otherwise (`connection-history-limit`).
-pub const DEFAULT_LIMIT: usize = 500;
+pub const DEFAULT_LIMIT: usize = 1500;
 /// The most that can be asked for: a router has little memory to give.
 pub const MAX_LIMIT: usize = 20_000;
-/// Ended ones this recent stay beyond the limit (up to the hard limit): a
-/// busy machine ends more than the limit in the minutes an overview looks
-/// back over.
-const KEEP_MS: i64 = 5 * 60 * 1000;
 
 /// One connection that ended — or several tries of the same thing that
 /// moved nothing, kept as their latest ([`Self::count`], [`Self::first`]).
@@ -143,7 +139,7 @@ impl ConnectionHistory {
 
     /// Never more than this many kept, whatever their age.
     pub fn hard_limit(limit: usize) -> usize {
-        limit.saturating_mul(6)
+        limit.min(MAX_LIMIT)
     }
 
     pub fn limit(&self) -> usize {
@@ -153,12 +149,15 @@ impl ConnectionHistory {
     /// How many to keep (`0` keeps none); what is over goes now.
     pub fn set_limit(&self, limit: usize) {
         let mut inner = self.inner.lock();
-        inner.limit = limit.min(MAX_LIMIT);
-        let before = inner.records.len();
-        inner.trim(now_ms());
-        if inner.records.len() != before {
-            inner.rev += 1;
+        let limit = Self::hard_limit(limit);
+        if inner.limit == limit {
+            return;
         }
+        inner.limit = limit;
+        inner.trim();
+        inner.records.shrink_to_fit();
+        // Capacity is part of the delta contract, even with no rows to trim.
+        inner.rev += 1;
     }
 
     /// Changes with every change to the list.
@@ -200,9 +199,8 @@ impl ConnectionHistory {
         }
         inner.rev += 1;
         record.rev = inner.rev;
-        let at = record.end_ms;
         inner.records.push_back(record);
-        inner.trim(at);
+        inner.trim();
     }
 
     /// Forgets everything.
@@ -250,7 +248,12 @@ impl ConnectionHistory {
             inner.records.push_back(r);
         }
         inner.saved_rev = inner.rev;
-        inner.trim(now_ms());
+        let before = inner.records.len();
+        inner.trim();
+        if inner.records.len() != before {
+            // Rewrite an oversized legacy file even if no new flow ends.
+            inner.rev += 1;
+        }
     }
 
     /// Writes the newest [`Self::limit`] to the file given to [`Self::open`],
@@ -283,18 +286,9 @@ impl ConnectionHistory {
 }
 
 impl Inner {
-    /// Over the limit: the ones that ended more than [`KEEP_MS`] ago go,
-    /// the oldest first; past the hard limit the recent ones too.
-    fn trim(&mut self, now_ms: i64) {
-        let hard = ConnectionHistory::hard_limit(self.limit);
+    /// Keep the newest ended records, regardless of their age.
+    fn trim(&mut self) {
         while self.records.len() > self.limit {
-            let old = self
-                .records
-                .front()
-                .is_some_and(|r| now_ms - r.end_ms > KEEP_MS);
-            if !old && self.records.len() <= hard {
-                break;
-            }
             self.records.pop_front();
         }
     }
@@ -338,30 +332,76 @@ mod tests {
     }
 
     #[test]
-    fn over_the_limit_the_old_ones_go_and_the_recent_stay() {
+    fn strict_limit_keeps_newest_even_during_a_recent_burst() {
         let h = ConnectionHistory::new();
         h.set_limit(3);
-        let now = 10 * KEEP_MS;
+        let now = now_ms();
         // Three that ended long ago, then three just now.
         for i in 0..3 {
-            h.push(ended(
-                i + 1,
-                &format!("old{i}.example"),
-                1,
-                now - 2 * KEEP_MS,
-            ));
+            h.push(ended(i + 1, &format!("old{i}.example"), 1, now - 600_000));
         }
         for i in 0..3 {
             h.push(ended(i + 4, &format!("new{i}.example"), 1, now));
         }
         let d = h.delta(0);
         assert_eq!(d.kept, vec![4, 5, 6]);
-        // Recent ones stay past the limit, until the hard one.
+        // A recent burst must obey the exact same configured capacity.
         for i in 0..40 {
             h.push(ended(i + 7, &format!("burst{i}.example"), 1, now));
         }
         assert_eq!(h.len(), ConnectionHistory::hard_limit(3));
-        assert_eq!(h.delta(0).kept.last(), Some(&46));
+        assert_eq!(h.delta(0).kept, vec![44, 45, 46]);
+    }
+
+    #[test]
+    fn changing_capacity_trims_immediately_and_zero_disables_history() {
+        let h = ConnectionHistory::new();
+        assert_eq!(h.limit(), 1500);
+        for seq in 1..=1600 {
+            h.push(ended(seq, "busy.example", 1, now_ms()));
+        }
+        assert_eq!(h.len(), 1500);
+        let before = h.rev();
+        h.set_limit(500);
+        assert_eq!(h.len(), 500);
+        let delta = h.delta(before);
+        assert!(delta.rev > before);
+        assert_eq!(delta.kept[0], 1101);
+        assert_eq!(delta.kept.last(), Some(&1600));
+        h.set_limit(0);
+        assert!(h.is_empty());
+        h.push(ended(1601, "busy.example", 1, now_ms()));
+        assert!(h.is_empty());
+        let before = h.rev();
+        h.set_limit(2);
+        assert!(h.rev() > before, "empty capacity changes must be visible");
+        h.push(ended(1602, "busy.example", 1, now_ms()));
+        assert_eq!(h.len(), 1);
+        h.set_limit(usize::MAX);
+        assert_eq!(h.limit(), MAX_LIMIT);
+    }
+
+    #[test]
+    fn oversized_saved_history_is_trimmed_and_rewritten_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        let rows: Vec<_> = (1..=30)
+            .map(|seq| ended(seq, "busy.example", 1, now_ms()))
+            .collect();
+        std::fs::write(&path, serde_json::to_vec(&rows).unwrap()).unwrap();
+        let history = ConnectionHistory::new();
+        history.set_limit(2);
+        history.open(&path);
+        assert_eq!(history.delta(0).kept, vec![29, 30]);
+        history.save();
+        let saved: Vec<EndedConnection> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.len(), 2);
+        history.set_limit(0);
+        history.save();
+        let restarted = ConnectionHistory::new();
+        restarted.open(&path);
+        assert!(restarted.is_empty());
     }
 
     #[test]

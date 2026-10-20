@@ -47,10 +47,9 @@ impl Watch {
         let Some(path) = &self.path else {
             return;
         };
-        let file = match tokio::fs::File::open(path).await {
-            Ok(file) => file,
-            // Editor renames and missing files retain the last good config.
-            Err(_) => return,
+        // Editor renames and missing files retain the last good config.
+        let Ok(file) = tokio::fs::File::open(path).await else {
+            return;
         };
         let mut bytes = Vec::new();
         if file

@@ -246,7 +246,7 @@ pub struct Resolver {
     /// [`InflightMap`].
     inflight: [InflightMap; 3],
     policy: Option<NameserverPolicy>,
-    fallback_filter: Option<FallbackFilter>,
+    fallback_filter: Option<Arc<FallbackFilter>>,
     /// IPv4 fake-IP pool (None when fake-ip mode is disabled or only v6 is configured).
     fakeip_v4: Option<Arc<Pool>>,
     /// IPv6 fake-IP pool.
@@ -264,6 +264,30 @@ pub struct Resolver {
     /// trie and fake-IP. `None` when the list is empty, so the common case
     /// costs one branch.
     paopao_hosts: Option<Arc<crate::paopao_hosts::PaopaoHosts>>,
+    /// Separate cache/clients for DIRECT; never shares answers with AI DNS.
+    direct_system: Option<parking_lot::Mutex<Option<DirectSystemGeneration>>>,
+    follow_rules: bool,
+    router: parking_lot::RwLock<Option<Arc<dyn crate::domain_route::DomainRouter>>>,
+    /// Bounded views retain both node and routing generation identities.
+    routed: parking_lot::Mutex<lru::LruCache<(usize, usize, usize), RoutedGeneration>>,
+}
+
+struct DirectSystemGeneration {
+    iface: String,
+    servers: Vec<IpAddr>,
+    resolver: Arc<Resolver>,
+    network: Arc<meow_common::route_table::RouteTable>,
+}
+
+struct RoutedGeneration {
+    resolver: Arc<Resolver>,
+    generation: std::sync::Weak<dyn Send + Sync>,
+}
+
+struct DomainDnsView {
+    resolver: Arc<Resolver>,
+    _generation: Option<Arc<dyn Send + Sync>>,
+    _proxy: Option<Arc<dyn meow_common::Proxy>>,
 }
 
 impl Resolver {
@@ -750,6 +774,12 @@ impl Resolver {
             fakeip_ttl: DEFAULT_FAKE_IP_TTL,
             ipv6,
             paopao_hosts: None,
+            direct_system: None,
+            follow_rules: false,
+            router: parking_lot::RwLock::new(None),
+            routed: parking_lot::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(32).unwrap(),
+            )),
         }
     }
 
@@ -1015,13 +1045,19 @@ impl Resolver {
             use_hosts,
             inflight: [DashMap::new(), DashMap::new(), DashMap::new()],
             policy,
-            fallback_filter,
+            fallback_filter: fallback_filter.map(Arc::new),
             fakeip_v4: None,
             fakeip_v6: None,
             fakeip_skipper: None,
             fakeip_ttl: DEFAULT_FAKE_IP_TTL,
             ipv6,
             paopao_hosts: None,
+            direct_system: None,
+            follow_rules: false,
+            router: parking_lot::RwLock::new(None),
+            routed: parking_lot::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(32).unwrap(),
+            )),
         })
     }
 
@@ -1117,6 +1153,276 @@ impl Resolver {
         Arc::new(client)
     }
 
+    /// Opt into physical-interface DNS only after routing selects DIRECT.
+    /// Config reload replaces this state; NIC/server changes discard its
+    /// cached answers instead of reusing the previous network's CDN view.
+    pub fn set_direct_system_dns(&mut self, enabled: bool) {
+        self.direct_system = enabled.then(|| parking_lot::Mutex::new(None));
+    }
+
+    pub fn uses_direct_system_dns(&self) -> bool {
+        self.direct_system.is_some()
+    }
+
+    pub fn set_follow_domain_rules(&mut self, enabled: bool) {
+        self.follow_rules = enabled;
+    }
+
+    pub fn follows_domain_rules(&self) -> bool {
+        self.follow_rules
+    }
+
+    /// The hook owns only a weak tunnel reference, so neither side leaks
+    /// when a standalone core or a resolver generation is replaced.
+    pub fn set_domain_router(&self, router: Arc<dyn crate::domain_route::DomainRouter>) {
+        *self.router.write() = Some(router);
+    }
+
+    fn direct_dns_view(&self, interface: Option<&str>) -> io::Result<Arc<Resolver>> {
+        let state = self
+            .direct_system
+            .as_ref()
+            .ok_or_else(|| io::Error::other("interface DNS is not enabled"))?;
+        let snapshot = meow_common::route_table::iface_dns();
+        let table = meow_common::route_table::route_table();
+        let physical = meow_common::route_table::physical_interface()
+            .or_else(|| table.any_physical().map(|entry| Arc::clone(&entry.iface)));
+        let requested = interface.or(physical.as_deref());
+        let target = snapshot
+            .iter()
+            .find(|row| {
+                requested.map_or(
+                    row.kind == meow_common::route_table::RouteIfaceKind::Physical,
+                    |name| row.iface == name,
+                ) && !row.servers.is_empty()
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "DIRECT: no DNS servers discovered for the outbound interface",
+                )
+            })?;
+        let servers: Vec<_> = target
+            .servers
+            .iter()
+            .copied()
+            .filter(|ip| !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast())
+            .collect();
+        if servers.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "DIRECT: no usable interface DNS upstream",
+            ));
+        }
+        let mut state = state.lock();
+        if state.as_ref().is_none_or(|old| {
+            old.iface != target.iface
+                || old.servers != servers
+                || !Arc::ptr_eq(&old.network, &table)
+        }) {
+            let mut resolver = Resolver::new(
+                vec![],
+                vec![],
+                DnsMode::Normal,
+                DomainTrie::new(),
+                false,
+                self.ipv6,
+            );
+            resolver.cache = DnsCache::new(512);
+            resolver.main = servers
+                .iter()
+                .map(|ip| {
+                    Arc::new(DnsClient::udp(SocketAddr::new(*ip, 53)).with_interface(&target.iface))
+                })
+                .collect();
+            tracing::info!(
+                iface = target.iface,
+                ?servers,
+                "DIRECT DNS follows outbound interface"
+            );
+            *state = Some(DirectSystemGeneration {
+                iface: target.iface.clone(),
+                servers,
+                resolver: Arc::new(resolver),
+                network: table,
+            });
+        }
+        Ok(Arc::clone(&state.as_ref().unwrap().resolver))
+    }
+
+    fn proxy_dns_view(
+        &self,
+        host: &str,
+        proxy: Arc<dyn meow_common::Proxy>,
+        generation: Arc<dyn Send + Sync>,
+    ) -> Arc<Resolver> {
+        let upstreams = self
+            .policy
+            .as_ref()
+            .and_then(|p| p.lookup(host))
+            .map_or(self.main.as_slice(), |entry| entry.nameservers.as_slice());
+        let key = (
+            Arc::as_ptr(&proxy) as *const () as usize,
+            Arc::as_ptr(&generation) as *const () as usize,
+            upstreams.as_ptr() as usize,
+        );
+        let mut views = self.routed.lock();
+        if let Some(view) = views.get(&key) {
+            if view
+                .generation
+                .upgrade()
+                .is_some_and(|old| Arc::ptr_eq(&old, &generation))
+            {
+                return Arc::clone(&view.resolver);
+            }
+        }
+        let mut resolver = Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::Normal,
+            DomainTrie::new(),
+            false,
+            self.ipv6,
+        );
+        resolver.cache = DnsCache::new(512);
+        resolver.main = upstreams
+            .iter()
+            .map(|client| Arc::new(client.through_node(Arc::clone(&proxy))))
+            .collect();
+        resolver.fallback = self.fallback.as_ref().map(|clients| {
+            clients
+                .iter()
+                .map(|client| Arc::new(client.through_node(Arc::clone(&proxy))))
+                .collect()
+        });
+        resolver.fallback_filter = self.fallback_filter.clone();
+        let resolver = Arc::new(resolver);
+        views.put(
+            key,
+            RoutedGeneration {
+                resolver: Arc::clone(&resolver),
+                generation: Arc::downgrade(&generation),
+            },
+        );
+        resolver
+    }
+
+    async fn domain_dns_view(&self, host: &str) -> io::Result<Option<DomainDnsView>> {
+        if !self.follow_rules {
+            return Ok(None);
+        }
+        if crate::domain_route::classifying() {
+            // The routing decision is not known yet. Use the configured
+            // nameserver/policy pipeline (including its explicit proxy),
+            // not DIRECT's interface DNS. Re-entering domain routing here
+            // would recurse; leaking the candidate query to the NIC would
+            // expose domains which ultimately leave through a proxy.
+            return Ok(None);
+        }
+        let router = self
+            .router
+            .read()
+            .clone()
+            .ok_or_else(|| io::Error::other("DNS routing is not attached to the tunnel"))?;
+        match router.route(host).await? {
+            crate::domain_route::DomainRoute::Direct { interface } => {
+                self.direct_dns_view(interface.as_deref()).map(|resolver| {
+                    Some(DomainDnsView {
+                        resolver,
+                        _generation: None,
+                        _proxy: None,
+                    })
+                })
+            }
+            crate::domain_route::DomainRoute::Reject => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "DNS domain rejected by routing policy",
+            )),
+            crate::domain_route::DomainRoute::Proxy { proxy, generation } => {
+                Ok(Some(DomainDnsView {
+                    resolver: self.proxy_dns_view(
+                        host,
+                        Arc::clone(&proxy),
+                        Arc::clone(&generation),
+                    ),
+                    _generation: Some(generation),
+                    _proxy: Some(proxy),
+                }))
+            }
+        }
+    }
+
+    /// A UDP connection already chose its exact leaf; use that node for
+    /// the mandatory local destination lookup instead of selecting again.
+    pub async fn resolve_via_proxy_ips(
+        &self,
+        host: &str,
+        proxy: Arc<dyn meow_common::Proxy>,
+        generation: Arc<dyn Send + Sync>,
+    ) -> io::Result<Option<Vec<IpAddr>>> {
+        if let Some(ip) = self.paopao_enabled_address(host) {
+            return Ok(Some(vec![ip]));
+        }
+        let host = if self.use_hosts {
+            match self.lookup_hosts_entry(host) {
+                Some(HostsLookup::Addresses(ips)) => {
+                    if let Some(ips) = self.filter_enabled_ips(ips) {
+                        return Ok(Some(ips));
+                    }
+                    host
+                }
+                Some(HostsLookup::Alias(alias)) => alias,
+                None => host,
+            }
+        } else {
+            host
+        };
+        let resolver = self.proxy_dns_view(host, Arc::clone(&proxy), Arc::clone(&generation));
+        let _node = proxy;
+        let _pin = generation;
+        Box::pin(resolver.resolve_ips(host)).await
+    }
+
+    /// Real addresses for a selected direct outbound. Preserve local Hosts
+    /// and split-VPN semantics, then query only the physical NIC's servers.
+    /// Failure never falls back to the main (possibly overseas) resolver.
+    pub async fn resolve_direct_ips(&self, host: &str) -> io::Result<Option<Vec<IpAddr>>> {
+        self.resolve_direct_ips_on(host, None).await
+    }
+
+    pub async fn resolve_direct_ips_on(
+        &self,
+        host: &str,
+        interface: Option<&str>,
+    ) -> io::Result<Option<Vec<IpAddr>>> {
+        if self.direct_system.is_none() {
+            return self.resolve_ips(host).await;
+        }
+        if let Some(target) = crate::vpn_dns::target_for(host) {
+            return Ok(crate::vpn_dns::resolve(host, self.ipv6, &target)
+                .await?
+                .and_then(|ips| self.filter_enabled_ips(&ips)));
+        }
+        if let Some(ip) = self.paopao_enabled_address(host) {
+            return Ok(Some(vec![ip]));
+        }
+        let host = if self.use_hosts {
+            match self.lookup_hosts_entry(host) {
+                Some(HostsLookup::Addresses(ips)) => {
+                    if let Some(ips) = self.filter_enabled_ips(ips) {
+                        return Ok(Some(ips));
+                    }
+                    host
+                }
+                Some(HostsLookup::Alias(alias)) => alias,
+                None => host,
+            }
+        } else {
+            host
+        };
+        Box::pin(self.direct_dns_view(interface)?.resolve_ips(host)).await
+    }
+
     /// Resolve `host` to every enabled address.
     ///
     /// `Ok(Some(ips))` — at least one dialable address; `Ok(None)` — the
@@ -1157,6 +1463,9 @@ impl Resolver {
         } else {
             host
         };
+        if let Some(view) = self.domain_dns_view(lookup_host).await? {
+            return Box::pin(view.resolver.resolve_ips(lookup_host)).await;
+        }
         let required = if self.ipv6 {
             QueryFamilies::BOTH
         } else {
@@ -1305,6 +1614,12 @@ impl Resolver {
         }
     }
 
+    /// Only the address used to classify an IP-based routing rule. Final
+    /// direct/UDP dials resolve in the chosen egress view afterwards.
+    pub async fn resolve_classification_ip(&self, host: &str) -> Option<IpAddr> {
+        crate::domain_route::classify(self.resolve_ip_real(host)).await
+    }
+
     pub async fn lookup_ipv4(&self, host: &str) -> Option<IpAddr> {
         self.lookup_ipv4_with_ttl(host).await.map(|(ip, _)| ip)
     }
@@ -1367,8 +1682,10 @@ impl Resolver {
                 }
             }
         }
-        if let Some(hit) = self.fresh_family_hit(host, QueryFamilies::IPV4) {
-            return LocalLookup::Decided(hit);
+        if !self.follow_rules {
+            if let Some(hit) = self.fresh_family_hit(host, QueryFamilies::IPV4) {
+                return LocalLookup::Decided(hit);
+            }
         }
         LocalLookup::Upstream(host)
     }
@@ -1447,8 +1764,10 @@ impl Resolver {
                 return LocalLookup::Decided(AddressLookupResult::NoData);
             }
         }
-        if let Some(hit) = self.fresh_family_hit(host, QueryFamilies::IPV6) {
-            return LocalLookup::Decided(hit);
+        if !self.follow_rules {
+            if let Some(hit) = self.fresh_family_hit(host, QueryFamilies::IPV6) {
+                return LocalLookup::Decided(hit);
+            }
         }
         LocalLookup::Upstream(host)
     }
@@ -1503,6 +1822,13 @@ impl Resolver {
         host: &str,
         record_type: RecordType,
     ) -> AddressLookupResult {
+        match self.domain_dns_view(host).await {
+            Ok(Some(view)) => {
+                return Box::pin(view.resolver.lookup_real_with_ttl(host, record_type)).await
+            }
+            Err(_) => return AddressLookupResult::Failed,
+            Ok(None) => (),
+        }
         let family = QueryFamilies::from_record_type(record_type);
         if family.is_empty() {
             return AddressLookupResult::Failed;
@@ -1877,6 +2203,17 @@ impl Resolver {
         query_name: &Name,
         record_type: RecordType,
     ) -> Option<Message> {
+        match self.domain_dns_view(domain).await {
+            Ok(Some(view)) => {
+                return Box::pin(
+                    view.resolver
+                        .forward_generic(domain, query_name, record_type),
+                )
+                .await
+            }
+            Err(_) => return None,
+            Ok(None) => (),
+        }
         if let Some(ff) = &self.fallback_filter {
             if ff.domain_gated(domain) {
                 return self.try_fallback_generic(query_name, record_type).await;
@@ -1911,7 +2248,11 @@ impl Resolver {
     /// not included — the pools have their own [`crate::fakeip::Store`]
     /// persistence.
     pub fn reverse_cache_snapshot(&self) -> Vec<crate::cache::ReverseSnapshotEntry> {
-        self.cache.reverse_snapshot()
+        let mut entries = self.cache.reverse_snapshot();
+        for view in self.dns_views() {
+            entries.extend(view.cache.reverse_snapshot());
+        }
+        entries
     }
 
     /// Restore reverse (IP → host) entries captured by
@@ -1937,7 +2278,11 @@ impl Resolver {
                 return Some(host);
             }
         }
-        self.cache.reverse_lookup(ip)
+        self.cache.reverse_lookup(ip).or_else(|| {
+            self.dns_views()
+                .iter()
+                .find_map(|view| view.cache.reverse_lookup(ip))
+        })
     }
 
     /// True when fake-IP synthesis applies to `host` — i.e. its A/AAAA
@@ -2106,6 +2451,26 @@ impl Resolver {
 
     pub fn clear_cache(&self) {
         self.cache.clear();
+        for view in self.dns_views() {
+            view.cache.clear();
+        }
+    }
+
+    fn dns_views(&self) -> Vec<Arc<Resolver>> {
+        let mut views = Vec::new();
+        if let Some(state) = &self.direct_system {
+            if let Some(view) = &*state.lock() {
+                views.push(Arc::clone(&view.resolver));
+            }
+        }
+        views.extend(
+            self.routed
+                .lock()
+                .iter()
+                .filter(|(_, view)| view.generation.strong_count() != 0)
+                .map(|(_, view)| Arc::clone(&view.resolver)),
+        );
+        views
     }
 
     /// Drop pooled upstream connections so the next query dials a fresh
@@ -2128,12 +2493,18 @@ impl Resolver {
             .policy
             .as_ref()
             .map_or(&[][..], NameserverPolicy::clients);
-        self.main
+        let own: usize = self
+            .main
             .iter()
             .chain(fallback)
             .chain(policy)
             .map(|client| client.reset_connections())
-            .sum()
+            .sum();
+        own + self
+            .dns_views()
+            .iter()
+            .map(|view| view.reset_connections())
+            .sum::<usize>()
     }
 
     pub fn dns_results(&self, search: Option<&str>, limit: usize) -> Vec<DnsCacheSnapshotEntry> {
@@ -2141,8 +2512,11 @@ impl Resolver {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_ascii_lowercase);
-        self.cache
-            .snapshot()
+        let mut entries = self.cache.snapshot();
+        for view in self.dns_views() {
+            entries.extend(view.cache.snapshot());
+        }
+        entries
             .into_iter()
             .filter(|entry| {
                 search.as_ref().is_none_or(|needle| {
@@ -3781,7 +4155,7 @@ mod tests {
         };
         let hosts = DomainTrie::new();
         let mut resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true, true);
-        resolver.fallback_filter = Some(ff);
+        resolver.fallback_filter = Some(Arc::new(ff));
         // No fallback configured → None returned (primary never tried).
         let result = resolver.resolve_ip("www.google.cn").await;
         assert_eq!(

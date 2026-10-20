@@ -8,6 +8,8 @@
 #[cfg(any(target_os = "linux", test))]
 pub mod arp;
 pub mod geodata_fetch;
+#[cfg(target_os = "linux")]
+pub mod linux_permissions;
 /// The privileged helper (`meow service` / `meow service-call`): desktops
 /// only — phones take the VPN through the system's own consent. Windows:
 /// a Windows service on a named pipe (`helper::win`).

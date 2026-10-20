@@ -232,7 +232,12 @@ pub struct DnsClient {
     transport: Transport,
     timeout: Duration,
     proxy: Option<DnsProxy>,
+    /// Cached views must not own a proxy registry pointing back at their
+    /// parent resolver through a DIRECT adapter's shared resolver slot.
+    weak_proxy: Option<std::sync::Weak<dyn meow_common::Proxy>>,
     label: Option<Arc<str>>,
+    /// Physical NIC for DIRECT's resolver; bypasses VPN/default binding.
+    interface: Option<Arc<str>>,
     /// Idle direct `tcp://` connections. Streams are checked out for the whole
     /// exchange and returned only after the DNS response is fully validated.
     tcp_pool: TcpPool,
@@ -384,6 +389,7 @@ pub(crate) struct FamilySet {
     pub(crate) source: String,
 }
 
+#[derive(Clone)]
 enum Transport {
     Udp {
         addr: SocketAddr,
@@ -408,13 +414,38 @@ enum Transport {
 }
 
 impl DnsClient {
+    /// Reuse the endpoint through the selected node, with a fresh pool.
+    /// Existing policy tags are superseded by the domain's actual egress.
+    pub fn through_node(&self, proxy: DnsProxy) -> Self {
+        Self {
+            transport: self.transport.clone(),
+            timeout: self.timeout,
+            label: Some(Arc::from(format!(
+                "{} via {}",
+                self.upstream_label().split('#').next().unwrap_or("DNS"),
+                proxy.name()
+            ))),
+            weak_proxy: Some(Arc::downgrade(&proxy)),
+            proxy: None,
+            interface: None,
+            tcp_pool: TcpPool::new(),
+        }
+    }
+    /// Pin plain upstream DNS to the NIC that supplied its server address.
+    pub fn with_interface(mut self, interface: &str) -> Self {
+        self.interface = Some(Arc::from(interface));
+        self
+    }
+
     /// Plain DNS over UDP.
     pub fn udp(addr: SocketAddr) -> Self {
         Self {
             transport: Transport::Udp { addr },
             timeout: DEFAULT_QUERY_TIMEOUT,
             proxy: None,
+            weak_proxy: None,
             label: None,
+            interface: None,
             tcp_pool: TcpPool::new(),
         }
     }
@@ -425,7 +456,9 @@ impl DnsClient {
             transport: Transport::Tcp { addr },
             timeout: DEFAULT_QUERY_TIMEOUT,
             proxy: None,
+            weak_proxy: None,
             label: None,
+            interface: None,
             tcp_pool: TcpPool::new(),
         }
     }
@@ -436,7 +469,9 @@ impl DnsClient {
             transport: Transport::RCode { code },
             timeout: DEFAULT_QUERY_TIMEOUT,
             proxy: None,
+            weak_proxy: None,
             label: None,
+            interface: None,
             tcp_pool: TcpPool::new(),
         }
     }
@@ -451,7 +486,9 @@ impl DnsClient {
             },
             timeout: DEFAULT_QUERY_TIMEOUT,
             proxy: None,
+            weak_proxy: None,
             label: None,
+            interface: None,
             tcp_pool: TcpPool::new(),
         }
     }
@@ -467,7 +504,9 @@ impl DnsClient {
             },
             timeout: DEFAULT_QUERY_TIMEOUT,
             proxy: None,
+            weak_proxy: None,
             label: None,
+            interface: None,
             tcp_pool: TcpPool::new(),
         }
     }
@@ -501,7 +540,7 @@ impl DnsClient {
     /// (`with_proxy`). Exposed so config-layer tests can assert that
     /// `#PROXY`-tagged nameserver entries actually got their adapter wired.
     pub fn is_proxied(&self) -> bool {
-        self.proxy.is_some()
+        self.proxy.is_some() || self.weak_proxy.is_some()
     }
 
     /// The adapter this client's exchanges route through, if any. Exposed
@@ -846,7 +885,10 @@ impl DnsClient {
         // Captured before the socket exists: a reset racing the connect
         // must retire this stream too (issue #695).
         let generation = self.tcp_pool.generation();
-        let mut stream = factory().connect_tcp(addr).await?;
+        let mut stream = match &self.interface {
+            Some(iface) => meow_common::connect_tcp_on(addr, iface).await?,
+            None => factory().connect_tcp(addr).await?,
+        };
         let response = tcp_message_exchange(&mut stream, wire, expected).await?;
         self.tcp_pool.push(PooledTcp { stream, generation }).await;
         Ok(response)
@@ -875,7 +917,14 @@ impl DnsClient {
         wire: &[u8],
         expected: &ExpectedResponse,
     ) -> Result<Message, ClientError> {
-        if let Some(proxy) = self.proxy.as_ref() {
+        let selected = self
+            .proxy
+            .clone()
+            .or_else(|| self.weak_proxy.as_ref().and_then(std::sync::Weak::upgrade));
+        if self.weak_proxy.is_some() && selected.is_none() {
+            return Err(ClientError::Protocol("DNS proxy generation has expired"));
+        }
+        if let Some(proxy) = selected.as_ref() {
             let addr = match &self.transport {
                 Transport::Udp { addr } | Transport::Tcp { addr } => *addr,
                 Transport::RCode { .. } => {
@@ -902,7 +951,9 @@ impl DnsClient {
             return decode_validated_response(&response, expected);
         }
         match &self.transport {
-            Transport::Udp { addr } => udp_exchange(*addr, wire, expected).await,
+            Transport::Udp { addr } => {
+                udp_exchange(*addr, wire, expected, self.interface.as_deref()).await
+            }
             Transport::Tcp { addr } => self.tcp_exchange_pooled(*addr, wire, expected).await,
             Transport::RCode { .. } => Err(ClientError::Protocol(
                 "rcode transport should not perform network exchange",
@@ -1231,6 +1282,7 @@ async fn udp_exchange(
     addr: SocketAddr,
     wire: &[u8],
     expected: &ExpectedResponse,
+    iface: Option<&str>,
 ) -> Result<Message, ClientError> {
     // A loopback upstream (e.g. the resolver's own `dns.listen` socket,
     // which some subscriptions name in `proxy-server-nameserver`) must be
@@ -1242,7 +1294,17 @@ async fn udp_exchange(
     // Binding to the loopback address selects `lo0` explicitly; it also
     // needs no VPN `protect()` on Android because loopback is never routed
     // into the tunnel.
-    let sock = if addr.ip().is_loopback() {
+    let sock = if let Some(iface) = iface {
+        let local = SocketAddr::new(
+            if addr.is_ipv4() {
+                std::net::Ipv4Addr::UNSPECIFIED.into()
+            } else {
+                std::net::Ipv6Addr::UNSPECIFIED.into()
+            },
+            0,
+        );
+        meow_common::bind_udp_on(local, iface)?
+    } else if addr.ip().is_loopback() {
         let local: SocketAddr = match addr {
             SocketAddr::V4(_) => SocketAddr::from(([127, 0, 0, 1], 0)),
             SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 0)),
@@ -1266,7 +1328,10 @@ async fn udp_exchange(
             // RFC 7766 §0: retry a truncated UDP answer over TCP with a
             // one-off connection (the truncation fallback is intentionally
             // not pooled).
-            let mut stream = factory().connect_tcp(addr).await?;
+            let mut stream = match iface {
+                Some(iface) => meow_common::connect_tcp_on(addr, iface).await?,
+                None => factory().connect_tcp(addr).await?,
+            };
             return tcp_message_exchange(&mut stream, wire, expected).await;
         }
         return Ok(response);

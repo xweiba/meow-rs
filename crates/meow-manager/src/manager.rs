@@ -319,6 +319,15 @@ impl Manager {
     /// As the manager starts: a proxy left pointing at a core of before put
     /// back; the core brought up when 开机自启 and 内核 are on.
     pub fn boot(&mut self) {
+        // DesktopCore already adopted the resident process. Opening the
+        // panel (or replacing the tray) must not turn login restoration
+        // into an implicit restart, nor undo its live system proxy.
+        if self.core.running() {
+            self.saved.core = true;
+            self.proxy_on = self.saved.system_proxy && Self::port_in(&self.config()).is_some();
+            self.save();
+            return;
+        }
         if self.proxy.recover() {
             tracing::info!("manager: the system proxy of an earlier run put back");
         }
@@ -708,11 +717,14 @@ impl Manager {
     /// goes off (kept so, the stored input too) and what was there before
     /// PaoPao is not put back over theirs.
     pub fn watch(&mut self) {
+        // Poll even without 系统代理: the core can still own TUN/DNS.
+        // DesktopCore performs pending cache cleanup after confirmed exit.
+        let core_running = self.core.running();
         if !self.proxy_on {
             self.not_ours = 0;
             return;
         }
-        if !self.core.running() {
+        if !core_running {
             tracing::warn!("manager: the core ended; the system proxy put back");
             self.proxy.disable();
             self.proxy_on = false;
@@ -808,6 +820,8 @@ pub(crate) mod tests {
         pub root: PathBuf,
         /// What [`Core::same_build`] says.
         pub same: Arc<Mutex<Option<bool>>>,
+        /// Watcher polls even when only TUN owns network state.
+        pub running_checks: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl Core for FakeCore {
@@ -828,6 +842,8 @@ pub(crate) mod tests {
             *self.up.lock().unwrap() = false;
         }
         fn running(&mut self) -> bool {
+            self.running_checks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             *self.up.lock().unwrap()
         }
         fn same_build(&mut self) -> Option<bool> {
@@ -930,6 +946,7 @@ pub(crate) mod tests {
         pub can_tun: Arc<Mutex<bool>>,
         pub login: Arc<Mutex<bool>>,
         pub login_refuse: Arc<Mutex<Option<String>>>,
+        pub running_checks: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl Rig {
@@ -946,6 +963,7 @@ pub(crate) mod tests {
                 can_tun: Arc::new(Mutex::new(true)),
                 login: Arc::default(),
                 login_refuse: Arc::default(),
+                running_checks: Arc::default(),
             }
         }
 
@@ -960,6 +978,7 @@ pub(crate) mod tests {
                         refuse: Arc::clone(&self.refuse),
                         root: self.dir.path().to_owned(),
                         same: Arc::clone(&self.same),
+                        running_checks: Arc::clone(&self.running_checks),
                     }),
                     builder: Box::new(FakeBuilder {
                         log: Arc::clone(&self.build),
@@ -1174,6 +1193,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn boot_adopts_a_resident_core_without_restarting_or_recovering_proxy() {
+        for login in [false, true] {
+            let rig = Rig::new();
+            let mut m = rig.manager();
+            m.start(Some(rig.run()), Some(true)).unwrap();
+            m.set(Patch {
+                launch_at_login: Some(login),
+                ..Patch::default()
+            })
+            .unwrap();
+            rig.core.take();
+            rig.proxy.take();
+            rig.build.take();
+            let mut next = rig.manager();
+            next.boot();
+            assert!(rig.core.take().is_empty());
+            assert!(rig.proxy.take().is_empty());
+            assert!(rig.build.take().is_empty());
+            assert_eq!(next.status()["running"], true);
+            // The adopted proxy remains watched: an actual core exit
+            // still restores normal connectivity.
+            *rig.up.lock().unwrap() = false;
+            next.watch();
+            assert_eq!(rig.proxy.take(), ["proxy off"]);
+        }
+    }
+
+    #[test]
     fn the_virtual_adapter_rebuilds_and_restarts() {
         let rig = Rig::new();
         let mut m = rig.manager();
@@ -1248,6 +1295,26 @@ pub(crate) mod tests {
         assert!(s["dir"].as_str().unwrap().ends_with("core-service"));
         assert_eq!(s["tun"], true);
         assert!(m.start_config(&json!([1]), None).is_err());
+    }
+
+    #[test]
+    fn watcher_polls_core_with_system_proxy_disabled() {
+        let rig = Rig::new();
+        let mut m = rig.manager();
+        m.start_config(&json!({"tun": {"enable": true}}), Some(false))
+            .unwrap();
+        rig.proxy.take();
+        *rig.up.lock().unwrap() = false;
+        let before = rig
+            .running_checks
+            .load(std::sync::atomic::Ordering::Relaxed);
+        m.watch();
+        assert_eq!(
+            rig.running_checks
+                .load(std::sync::atomic::Ordering::Relaxed),
+            before + 1
+        );
+        assert!(rig.proxy.take().is_empty());
     }
 
     #[test]

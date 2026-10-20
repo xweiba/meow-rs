@@ -127,6 +127,11 @@ pub trait ProxyAdapter: Send + Sync {
     fn adapter_type(&self) -> AdapterType;
     fn addr(&self) -> &str;
     fn support_udp(&self) -> bool;
+    /// Explicit interface for a direct outbound's DNS view. `None` uses
+    /// the normal uplink; a VPN-pinned direct outbound keeps its own DNS.
+    fn dns_interface(&self) -> Option<Arc<str>> {
+        None
+    }
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>>;
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>>;
     /// Run this adapter's complete post-connect pipeline over `stream`.

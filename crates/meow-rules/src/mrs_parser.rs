@@ -1,10 +1,8 @@
-//! Shared mrs (MetaCubeX rule-set / geodata) binary format parser.
+//! MRS parsers: upstream MetaCubeX rule providers and the legacy local container.
 //!
-//! Shared between the geosite loader (this task, M1.D-2) and the forthcoming
-//! rule-provider mrs parser (M1.D-5). Do NOT duplicate this logic — bug fixes
-//! must land in one place.
+//! Shared by the legacy geosite loader and rule-provider parser.
 //!
-//! # Format (per `docs/specs/rule-provider-upgrade.md` §mrs binary format)
+//! # Legacy local format
 //!
 //! ```text
 //! Header:
@@ -32,15 +30,13 @@
 //!       domain_bytes: [u8; domain_len]  (UTF-8, lower-cased)
 //! ```
 //!
-//! upstream authoritative reference:
-//! - `rules/provider/rule_set_mrs.go::Decode` (rule-provider variant)
-//! - `component/geodata/metaresource/metaresource.go::Read` (geosite variant)
-//!
-//! NOTE — upstream source was not available to the engineer at implementation
-//! time. Byte-exact integration tests must regenerate fixtures using
-//! MetaCubeX's `convert-geo` tool (or equivalent) once upstream access is
-//! available. Unit tests here use a round-trip via `write_geosite()` to
-//! confirm the parser reverses its own encoder.
+//! The `MRS!` layout above is a legacy meow container, **not** an upstream
+//! MetaCubeX format. It remains readable for existing local caches.
+//! Real upstream MRS wraps `MRS\x01` and its entire body inside zstd, with
+//! succinct domain sets or IP intervals. See `UpstreamRuleSetReader`, upstream
+//! `rules/provider/mrs_reader.go`, `component/trie/domain_set_bin.go`, and
+//! `component/cidr/ipcidr_set_bin.go`. Byte-exact published fixtures are tested
+//! in `tests/upstream_formats.rs`; no upstream multi-category GeoSite MRS exists.
 
 use std::io::{Cursor, Read};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -133,7 +129,7 @@ pub fn parse_header(data: &[u8]) -> Result<(MrsHeader, &[u8]), MrsError> {
 /// the zstd expansion ratio is attacker-chosen, so an unbounded `read_to_end`
 /// would let a small payload grow `out` until allocation aborts the process
 /// (issue #513).
-const MAX_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Decompress the zstd-compressed payload that follows an mrs header.
 pub fn decompress_payload(compressed: &[u8]) -> Result<Vec<u8>, MrsError> {
@@ -142,6 +138,9 @@ pub fn decompress_payload(compressed: &[u8]) -> Result<Vec<u8>, MrsError> {
 
 fn decompress_payload_bounded(compressed: &[u8], max: u64) -> Result<Vec<u8>, MrsError> {
     let mut decoder = zstd::stream::Decoder::new(Cursor::new(compressed))?;
+    // Bound zstd's history allocation too; the output cap alone does not
+    // constrain an attacker-controlled frame's declared window size.
+    decoder.window_log_max(26)?;
     let mut out = Vec::new();
     // Read one byte past the bound so an over-limit payload is an error rather
     // than silently truncated input.
@@ -215,7 +214,7 @@ impl<R: Read> FrameReader<R> {
                         offset: self.pos + got,
                         need: 2,
                         have: got,
-                    })
+                    });
                 }
                 Ok(n) => got += n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
@@ -461,7 +460,18 @@ impl UpstreamRuleSetReader {
         if self.behavior != TYPE_DOMAIN {
             return Err(MrsError::InvalidBehavior(self.behavior));
         }
-        walk_upstream_domain_set(self.body(), &mut on_domain)
+        let mut emitted = 0usize;
+        walk_upstream_domain_set(self.body(), &mut |domain| {
+            emitted += 1;
+            on_domain(domain);
+        })?;
+        if self.count > 0 && emitted == 0 {
+            return Err(MrsError::InvalidLength(
+                "empty_domain_set",
+                self.count as i64,
+            ));
+        }
+        Ok(())
     }
 
     /// Walk every network of an `ipcidr` body (ranges are split into
@@ -485,6 +495,12 @@ impl UpstreamRuleSetReader {
             let to = r.read_array::<16>("ipcidr_to")?;
             let from = IpAddr::from(Ipv6Addr::from(from));
             let to = IpAddr::from(Ipv6Addr::from(to));
+            if from > to
+                || matches!((from, to), (IpAddr::V6(a), IpAddr::V6(b))
+                if a.to_ipv4_mapped().is_some() != b.to_ipv4_mapped().is_some())
+            {
+                return Err(MrsError::InvalidLength("ipcidr_range", -1));
+            }
             push_range_prefixes(from, to, &mut |net| {
                 emitted += 1;
                 on_net(net);
@@ -494,6 +510,12 @@ impl UpstreamRuleSetReader {
             if emitted > MAX_DOMAIN_SET_ENTRIES {
                 return Err(MrsError::InvalidLength("ipcidr_set_output", emitted as i64));
             }
+        }
+        if !r.remaining_slice().is_empty() {
+            return Err(MrsError::InvalidLength(
+                "ipcidr_trailing_bytes",
+                r.remaining_slice().len() as i64,
+            ));
         }
         Ok(())
     }
@@ -516,17 +538,22 @@ fn walk_upstream_domain_set(data: &[u8], on_domain: &mut dyn FnMut(&str)) -> Res
     let labels_len = usize::try_from(labels_len)
         .map_err(|_| MrsError::InvalidLength("domain_set_labels_len", labels_len))?;
     let labels = r.read_slice("domain_set_labels", labels_len)?;
+    if !r.remaining_slice().is_empty() {
+        return Err(MrsError::InvalidLength(
+            "domain_set_trailing_bytes",
+            r.remaining_slice().len() as i64,
+        ));
+    }
 
     // A well-formed trie has exactly one terminator bit per node and every
     // non-root node owns one incoming label edge, so #ones <= labels + 1.
-    // Enforce the correlation *before* DomainSetIndex materializes one `usize`
-    // per set bit — a mostly-ones bitmap would otherwise amplify the input
-    // ~64x into memory (issue #513).
+    // Enforce the correlation before building rank/select indexes or walking
+    // remote-controlled edges (issue #513).
     let node_count: usize = label_bitmap
         .iter()
         .map(|word| word.count_ones() as usize)
         .sum();
-    if node_count > labels.len() + 1 {
+    if node_count != labels.len() + 1 || leaves.len().saturating_mul(64) < node_count {
         return Err(MrsError::InvalidLength(
             "domain_set_terminators",
             node_count as i64,
@@ -540,14 +567,24 @@ fn walk_upstream_domain_set(data: &[u8], on_domain: &mut dyn FnMut(&str)) -> Res
         labels,
     };
     let mut current = Vec::new();
-    let mut forward = Vec::new();
+    let mut forward = String::new();
+    let mut invalid_utf8 = false;
     traversal.traverse(0, 0, &mut current, &mut |reversed: &[u8]| {
-        forward.clear();
-        forward.extend(reversed.iter().rev());
-        if let Ok(domain) = std::str::from_utf8(&forward) {
-            on_domain(domain);
+        if let Ok(key) = std::str::from_utf8(reversed) {
+            // Upstream reverses Unicode runes, not bytes, and uses a final
+            // '+' internally for a subdomain-only path. Exact-root entries
+            // are encoded separately; importing '+' as '+.' broadens the set.
+            forward.clear();
+            forward.extend(key.strip_suffix('+').unwrap_or(key).chars().rev());
+            on_domain(&forward);
+        } else {
+            invalid_utf8 = true;
         }
-    })
+    })?;
+    if invalid_utf8 {
+        return Err(MrsError::InvalidLength("domain_set_utf8", -1));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -584,13 +621,51 @@ struct DomainSetTraversal<'a> {
     labels: &'a [u8],
 }
 
+/// Traverse sing-box's related succinct trie without materialising a string
+/// list. Its leaf keys keep control-label markers for the caller to interpret.
+pub(crate) fn walk_sing_domain_set(
+    leaves: &[u64],
+    bitmap: &[u64],
+    labels: &[u8],
+    mut on_key: impl FnMut(&str),
+) -> Result<(), String> {
+    let nodes: usize = bitmap.iter().map(|w| w.count_ones() as usize).sum();
+    let last_bit = bitmap
+        .iter()
+        .rposition(|&w| w != 0)
+        .map_or(0, |i| i * 64 + 64 - bitmap[i].leading_zeros() as usize);
+    if nodes != labels.len() + 1 || last_bit != nodes + labels.len() {
+        return Err("malformed sing-box succinct trie".into());
+    }
+    let traversal = DomainSetTraversal {
+        leaves,
+        label_bitmap: bitmap,
+        label_index: DomainSetIndex::new(bitmap),
+        labels,
+    };
+    let mut invalid = false;
+    traversal
+        .traverse(0, 0, &mut Vec::new(), &mut |key| {
+            if let Ok(key) = std::str::from_utf8(key) {
+                on_key(key);
+            } else {
+                invalid = true;
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    if invalid {
+        return Err("invalid UTF-8 in sing-box domain trie".into());
+    }
+    Ok(())
+}
+
 /// Hard bounds on decoded domain-set output. Real-world rule sets top out at a
 /// few million short domains; a hostile file can otherwise turn input bytes
 /// into roughly O(input²) output — each reachable leaf clones a label path of
 /// up to `labels.len()` bytes — exhausting memory without tripping any input
 /// check (issue #513).
 const MAX_DOMAIN_SET_ENTRIES: usize = 4 * 1024 * 1024;
-const MAX_DOMAIN_SET_BYTES: usize = 256 * 1024 * 1024;
+const MAX_DOMAIN_SET_BYTES: usize = 64 * 1024 * 1024;
 /// A domain never exceeds 253 octets of labels, so a legitimate trie walk is
 /// ~127 frames deep at most; 4 Ki frames is generous headroom. Without the
 /// cap the explicit stack and `current` still grow proportionally to remote
@@ -652,7 +727,10 @@ impl DomainSetTraversal<'_> {
                 self.labels
                     .get(label_idx)
                     .copied()
-                    .zip(self.label_index.select_one(next_node_id.saturating_sub(1)))
+                    .zip(
+                        self.label_index
+                            .select_one(self.label_bitmap, next_node_id.saturating_sub(1)),
+                    )
                     .map(|(label, prev_terminator)| (label, next_node_id, prev_terminator + 1))
             };
             let Some((label, next_node_id, next_bm_idx)) = child else {
@@ -689,6 +767,8 @@ impl DomainSetTraversal<'_> {
 
 struct DomainSetIndex {
     rank_ones_by_word: Vec<usize>,
+    /// One anchor per 32 terminators, rather than one usize per trie node.
+    /// This bounds index overhead near the bitmap size for large rule sets.
     select_ones: Vec<usize>,
 }
 
@@ -702,10 +782,12 @@ impl DomainSetIndex {
             let mut remaining = word;
             while remaining != 0 {
                 let bit = remaining.trailing_zeros() as usize;
-                select_ones.push(word_idx * 64 + bit);
+                if seen_ones.is_multiple_of(32) {
+                    select_ones.push(word_idx * 64 + bit);
+                }
+                seen_ones += 1;
                 remaining &= remaining - 1;
             }
-            seen_ones += word.count_ones() as usize;
         }
         rank_ones_by_word.push(seen_ones);
         Self {
@@ -729,8 +811,23 @@ impl DomainSetIndex {
         upto - ones
     }
 
-    fn select_one(&self, nth: usize) -> Option<usize> {
-        self.select_ones.get(nth).copied()
+    fn select_one(&self, bits: &[u64], nth: usize) -> Option<usize> {
+        let anchor = *self.select_ones.get(nth / 32)?;
+        let mut remaining = nth % 32;
+        let mut word_index = anchor / 64;
+        let mut word = *bits.get(word_index)? & (u64::MAX << (anchor % 64));
+        loop {
+            let count = word.count_ones() as usize;
+            if remaining < count {
+                for _ in 0..remaining {
+                    word &= word - 1;
+                }
+                return Some(word_index * 64 + word.trailing_zeros() as usize);
+            }
+            remaining -= count;
+            word_index += 1;
+            word = *bits.get(word_index)?;
+        }
     }
 }
 
@@ -1022,11 +1119,20 @@ mod tests {
     }
 
     fn encode_domain_set(entries: &[&str]) -> Vec<u8> {
-        let mut keys: Vec<Vec<u8>> = entries
-            .iter()
-            .map(|entry| entry.as_bytes().iter().rev().copied().collect())
-            .collect();
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        for entry in entries {
+            let mut push = |s: &str| keys.push(s.chars().rev().collect::<String>().into_bytes());
+            if let Some(suffix) = entry.strip_prefix("+.") {
+                push(suffix);
+                push(entry);
+            } else if entry.starts_with('.') {
+                push(&format!("+{entry}"));
+            } else {
+                push(entry);
+            }
+        }
         keys.sort();
+        keys.dedup();
 
         let mut leaves = Vec::new();
         let mut label_bitmap = Vec::new();
@@ -1161,7 +1267,8 @@ mod tests {
         assert_eq!(parsed.behavior, TYPE_DOMAIN);
         assert_eq!(parsed.count, 2);
         assert!(parsed.entries.iter().any(|e| e == "example.com"));
-        assert!(parsed.entries.iter().any(|e| e == "+.foo.com"));
+        assert!(parsed.entries.iter().any(|e| e == ".foo.com"));
+        assert!(parsed.entries.iter().any(|e| e == "foo.com"));
     }
 
     #[test]

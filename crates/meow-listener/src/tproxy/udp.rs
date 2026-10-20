@@ -44,7 +44,7 @@ pub(super) mod flow {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use meow_common::{with_dial_timeout, ConnType, Metadata, Network};
+    use meow_common::{ConnType, Metadata, Network};
     use meow_tunnel::Tunnel;
     use tokio::sync::mpsc;
     use tokio::time::{sleep_until, Instant};
@@ -109,19 +109,14 @@ pub(super) mod flow {
         };
 
         let inner = tunnel.inner();
+        let mut flush = inner.udp_flush_watch();
         if matches!(
             inner.pre_handle_metadata(&mut metadata),
             meow_tunnel::PreHandleVerdict::Drop
         ) {
             return Err("unmapped fake-ip destination".into());
         }
-        // UDP keeps the eager pre_resolve (no lazy enrichment): the outbound
-        // packet API needs a resolved dst_ip regardless of what the rules
-        // demand — including after a fake-IP was rewritten back to a hostname.
-        inner.pre_resolve(&mut metadata).await;
-        if metadata.dst_ip.is_none() && !metadata.host.is_empty() {
-            metadata.dst_ip = inner.resolver().resolve_ip_real(&metadata.host).await;
-        }
+        let selected = inner.resolve_udp_route(&mut metadata).await;
         let Some(dst_ip) = metadata.dst_ip else {
             return Err(format!(
                 "dst_ip not resolved for {}",
@@ -137,42 +132,30 @@ pub(super) mod flow {
         // flow dies and the datagrams drop; a UDP-incapable outbound errors
         // at dial. Either way datagrams are never silently diverted to
         // DIRECT.
-        let Some(meow_tunnel::ResolvedTarget {
-            adapter: proxy,
-            rule_name,
-            rule_payload,
-            route: _route,
-        }) = inner.resolve_proxy(&metadata).await
-        else {
+        let Some(target) = selected else {
             return Err(format!(
                 "no matching rule for {}",
                 metadata.remote_address()
             ));
         };
         info!(
-            "UDP {client} --> {orig_dst} match {rule_name}({rule_payload}) using {}",
-            proxy.name()
+            "UDP {client} --> {orig_dst} match {}({}) using {}",
+            target.rule_name,
+            target.rule_payload,
+            target.adapter.name()
         );
 
-        // Taken before the dial so a flush landing mid-dial still ends the
-        // flow (issue #695): its socket may predate the new outbound binding.
-        let mut flush = inner.udp_flush_watch();
+        // The pre-routing flush watch also covers DNS and dial setup.
+        inner.enrich_process(&mut metadata).await;
         let conn: Arc<dyn meow_common::ProxyPacketConn> = Arc::from(
-            meow_common::outbound_balance::scoped(
-                meow_common::outbound_balance::DialScope::for_target(
-                    &metadata.host,
-                    metadata.dst_ip,
-                ),
-                with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata)),
-            )
-            .await
-            .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?,
+            meow_tunnel::udp::dial_tracked_udp(inner, &metadata, target)
+                .await
+                .map_err(|e| format!("dial_udp: {e}"))?,
         );
-        // `_route` exists to pin the route-table generation across the
-        // dial only — a long-lived flow must not keep its dial-time
-        // generation alive across config reloads (same contract as the
-        // TCP path).
-        drop(_route);
+        if flush.is_flushed() {
+            let _ = conn.close();
+            return Ok(());
+        }
 
         // Dedicated reader task holding one persistent buffer — reads are
         // never cancelled, so a stream-framed conn (e.g. Trojan UoT) cannot
@@ -195,6 +178,8 @@ pub(super) mod flow {
                 }
             }
         });
+        let _relay_guard =
+            meow_tunnel::udp::UdpRelayGuard::new(Arc::clone(&conn), reply_task.abort_handle());
 
         let idle = sleep_until(next_deadline(udp_timeout));
         tokio::pin!(idle);
@@ -1359,7 +1344,7 @@ mod tests {
         let queued = Arc::new(AtomicUsize::new(0));
 
         let task = tokio::spawn(flow::relay_udp_flow(
-            tunnel,
+            tunnel.clone(),
             flow_rx,
             Arc::clone(&queued),
             reply_tx,
@@ -1408,6 +1393,12 @@ mod tests {
         assert_eq!(src, ORIG_DST);
         assert_eq!(dst, CLIENT);
 
+        let info = tunnel.inner().stats.active_connections().pop().unwrap();
+        assert_eq!(info.metadata.network, meow_common::Network::Udp);
+        assert_eq!(info.metadata.conn_type, meow_common::ConnType::TProxy);
+        assert_eq!(info.counters.upload_bytes(), 5);
+        assert_eq!(info.counters.download_bytes(), 5);
+
         // Listener teardown = flow queue closed → flow exits Ok and the
         // outbound session is closed, not leaked.
         drop(flow_tx);
@@ -1417,6 +1408,7 @@ mod tests {
             .expect("flow task panicked")
             .expect("flow returned error");
         assert!(conn.closed.load(Ordering::SeqCst));
+        assert_eq!(tunnel.inner().stats.active_connection_count(), 0);
     }
 
     /// Fake-IP original destination: `pre_handle_metadata` must reverse the

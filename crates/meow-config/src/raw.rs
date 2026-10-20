@@ -138,6 +138,14 @@ pub struct RawGeoDataConfig {
     pub auto_update_interval: Option<u32>,
     /// Download URL overrides. Defaults baked in when absent.
     pub url: Option<RawGeoDataUrls>,
+    /// DIRECT, or an existing node/group; explicit proxy never falls back direct.
+    pub proxy: Option<String>,
+    /// Ordered alternate URLs per resource, after `url.*`.
+    #[serde(default)]
+    pub sources: HashMap<String, Vec<String>>,
+    /// Public GitHub mirror URL templates containing `{url}`.
+    #[serde(default)]
+    pub mirrors: Vec<String>,
     /// Never hold startup on a geo database download: a missing GeoIP / ASN
     /// / geosite DB starts out empty (its rules match nothing), only the
     /// DBs the rules reference are fetched in the background — racing a
@@ -466,6 +474,13 @@ pub struct RawDns {
     pub store_fake_ip: Option<bool>,
     pub default_nameserver: Option<Vec<String>>,
     pub nameserver: Option<Vec<String>>,
+    /// DIRECT lookup view. `["system"]` follows the active physical NIC's
+    /// DNS servers; omitted/empty preserves the main resolver.
+    pub direct_nameserver: Option<Vec<String>>,
+    /// Select the DNS view using domain routing; IP-rule classification
+    /// uses the configured nameserver/policy pipeline without routing the
+    /// domain again, so an explicit DNS proxy also protects pre-resolution.
+    pub follow_domain_rules: Option<bool>,
     pub fallback: Option<Vec<String>>,
     /// Nameservers used exclusively to resolve proxy server hostnames
     /// (mihomo `proxy-server-nameserver`). When set, proxy adapters resolve
@@ -618,10 +633,23 @@ pub struct RawRuleProvider {
     #[serde(rename = "type")]
     pub provider_type: String, // "http" | "file" | "inline"
     pub behavior: String,       // "domain" | "ipcidr" | "classical"
-    pub format: Option<String>, // "yaml" (default) | "text" | "mrs"
+    pub format: Option<String>, // "yaml" (default) | "text" | "mrs" | "srs" | "json"
     pub url: Option<String>,
+    /// Additional explicit HTTP source URLs, tried in order after `url`.
+    /// These receive the configured headers; at most eight are accepted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
+    /// Optional public GitHub mirror URL templates containing `{url}` once.
+    /// Generated mirror requests never carry custom headers or URL credentials.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mirrors: Vec<String>,
     pub path: Option<String>,
     pub interval: Option<u64>,
+    /// Opt-in nonblocking startup for HTTP domain/IP providers. Valid cache
+    /// loads immediately; a missing/invalid cache awaits supervisor download.
+    /// Classical providers keep their context-discovery prefetch behavior.
+    #[serde(default)]
+    pub background_fetch: bool,
     /// mihomo-compatible download policy for http providers (issue #377):
     /// the name of a proxy or group to route this provider's fetches
     /// through, or `DIRECT` to force a direct fetch. Absent = the global

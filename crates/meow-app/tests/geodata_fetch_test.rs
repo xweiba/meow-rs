@@ -12,9 +12,65 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-const MMDB_BYTES: &[u8] = b"FAKE-MMDB-CONTENTS-1";
-const ASN_BYTES: &[u8] = b"FAKE-ASN-CONTENTS-2";
-const GEOSITE_BYTES: &[u8] = b"FAKE-GEOSITE-CONTENTS-3";
+// Downloads now validate loadability before writing. Use minimal valid
+// databases rather than arbitrary marker bytes that production must reject.
+fn mmdb_bytes() -> &'static [u8] {
+    static DATA: std::sync::LazyLock<Vec<u8>> =
+        std::sync::LazyLock::new(|| tiny_resource_mmdb(false));
+    &DATA
+}
+
+fn asn_bytes() -> &'static [u8] {
+    static DATA: std::sync::LazyLock<Vec<u8>> =
+        std::sync::LazyLock::new(|| tiny_resource_mmdb(true));
+    &DATA
+}
+
+fn tiny_resource_mmdb(asn: bool) -> Vec<u8> {
+    fn text(out: &mut Vec<u8>, value: &str) {
+        out.push(0x40 | value.len() as u8);
+        out.extend_from_slice(value.as_bytes());
+    }
+    let mut out = vec![0, 0, 17, 0, 0, 1];
+    out.extend_from_slice(&[0; 16]);
+    out.push(0xe1);
+    if asn {
+        text(&mut out, "autonomous_system_number");
+        out.extend_from_slice(&[0xc2, 0xfc, 0x00]);
+    } else {
+        text(&mut out, "country");
+        out.push(0xe1);
+        text(&mut out, "iso_code");
+        text(&mut out, "XX");
+    }
+    out.extend_from_slice(b"\xab\xcd\xefMaxMind.com");
+    out.push(0xe9);
+    for (key, bytes) in [
+        ("node_count", &[0xc1, 1][..]),
+        ("record_size", &[0xa1, 24]),
+        ("ip_version", &[0xa1, 4]),
+        ("database_type", &[0x44, b'T', b'e', b's', b't']),
+        ("languages", &[0, 4]),
+        ("binary_format_major_version", &[0xa1, 2]),
+        ("binary_format_minor_version", &[0xa0]),
+        ("build_epoch", &[1, 2, 1]),
+        ("description", &[0xe0]),
+    ] {
+        text(&mut out, key);
+        out.extend_from_slice(bytes);
+    }
+    out
+}
+
+fn geosite_bytes() -> &'static [u8] {
+    static DATA: std::sync::LazyLock<Vec<u8>> = std::sync::LazyLock::new(|| {
+        meow_rules::mrs_parser::write_geosite_mrs(&meow_rules::mrs_parser::GeositePayload {
+            categories: vec![("testcat".into(), vec!["hit.example".into()])],
+        })
+        .unwrap()
+    });
+    &DATA
+}
 
 /// Spawn a minimal HTTP/1.1 server that responds to `GET <path>` with
 /// `routes[path]`. Returns the bound socket address.
@@ -91,9 +147,9 @@ fn targets_for(dir: &std::path::Path, base_url: &str) -> [GeoTarget; 3] {
 #[tokio::test]
 async fn downloads_all_missing_targets_and_writes_to_disk() {
     let mut routes = HashMap::new();
-    routes.insert("/country.mmdb", MMDB_BYTES);
-    routes.insert("/asn.mmdb", ASN_BYTES);
-    routes.insert("/geosite.mrs", GEOSITE_BYTES);
+    routes.insert("/country.mmdb", mmdb_bytes());
+    routes.insert("/asn.mmdb", asn_bytes());
+    routes.insert("/geosite.mrs", geosite_bytes());
     let addr = spawn_origin(routes).await;
     let base = format!("http://{addr}");
 
@@ -102,17 +158,17 @@ async fn downloads_all_missing_targets_and_writes_to_disk() {
     let downloaded = fetch_missing(&targets, None).await;
 
     assert_eq!(downloaded.len(), 3, "all three targets must be fetched");
-    assert_eq!(std::fs::read(&targets[0].path).unwrap(), MMDB_BYTES);
-    assert_eq!(std::fs::read(&targets[1].path).unwrap(), ASN_BYTES);
-    assert_eq!(std::fs::read(&targets[2].path).unwrap(), GEOSITE_BYTES);
+    assert_eq!(std::fs::read(&targets[0].path).unwrap(), mmdb_bytes());
+    assert_eq!(std::fs::read(&targets[1].path).unwrap(), asn_bytes());
+    assert_eq!(std::fs::read(&targets[2].path).unwrap(), geosite_bytes());
 }
 
 #[tokio::test]
 async fn skips_targets_already_present() {
     let mut routes = HashMap::new();
-    routes.insert("/country.mmdb", MMDB_BYTES);
-    routes.insert("/asn.mmdb", ASN_BYTES);
-    routes.insert("/geosite.mrs", GEOSITE_BYTES);
+    routes.insert("/country.mmdb", mmdb_bytes());
+    routes.insert("/asn.mmdb", asn_bytes());
+    routes.insert("/geosite.mrs", geosite_bytes());
     let addr = spawn_origin(routes).await;
     let base = format!("http://{addr}");
 
@@ -138,8 +194,8 @@ async fn one_failed_target_does_not_block_the_others() {
     // ASN route returns 404 → expected to be reported as failed but the
     // other two still complete.
     let mut routes = HashMap::new();
-    routes.insert("/country.mmdb", MMDB_BYTES);
-    routes.insert("/geosite.mrs", GEOSITE_BYTES);
+    routes.insert("/country.mmdb", mmdb_bytes());
+    routes.insert("/geosite.mrs", geosite_bytes());
     // intentionally no /asn.mmdb
     let addr = spawn_origin(routes).await;
     let base = format!("http://{addr}");

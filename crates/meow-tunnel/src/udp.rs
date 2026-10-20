@@ -9,6 +9,191 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+/// A routed UDP socket owns its statistics entry. Closing, cancellation and
+/// dropping the socket all unregister it, including in headless mode.
+struct TrackedPacketConn {
+    conn: Box<dyn ProxyPacketConn>,
+    registration: UdpRegistration,
+}
+
+/// Own registration before the dial too, so cancelling setup never leaks it.
+struct UdpRegistration {
+    stats: Arc<crate::Statistics>,
+    counters: Arc<crate::statistics::ConnCounters>,
+    id: Option<uuid::Uuid>,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl UdpRegistration {
+    fn finish(&self) -> bool {
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            match self.id {
+                Some(id) => self.stats.close_connection(id),
+                None => self.stats.close_headless_connection(&self.counters),
+            }
+            return true;
+        }
+        false
+    }
+}
+
+impl Drop for UdpRegistration {
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
+}
+
+impl TrackedPacketConn {
+    fn finish(&self) {
+        if self.registration.finish() {
+            let _ = self.conn.close();
+        }
+    }
+}
+
+impl Drop for TrackedPacketConn {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+#[async_trait::async_trait]
+impl ProxyPacketConn for TrackedPacketConn {
+    async fn read_packet(&self, buf: &mut [u8]) -> meow_common::Result<(usize, SocketAddr)> {
+        tokio::select! {
+            biased;
+            () = self.registration.counters.closed() => {
+                self.finish();
+                Err(meow_common::MeowError::Other("UDP connection closed".into()))
+            }
+            result = self.conn.read_packet(buf) => {
+                if let Ok((n, _)) = &result {
+                    self.registration.stats.record_download(&self.registration.counters, *n as _);
+                } else {
+                    self.finish();
+                }
+                result
+            }
+        }
+    }
+
+    async fn write_packet(&self, buf: &[u8], addr: &SocketAddr) -> meow_common::Result<usize> {
+        tokio::select! {
+            biased;
+            () = self.registration.counters.closed() => {
+                self.finish();
+                Err(meow_common::MeowError::Other("UDP connection closed".into()))
+            }
+            result = self.conn.write_packet(buf, addr) => {
+                if let Ok(n) = &result {
+                    self.registration.stats.record_upload(&self.registration.counters, *n as _);
+                } else {
+                    self.finish();
+                }
+                result
+            }
+        }
+    }
+
+    fn local_addr(&self) -> meow_common::Result<SocketAddr> {
+        self.conn.local_addr()
+    }
+
+    fn close(&self) -> meow_common::Result<()> {
+        self.finish();
+        Ok(())
+    }
+}
+
+/// Select a concrete UDP node once, then register and dial it. The recorded
+/// chain uses that same selection, so round-robin groups cannot report the
+/// next node instead. Relay adapters remain complete paths.
+pub async fn dial_tracked_udp(
+    tunnel: &TunnelInner,
+    metadata: &Metadata,
+    target: ResolvedTarget,
+) -> meow_common::Result<Box<dyn ProxyPacketConn>> {
+    Ok(Box::new(
+        dial_tracked_udp_conn(tunnel, metadata, target).await?,
+    ))
+}
+
+async fn dial_tracked_udp_conn(
+    tunnel: &TunnelInner,
+    metadata: &Metadata,
+    mut target: ResolvedTarget,
+) -> meow_common::Result<TrackedPacketConn> {
+    if target.chains.is_empty() {
+        target
+            .pin_dns_leaf(metadata, true)
+            .map_err(meow_common::MeowError::Io)?;
+    }
+    let ResolvedTarget {
+        adapter,
+        rule_name,
+        rule_payload,
+        route,
+        chains,
+    } = target;
+    if !adapter.support_udp() {
+        return Err(meow_common::MeowError::NotSupported(format!(
+            "UDP unavailable via {} (udp:false); select a node with udp:true or configure an explicit REJECT fallback",
+            adapter.name()
+        )));
+    }
+    let (id, counters) = if let Some(counters) = tunnel.stats.begin_headless_connection() {
+        (None, counters)
+    } else {
+        let (id, counters) = tunnel.stats.track_connection_with_counters(
+            metadata.clone(),
+            rule_name,
+            rule_payload,
+            chains,
+        );
+        (Some(id), counters)
+    };
+    // This guard also owns registration while the dial is pending or fails.
+    let registration = UdpRegistration {
+        stats: Arc::clone(&tunnel.stats),
+        counters,
+        id,
+        closed: std::sync::atomic::AtomicBool::new(false),
+    };
+    let dial = meow_common::outbound_balance::scoped(
+        registration.counters.dial_scope(metadata),
+        with_dial_timeout(adapter.name(), adapter.dial_udp(metadata)),
+    );
+    let conn = tokio::select! {
+        biased;
+        () = registration.counters.closed() => {
+            return Err(meow_common::MeowError::Other("UDP connection closed during dial".into()));
+        }
+        result = dial => result?,
+    };
+    drop(route);
+    Ok(TrackedPacketConn { conn, registration })
+}
+
+/// Own the reply task together with its socket. A cancelled listener future
+/// must abort the detached reader before releasing the tracked connection.
+pub struct UdpRelayGuard {
+    conn: Arc<dyn ProxyPacketConn>,
+    reader: tokio::task::AbortHandle,
+}
+
+impl UdpRelayGuard {
+    pub fn new(conn: Arc<dyn ProxyPacketConn>, reader: tokio::task::AbortHandle) -> Self {
+        Self { conn, reader }
+    }
+}
+
+impl Drop for UdpRelayGuard {
+    fn drop(&mut self) {
+        self.reader.abort();
+        let _ = self.conn.close();
+    }
+}
+
 /// Idle timeout before a UDP NAT session is swept. Matches upstream mihomo-go.
 pub const DEFAULT_UDP_IDLE: Duration = Duration::from_secs(60);
 
@@ -61,6 +246,12 @@ impl UdpSession {
             reason = "identity on 64-bit; u32→u64 widening on mips32"
         )]
         Duration::from_millis(u64::from(now.wrapping_sub(last)))
+    }
+}
+
+impl Drop for UdpSession {
+    fn drop(&mut self) {
+        let _ = self.conn.close();
     }
 }
 
@@ -120,7 +311,14 @@ fn sweep_idle_sessions(table: &NatTable, idle: Duration) -> usize {
     if before == 0 {
         return 0;
     }
-    table.retain(|_key, session| session.idle_for() < idle);
+    table.retain(|_key, session| {
+        if session.idle_for() < idle {
+            return true;
+        }
+        // A reply reader can still hold an Arc after table eviction.
+        let _ = session.conn.close();
+        false
+    });
     // A concurrent `handle_udp` insert can land between the `before`
     // snapshot and the post-retain `len()`, so saturating-sub is load
     // bearing — plain subtraction would panic in dev builds and kill the
@@ -179,18 +377,8 @@ pub async fn handle_udp(
         return;
     }
 
-    // Pre-resolve metadata (host -> real IP if rules need it). UDP keeps
-    // the eager pre_resolve + resolve_proxy pair (no lazy enrichment): the
-    // NAT session key below requires a resolved dst_ip regardless of what
-    // the rules demand.
-    tunnel.pre_resolve(&mut metadata).await;
-
-    // Rule-demand gating is only an optimization. UDP still requires a real
-    // address for its NAT key and outbound packet API, including after a
-    // fake-IP was rewritten back to a hostname under domain-only rules.
-    if metadata.dst_ip.is_none() && !metadata.host.is_empty() {
-        metadata.dst_ip = tunnel.resolver().resolve_ip_real(&metadata.host).await;
-    }
+    let flush = tunnel.udp_flush_watch();
+    let selected = tunnel.resolve_udp_route(&mut metadata).await;
 
     // Build destination SocketAddr for the NAT key.
     // pre_resolve() populates dst_ip for any hostname; if it is still None
@@ -245,15 +433,11 @@ pub async fn handle_udp(
     tunnel.enrich_process(&mut metadata).await;
 
     // Slow path: all client UDP, including port 53, follows routing policy.
-    // `_route` pins this generation's dialer registry across the dial
-    // (issue #533 review).
-    let Some(ResolvedTarget {
-        adapter: proxy,
-        rule_name,
-        rule_payload,
-        route: _route,
-    }) = tunnel.resolve_proxy(&metadata).await
-    else {
+    // The tracked dial retains this route's registry until setup finishes.
+    let Some(target) = (match selected {
+        Some(target) => Some(target),
+        None => tunnel.resolve_proxy(&metadata).await,
+    }) else {
         warn!("no matching rule for UDP {}", metadata.remote_address());
         return;
     };
@@ -262,23 +446,17 @@ pub async fn handle_udp(
         "UDP {} --> {} match {}({}) using {}",
         src,
         dst_addr,
-        rule_name,
-        rule_payload,
-        proxy.name()
+        target.rule_name,
+        target.rule_payload,
+        target.adapter.name()
     );
 
-    // Taken before the dial: a session dialled across a flush may sit on a
-    // socket that predates the new outbound binding (issue #695).
-    let flush = tunnel.udp_flush_watch();
+    // The pre-routing watch rejects a socket established across a flush.
     // Bounded like mihomo's `C.DefaultUDPTimeout`. An unbounded dial here is
     // worse than on TCP: the key is still unclaimed (see below), so every
     // datagram of the flow starts its own stalled dial.
-    match meow_common::outbound_balance::scoped(
-        meow_common::outbound_balance::DialScope::for_target(&metadata.host, metadata.dst_ip),
-        with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata)),
-    )
-    .await
-    {
+    let proxy_name = Arc::from(target.adapter.name());
+    match dial_tracked_udp_conn(tunnel, &metadata, target).await {
         Ok(conn) if flush.is_flushed() => {
             debug!(
                 "UDP {} -> {}: sessions flushed during the dial; dropping datagram",
@@ -287,7 +465,8 @@ pub async fn handle_udp(
             let _ = conn.close();
         }
         Ok(conn) => {
-            let session = Arc::new(UdpSession::new(conn, Arc::from(proxy.name())));
+            let counters = Arc::clone(&conn.registration.counters);
+            let session = Arc::new(UdpSession::new(Box::new(conn), proxy_name));
             // Claim the key atomically before the first write. The dial above
             // is a long await with the key unclaimed, so two concurrent
             // handle_udp calls for the same brand-new (src, dst) can both
@@ -305,6 +484,22 @@ pub async fn handle_udp(
                     .or_insert_with(|| Arc::clone(&session))
                     .value(),
             );
+            if Arc::ptr_eq(&winner, &session) {
+                // A shared NAT session may have no reply reader. DELETE must
+                // still close its socket and evict it immediately. Weak refs
+                // let normal idle/drop cleanup wake and retire this watcher.
+                let table = Arc::downgrade(&tunnel.nat_table);
+                let weak_session = Arc::downgrade(&session);
+                tokio::spawn(async move {
+                    counters.closed().await;
+                    if let Some(session) = weak_session.upgrade() {
+                        let _ = session.conn.close();
+                        if let Some(table) = table.upgrade() {
+                            table.remove_if(&key, |_, s| Arc::ptr_eq(s, &session));
+                        }
+                    }
+                });
+            }
             if !Arc::ptr_eq(&winner, &session) {
                 // Lost the claim: a concurrent call installed its session
                 // first. Close the redundant conn and carry this datagram on
@@ -370,6 +565,299 @@ mod tests {
             dst_port: dst.port(),
             ..Default::default()
         }
+    }
+
+    async fn configured_tunnel(yaml: &str) -> Tunnel {
+        let config = meow_config::build_config(meow_config::parse_raw_yaml(yaml).unwrap(), None)
+            .await
+            .unwrap();
+        let tunnel = Tunnel::new_with_slot(Arc::clone(&config.dns.resolver_slot));
+        tunnel.update_routing(config.proxies, config.rules, config.dialer_registry);
+        tunnel
+    }
+
+    #[tokio::test]
+    async fn real_udp_counters_metadata_delete_and_idle_cleanup() {
+        let tunnel = mk_tunnel();
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let dst = server.local_addr().unwrap();
+        let src = "127.0.0.1:43210".parse().unwrap();
+        handle_udp(tunnel.inner(), b"hello", src, mk_metadata(src, dst)).await;
+        let session = Arc::clone(tunnel.inner().nat_table.get(&(src, dst)).unwrap().value());
+        let mut buf = [0; 32];
+        let (n, peer) = tokio::time::timeout(Duration::from_secs(2), server.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf[..n], b"hello");
+        server.send_to(b"world!", peer).await.unwrap();
+        let (n, _) =
+            tokio::time::timeout(Duration::from_secs(2), session.conn.read_packet(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&buf[..n], b"world!");
+        let entries = tunnel.inner().stats.active_connections();
+        assert_eq!(entries.len(), 1);
+        let info = &entries[0];
+        assert_eq!(info.metadata.network, Network::Udp);
+        assert_eq!(info.metadata.src_port, src.port());
+        assert_eq!(info.metadata.dst_port, dst.port());
+        assert_eq!(&*info.chains[0], "DIRECT");
+        assert_eq!(info.counters.upload_bytes(), 5);
+        assert_eq!(info.counters.download_bytes(), 6);
+        let json = serde_json::to_value(info).unwrap();
+        assert_eq!(json["metadata"]["network"], "udp");
+        assert_eq!(json["upload"], 5);
+        assert_eq!(json["download"], 6);
+        assert_eq!(json["chains"], serde_json::json!(["DIRECT"]));
+        assert!(json["rule"].is_string() && json["rulePayload"].is_string());
+        assert_eq!(tunnel.inner().stats.snapshot(), (5, 6));
+        tunnel.inner().stats.close_connection(info.id);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !tunnel.inner().nat_table.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(session.conn.write_packet(b"closed", &dst).await.is_err());
+        assert_eq!(tunnel.inner().stats.active_connection_count(), 0);
+
+        handle_udp(tunnel.inner(), b"new", src, mk_metadata(src, dst)).await;
+        assert_eq!(tunnel.inner().stats.active_connection_count(), 1);
+        // Even a reader holding an Arc must not keep an evicted entry alive.
+        let held = Arc::clone(tunnel.inner().nat_table.get(&(src, dst)).unwrap().value());
+        assert_eq!(
+            sweep_idle_sessions(&tunnel.inner().nat_table, Duration::ZERO),
+            1
+        );
+        assert_eq!(tunnel.inner().stats.active_connection_count(), 0);
+        assert!(held.conn.write_packet(b"closed", &dst).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn udp_rule_fallthrough_remains_compatible_and_reject_fallback_wins() {
+        for fallback in [false, true] {
+            let rule = if fallback {
+                "  - AND,((NETWORK,UDP),(DST-PORT,3478)),REJECT\n"
+            } else {
+                ""
+            };
+            let tunnel = configured_tunnel(&format!(
+                r#"
+proxies:
+  - {{name: tcp-only, type: http, server: 127.0.0.1, port: 1}}
+proxy-groups:
+  - {{name: policy:ai, type: select, proxies: [tcp-only]}}
+rules:
+  - AND,((NETWORK,UDP),(DST-PORT,3478)),policy:ai
+{rule}  - MATCH,DIRECT
+"#
+            ))
+            .await;
+            let mut metadata = mk_metadata(
+                "127.0.0.1:43211".parse().unwrap(),
+                "127.0.0.1:3478".parse().unwrap(),
+            );
+            let selected = tunnel
+                .inner()
+                .resolve_udp_route(&mut metadata)
+                .await
+                .unwrap();
+            assert_eq!(
+                selected.adapter.name(),
+                if fallback { "REJECT" } else { "DIRECT" }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn global_tcp_only_udp_diagnostic_is_actionable_and_does_not_leak() {
+        let tunnel = configured_tunnel(
+            r#"
+proxies:
+  - {name: tcp-only, type: http, server: 127.0.0.1, port: 1}
+proxy-groups:
+  - {name: GLOBAL, type: select, proxies: [tcp-only]}
+"#,
+        )
+        .await;
+        tunnel.set_mode(TunnelMode::Global);
+        let mut metadata = mk_metadata(
+            "127.0.0.1:43212".parse().unwrap(),
+            "127.0.0.1:3478".parse().unwrap(),
+        );
+        let target = tunnel
+            .inner()
+            .resolve_udp_route(&mut metadata)
+            .await
+            .unwrap();
+        let error = match dial_tracked_udp(tunnel.inner(), &metadata, target).await {
+            Ok(_) => panic!("TCP-only node must not carry UDP"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("tcp-only") && error.contains("udp:false") && error.contains("udp:true")
+        );
+        assert_eq!(tunnel.inner().stats.active_connection_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn headless_udp_can_be_closed_without_api_entries() {
+        let tunnel = mk_tunnel();
+        tunnel.inner().stats.set_headless();
+        let src = "127.0.0.1:43215".parse().unwrap();
+        let dst = "127.0.0.1:3478".parse().unwrap();
+        handle_udp(tunnel.inner(), b"hello", src, mk_metadata(src, dst)).await;
+        assert_eq!(tunnel.inner().stats.active_connection_count(), 0);
+        assert_eq!(tunnel.inner().nat_table.len(), 1);
+        assert_eq!(tunnel.inner().stats.close_all_connections_counted(), 1);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !tunnel.inner().nat_table.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(tunnel.inner().stats.close_all_connections_counted(), 0);
+    }
+
+    #[tokio::test]
+    async fn udp_history_capacity_and_zero_never_close_active_connections() {
+        let tunnel = mk_tunnel();
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let dst = server.local_addr().unwrap();
+        let mut metadata = mk_metadata("127.0.0.1:43217".parse().unwrap(), dst);
+        let target = tunnel
+            .inner()
+            .resolve_udp_route(&mut metadata)
+            .await
+            .unwrap();
+        let active = dial_tracked_udp(tunnel.inner(), &metadata, target)
+            .await
+            .unwrap();
+        let history = tunnel.inner().stats.history();
+        history.set_limit(2);
+        for _ in 0..5 {
+            let target = tunnel
+                .inner()
+                .resolve_udp_route(&mut metadata)
+                .await
+                .unwrap();
+            let conn = dial_tracked_udp(tunnel.inner(), &metadata, target)
+                .await
+                .unwrap();
+            conn.write_packet(b"x", &dst).await.unwrap();
+            drop(conn);
+            assert!(history.len() <= 2);
+            assert_eq!(tunnel.inner().stats.active_connection_count(), 1);
+        }
+        let kept = history.delta(0);
+        assert_eq!(kept.kept, vec![5, 6]);
+        assert!(kept
+            .changed
+            .iter()
+            .all(|row| row.metadata.network == Network::Udp && row.upload == 1));
+        history.set_limit(1);
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            active.write_packet(b"still active", &dst).await.unwrap(),
+            12
+        );
+        history.set_limit(0);
+        assert!(history.is_empty());
+        assert_eq!(tunnel.inner().stats.active_connection_count(), 1);
+        assert_eq!(
+            active.write_packet(b"still active", &dst).await.unwrap(),
+            12
+        );
+        drop(active);
+        assert_eq!(tunnel.inner().stats.active_connection_count(), 0);
+        assert!(
+            history.is_empty(),
+            "zero disables ended records, not active tracking"
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_delete_or_abort_during_dial_releases_registration() {
+        for abort in [false, true] {
+            let tunnel = mk_tunnel();
+            tunnel.set_mode(TunnelMode::Global);
+            let mut proxies: HashMap<SmolStr, Arc<dyn Proxy>> = HashMap::new();
+            proxies.insert(
+                "GLOBAL".into(),
+                Arc::new(StalledDialProxy {
+                    health: ProxyHealth::new(),
+                }),
+            );
+            tunnel.update_proxies(proxies, Default::default());
+            let task = tokio::spawn({
+                let tunnel = tunnel.clone();
+                async move {
+                    let src = "127.0.0.1:43216".parse().unwrap();
+                    let dst = "127.0.0.1:3478".parse().unwrap();
+                    handle_udp(tunnel.inner(), b"hello", src, mk_metadata(src, dst)).await;
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while tunnel.inner().stats.active_connection_count() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            if abort {
+                task.abort();
+            } else {
+                let info = tunnel.inner().stats.active_connections().pop().unwrap();
+                tunnel.inner().stats.close_connection(info.id);
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap();
+            assert_eq!(tunnel.inner().stats.active_connection_count(), 0);
+            assert!(tunnel.inner().nat_table.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn round_robin_chain_names_the_actual_udp_socket() {
+        let tunnel = configured_tunnel(
+            r#"
+proxies:
+  - {name: first, type: direct}
+  - {name: second, type: direct}
+proxy-groups:
+  - {name: balance, type: load-balance, strategy: round-robin, proxies: [first, second]}
+  - {name: policy, type: select, proxies: [balance]}
+rules: ["MATCH,policy"]
+"#,
+        )
+        .await;
+        let mut metadata = mk_metadata(
+            "127.0.0.1:43213".parse().unwrap(),
+            "127.0.0.1:3478".parse().unwrap(),
+        );
+        let mut names = Vec::new();
+        for _ in 0..2 {
+            let target = tunnel
+                .inner()
+                .resolve_udp_route(&mut metadata)
+                .await
+                .unwrap();
+            let conn = dial_tracked_udp(tunnel.inner(), &metadata, target)
+                .await
+                .unwrap();
+            let info = tunnel.inner().stats.active_connections().pop().unwrap();
+            assert_eq!(&*info.chains[1], "balance");
+            assert_eq!(&*info.chains[2], "policy");
+            names.push(Arc::clone(&info.chains[0]));
+            drop(conn);
+            assert_eq!(tunnel.inner().stats.active_connection_count(), 0);
+        }
+        assert_ne!(names[0], names[1]);
     }
 
     #[tokio::test]

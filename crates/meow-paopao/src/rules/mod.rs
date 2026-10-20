@@ -26,7 +26,9 @@ use crate::plan::custom_groups::exclude_match;
 /// Distribution private-range rules. Runtime emission reads the selected
 /// profile directly; this helper preserves the public defaults API.
 pub fn private_cidr_rules() -> Vec<String> {
-    crate::rule_profile::RuleProfile::shipped().private_rules.clone()
+    crate::rule_profile::RuleProfile::shipped()
+        .private_rules
+        .clone()
 }
 
 /// Distribution local-name rule-set label, for legacy helper callers.
@@ -102,7 +104,8 @@ pub fn geo_rule(rule_set: &str, target: &str) -> String {
 /// `buildClashConfig`).
 pub fn rule_target(rule: &str) -> &str {
     rule.rsplit(',')
-        .find(|x| *x != "no-resolve" && *x != "src")
+        .map(str::trim)
+        .find(|x| !x.eq_ignore_ascii_case("no-resolve") && !x.eq_ignore_ascii_case("src"))
         .unwrap_or_default()
 }
 
@@ -155,15 +158,17 @@ pub fn without_sites(rule: &str, sites: &[String]) -> String {
             return format!("{},{skip}){}", &rule[..cut], &rule[cut + 1..]);
         }
     }
-    let parts: Vec<&str> = rule.split(',').collect();
-    let resolve = parts.last() == Some(&"no-resolve");
-    let n = parts.len().saturating_sub(if resolve { 2 } else { 1 });
-    let target = parts.get(n).copied().unwrap_or_default();
-    let mut cond = parts[..n].join(",");
-    if resolve {
-        cond.push_str(",no-resolve");
+    let Some(parsed) = crate::plan::sub_rules::parse_rule(rule) else {
+        return rule.to_owned();
+    };
+    let mut condition = format!("{},{}", parsed.kind, parsed.value);
+    // Flags belong to the inner predicate when wrapping a rule with
+    // exclusions, including source-IP matching and the original flag case.
+    for option in parsed.options {
+        condition.push(',');
+        condition.push_str(&option);
     }
-    format!("AND,(({cond}),{skip}),{target}")
+    format!("AND,(({condition}),{skip}),{}", parsed.target)
 }
 
 #[cfg(test)]

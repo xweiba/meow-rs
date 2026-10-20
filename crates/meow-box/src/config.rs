@@ -121,6 +121,9 @@ pub fn core_config(
 ) -> anyhow::Result<CoreConfig> {
     let input = build_input(settings, subscriptions, rt, now_ms, utc_offset_min);
     let out = meow_paopao::build(&meow_paopao::BuildInput::from_json(&input));
+    if let Some(error) = out.config_error.as_ref() {
+        anyhow::bail!("invalid rule configuration: {error}");
+    }
     let mut c: Map<String, Value> = out.config;
     // Nothing on the host's ports: devices come in through the TUN. The
     // SOCKS port is the DNS front's way through a line (127.0.0.1 only:

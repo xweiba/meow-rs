@@ -1,9 +1,16 @@
 //! Handing freed memory back to the system (PaoPao).
 
 /// Returns freed heap pages to the system where the allocator keeps them
-/// otherwise (Apple platforms: `malloc_zone_pressure_relief`). Cheap; call
-/// after building large temporary structures. No-op elsewhere.
+/// otherwise (glibc: `malloc_trim`; Apple: zone pressure relief). Call after
+/// dropping large temporary structures, never on a per-connection hot path.
+/// Other allocators/platforms retain their normal behavior.
 pub fn release_free_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: this only releases allocator-owned free pages, including
+    // idle worker arenas; it cannot invalidate live indexes or buffers.
+    unsafe {
+        libc::malloc_trim(0);
+    }
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         unsafe extern "C" {

@@ -80,8 +80,9 @@ pub struct RuntimeOptions {
     pub unified_delay: bool,
     /// Ended connections the core keeps; None = its default.
     pub connection_history: Option<i64>,
-    /// Seconds between the smart groups' re-probes of their lines
-    /// (`interval`); None = the core's default.
+    /// Seconds between automatic groups' probes (`interval`). A positive
+    /// override wins over imported intervals; None preserves imported
+    /// intervals or the existing generated/native defaults.
     pub probe_interval: Option<i64>,
     /// The app itself as an app matcher (`path:<dir>` / `name:<file>`):
     /// its connections through the TUN go direct. None (phones, an older

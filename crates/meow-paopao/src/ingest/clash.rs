@@ -56,6 +56,7 @@ pub(crate) fn parse_clash(text: &str) -> ParseResult {
                 name: g.get("name").dart_string(),
                 kind: g.get("type").or(&Dv::Str("select".into())).dart_string(),
                 members,
+                interval: g.get("interval").to_json().as_u64(),
             });
         }
     }
@@ -64,7 +65,16 @@ pub(crate) fn parse_clash(text: &str) -> ParseResult {
         _ => Vec::new(),
     };
     let mut out = ParseResult {
-        split: SubRules { groups, rules },
+        split: SubRules {
+            groups,
+            rules,
+            providers: doc
+                .get("rule-providers")
+                .to_json()
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+        },
         ..ParseResult::default()
     };
     for p in proxies {

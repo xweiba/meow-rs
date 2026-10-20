@@ -118,6 +118,9 @@ pub(crate) struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// One-time desktop network and DNS cache authorization.
+    #[cfg(target_os = "linux")]
+    NetworkPermissions { action: String },
     /// Native DNS interception owner; its stdin lifetime follows the core.
     #[cfg(all(target_os = "linux", feature = "listener-tun"))]
     #[command(hide = true)]
@@ -624,6 +627,8 @@ fn run_application_inner(
         .build()?;
 
     runtime.block_on(async move {
+        #[cfg(all(feature = "listener-tun", not(any(target_os = "android", target_os = "ios"))))]
+        let _system_dns = meow_listener::tun::SystemDnsMonitor::start()?;
         let early_binding: EarlyOutboundBinding;
         // --config-string replaces the config file as the source (mihomo
         // behavior); the flag overrides below apply on top of either source.
@@ -856,6 +861,8 @@ fn tun_feature_gate(enable: bool) -> Option<&'static str> {
 
 fn handle_service_command(cmd: &Command, args: &Args) -> Result<()> {
     match cmd {
+        #[cfg(target_os = "linux")]
+        Command::NetworkPermissions { action } => meow_app::linux_permissions::run(action),
         #[cfg(all(target_os = "linux", feature = "listener-tun"))]
         Command::DnsCaptureWatch { port } => {
             meow_listener::tun::dns_capture::watch(*port)?;
@@ -1530,7 +1537,7 @@ async fn run(
     }
 
     // Spawn geodata auto-update task if enabled.
-    if config.geodata.auto_update {
+    {
         let geodata = config.geodata.clone();
         let tunnel = tunnel.clone();
         let raw_config = Arc::clone(&raw_config);

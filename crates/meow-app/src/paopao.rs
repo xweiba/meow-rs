@@ -72,6 +72,8 @@ pub enum Op {
     Module,
     /// `{dir, ids, modules?, set?, config?, now, build?, keep?, picks?}` on stdin → refreshes merged, the config rebuilt
     Apply,
+    /// Bounded read/atomic write of a routing profile, as its file owner.
+    Profile,
 }
 
 /// Runs `op` over stdin and writes the answer; the process's exit code.
@@ -100,7 +102,58 @@ pub fn answer(op: &Op, input: &str) -> (Value, i32) {
         Op::Refresh => refresh(input),
         Op::Module => module(input),
         Op::Apply => apply(input),
+        Op::Profile => profile(input),
     }
+}
+
+/// Runs in a short-lived child with the profile owner's uid/gid. No
+/// privileged filesystem access is needed to read/save user configuration.
+fn profile(input: &str) -> (Value, i32) {
+    use base64::Engine;
+    let request: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return invalid("invalid profile request"),
+    };
+    let Some(path) = request.get("path").and_then(Value::as_str) else {
+        return invalid("profile path is required");
+    };
+    let path = std::path::Path::new(path);
+    let bytes = if let Some(raw) = request.get("raw").and_then(Value::as_str) {
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(raw) {
+            Ok(bytes) if bytes.len() <= 512 * 1024 => bytes,
+            _ => return invalid("invalid profile bytes or size"),
+        };
+        if !serde_json::from_slice::<Value>(&bytes).is_ok_and(|v| v.is_object()) {
+            return invalid("profile must be a JSON object");
+        }
+        if write_atomic(path, &bytes, true).is_err() {
+            return invalid("cannot save profile file");
+        }
+        bytes
+    } else {
+        let Ok(file) = std::fs::File::open(path) else {
+            return invalid("cannot open profile file");
+        };
+        if !file
+            .metadata()
+            .is_ok_and(|m| m.is_file() && m.len() <= 512 * 1024)
+        {
+            return invalid("profile must be a regular file of at most 512 KiB");
+        }
+        let mut bytes = Vec::new();
+        if file.take(512 * 1024 + 1).read_to_end(&mut bytes).is_err() || bytes.len() > 512 * 1024 {
+            return invalid("cannot read bounded profile file");
+        }
+        bytes
+    };
+    let document: Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(_) => return invalid("invalid profile JSON"),
+    };
+    (
+        json!({"document":document,"raw":base64::engine::general_purpose::STANDARD.encode(bytes)}),
+        EXIT_OK,
+    )
 }
 
 /// `{"error": ...}` is about the input.
@@ -378,6 +431,9 @@ fn apply(input: &str) -> (Value, i32) {
     }
     let built = meow_paopao::build(&meow_paopao::BuildInput::from_json(&input));
     drop(input);
+    if let Some(error) = built.config_error.as_ref() {
+        return invalid(error.clone());
+    }
     let policies: Vec<Value> = built
         .route_policies
         .iter()

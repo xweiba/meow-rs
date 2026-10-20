@@ -451,16 +451,38 @@
       "geodata": {
         "background-fetch": true,
         "auto-update": true,
+        "auto-update-interval": 24,
+        "proxy": "proxy",
+        "mirrors": [],
+        "sources": {
+          "mmdb": [
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb",
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/country.mmdb"
+          ],
+          "asn": [
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb",
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/GeoLite2-ASN.mmdb"
+          ],
+          "geosite": [
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat",
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geosite.dat"
+          ]
+        },
         "url": {
           "mmdb": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb",
+          "asn": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb",
           "geosite": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
         }
       },
       "dns": {
         "enable": true,
+        "direct-nameserver": [
+          "system"
+        ],
+        "follow-domain-rules": true,
         "nameserver": [
-          "https://1.1.1.1/dns-query#policy:ai",
-          "https://8.8.8.8/dns-query#policy:ai"
+          "tcp://1.1.1.1:53#policy:ai",
+          "tcp://8.8.8.8:53#policy:ai"
         ],
         "default-nameserver": [
           "https://1.1.1.1/dns-query"
@@ -478,6 +500,7 @@
           "*.localdomain",
           "*.home.arpa",
           "localhost",
+          "ping.archlinux.org",
           "+.pool.ntp.org",
           "+.ntp.org",
           "time.cloudflare.com",
@@ -1648,6 +1671,106 @@
           ]
         }
       ],
+      "rule-providers": {
+        "geosite-openai": {
+          "type": "http",
+          "background-fetch": true,
+          "behavior": "domain",
+          "format": "mrs",
+          "interval": 86400,
+          "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/openai.mrs",
+          "proxy": "proxy",
+          "sources": [
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/openai.mrs",
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/openai.mrs"
+          ],
+          "path": "rule-providers/paopao-a592ce3b6a9f4e02.mrs"
+        },
+        "geosite-anthropic": {
+          "type": "http",
+          "background-fetch": true,
+          "behavior": "domain",
+          "format": "mrs",
+          "interval": 86400,
+          "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/anthropic.mrs",
+          "proxy": "proxy",
+          "sources": [
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/anthropic.mrs",
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/anthropic.mrs"
+          ],
+          "path": "rule-providers/paopao-16934faf91198e08.mrs"
+        },
+        "geosite-ai": {
+          "type": "http",
+          "background-fetch": true,
+          "behavior": "domain",
+          "format": "yaml",
+          "interval": 86400,
+          "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ai-!cn.yaml",
+          "proxy": "proxy",
+          "sources": [
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/category-ai-!cn.yaml",
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/category-ai-!cn.yaml"
+          ],
+          "path": "rule-providers/paopao-091639a242ca3c82.yaml"
+        },
+        "geosite-perplexity": {
+          "type": "http",
+          "background-fetch": true,
+          "behavior": "domain",
+          "format": "mrs",
+          "interval": 86400,
+          "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/perplexity.mrs",
+          "proxy": "proxy",
+          "sources": [
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/perplexity.mrs",
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/perplexity.mrs"
+          ],
+          "path": "rule-providers/paopao-6f065012d4c8502a.mrs"
+        },
+        "geosite-xai": {
+          "type": "http",
+          "background-fetch": true,
+          "behavior": "domain",
+          "format": "mrs",
+          "interval": 86400,
+          "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/xai.mrs",
+          "proxy": "proxy",
+          "sources": [
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/xai.mrs",
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/xai.mrs"
+          ],
+          "path": "rule-providers/paopao-018290b7ede01532.mrs"
+        },
+        "geosite-private": {
+          "type": "http",
+          "background-fetch": true,
+          "behavior": "domain",
+          "format": "text",
+          "interval": 86400,
+          "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/private.list",
+          "proxy": "proxy",
+          "sources": [
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/private.list",
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/private.list"
+          ],
+          "path": "rule-providers/paopao-582107823a653a5f.text"
+        },
+        "geosite-cn": {
+          "type": "http",
+          "background-fetch": true,
+          "behavior": "domain",
+          "format": "mrs",
+          "interval": 86400,
+          "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.mrs",
+          "proxy": "proxy",
+          "sources": [
+            "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/cn.mrs",
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/cn.mrs"
+          ],
+          "path": "rule-providers/paopao-091d14a242d01c51.mrs"
+        }
+      },
       "rules": [
         "IN-NAME,speedtest-in,speedtest",
         "IN-USER,auto,auto",
@@ -1717,17 +1840,54 @@
         "AND,((DST-PORT,443),(IP-CIDR6,2620:fe::9/128,no-resolve)),policy:ai",
         "DST-PORT,853,policy:ai",
         "AND,((NETWORK,UDP),(DST-PORT,3478/5349/19302-19309)),policy:ai",
+        "AND,((NETWORK,UDP),(DST-PORT,3478/5349/19302-19309)),REJECT",
         "GEOSITE,category-ads-all,policy:ads",
         "GEOSITE,category-httpdns-cn,policy:ads",
         "AND,((NETWORK,UDP),(DST-PORT,443),(GEOSITE,youtube)),REJECT",
         "GEOSITE,youtube,policy:youtube",
         "GEOSITE,google-gemini,policy:google",
         "GEOSITE,google,policy:google",
-        "GEOSITE,openai,policy:ai",
-        "GEOSITE,anthropic,policy:ai",
-        "GEOSITE,category-ai-!cn,policy:ai",
-        "GEOSITE,perplexity,policy:ai",
-        "GEOSITE,xai,policy:ai",
+        "RULE-SET,geosite-openai,policy:ai",
+        "RULE-SET,geosite-anthropic,policy:ai",
+        "RULE-SET,geosite-ai,policy:ai",
+        "RULE-SET,geosite-perplexity,policy:ai",
+        "RULE-SET,geosite-xai,policy:ai",
+        "DOMAIN-SUFFIX,anthropic.com,policy:ai",
+        "DOMAIN-SUFFIX,claude.ai,policy:ai",
+        "DOMAIN-SUFFIX,claude.com,policy:ai",
+        "DOMAIN-SUFFIX,clau.de,policy:ai",
+        "DOMAIN-SUFFIX,claudemcpclient.com,policy:ai",
+        "DOMAIN-SUFFIX,claudemcpcontent.com,policy:ai",
+        "DOMAIN-SUFFIX,claudeusercontent.com,policy:ai",
+        "DOMAIN,servd-anthropic-website.b-cdn.net,policy:ai",
+        "DOMAIN,anthropic.com.cdn.cloudflare.net,policy:ai",
+        "DOMAIN,anthropic.auth0.com,policy:ai",
+        "DOMAIN,anthropic-com.ghost.io,policy:ai",
+        "DOMAIN,browser-intake-us5-datadoghq.com,policy:ai",
+        "DOMAIN,browser-intake-datadoghq.com,policy:ai",
+        "DOMAIN-KEYWORD,datadog,policy:ai",
+        "DOMAIN-KEYWORD,sift,policy:ai",
+        "DOMAIN,cdn.usefathom.com,policy:ai",
+        "DOMAIN-SUFFIX,openai.com,policy:ai",
+        "DOMAIN-SUFFIX,chatgpt.com,policy:ai",
+        "DOMAIN-SUFFIX,chat.com,policy:ai",
+        "DOMAIN-SUFFIX,sora.com,policy:ai",
+        "DOMAIN-SUFFIX,oaistatic.com,policy:ai",
+        "DOMAIN-SUFFIX,oaiusercontent.com,policy:ai",
+        "DOMAIN-SUFFIX,crixet.com,policy:ai",
+        "DOMAIN,openai.com.cdn.cloudflare.net,policy:ai",
+        "DOMAIN,openaicom.imgix.net,policy:ai",
+        "DOMAIN,openaiapi-site.azureedge.net,policy:ai",
+        "DOMAIN,production-openaicom-storage.azureedge.net,policy:ai",
+        "DOMAIN,openaicomproductionae4b.blob.core.windows.net,policy:ai",
+        "DOMAIN,openaicom-api-bdcpf8c6d2e9atf6.z01.azurefd.net,policy:ai",
+        "DOMAIN-SUFFIX,webpubsub.azure.com,policy:ai",
+        "DOMAIN-SUFFIX,chatgpt.livekit.cloud,policy:ai",
+        "DOMAIN-SUFFIX,host.livekit.cloud,policy:ai",
+        "DOMAIN-SUFFIX,turn.livekit.cloud,policy:ai",
+        "IP-CIDR,160.79.104.0/21,policy:ai,no-resolve",
+        "IP-CIDR6,2607:6bc0::/32,policy:ai,no-resolve",
+        "IP-ASN,399358,policy:ai,no-resolve",
         "DOMAIN-SUFFIX,challenges.cloudflare.com,policy:ai",
         "DOMAIN-SUFFIX,arkoselabs.com,policy:ai",
         "DOMAIN-SUFFIX,statsig.com,policy:ai",
@@ -1814,10 +1974,10 @@
         "GEOSITE,onedrive,policy:microsoft",
         "GEOSITE,bing,policy:microsoft",
         "GEOSITE,apple,policy:apple",
-        "GEOSITE,private,DIRECT",
+        "RULE-SET,geosite-private,DIRECT",
         "GEOSITE,geolocation-!cn,policy:foreign",
         "GEOSITE,category-games@cn,policy:china",
-        "GEOSITE,cn,policy:china",
+        "RULE-SET,geosite-cn,policy:china",
         "GEOIP,cn,policy:china",
         "PROCESS-NAME,WeChat,policy:china",
         "PROCESS-NAME,WeChatAppEx Helper,policy:china",

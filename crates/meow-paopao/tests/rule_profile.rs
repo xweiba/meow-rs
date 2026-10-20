@@ -21,7 +21,7 @@ fn file_edits_replace_defaults_and_invalid_files_refuse_application() {
     let mut profile = seeded["rulesProfile"].clone();
     assert!(profile.is_object());
     profile["defaultDnsPolicy"] = "policy:google".into();
-    profile["dns"]["nameserver"] = json!(["https://192.0.2.53/dns-query#{dnsPolicy}"]);
+    profile["dns"]["nameserver"] = json!(["tcp://192.0.2.53:53#{dnsPolicy}"]);
     profile["privateRules"] = json!(["IP-CIDR,192.0.2.0/24,REJECT,no-resolve"]);
     profile["encryptedDnsRules"] = json!(["DOMAIN-SUFFIX,resolver.example,{dnsPolicy}"]);
     profile["stunRules"] = json!(["AND,((NETWORK,UDP),(DST-PORT,45678)),{dnsPolicy}"]);
@@ -52,7 +52,7 @@ fn file_edits_replace_defaults_and_invalid_files_refuse_application() {
     assert!(!rules.contains(&json!("IP-CIDR,10.0.0.0/8,DIRECT,no-resolve")));
     assert_eq!(
         out["config"]["dns"]["nameserver"],
-        json!(["https://192.0.2.53/dns-query#policy:google"])
+        json!(["tcp://192.0.2.53:53#policy:google"])
     );
     assert_eq!(
         out["config"]["dns"]["fake-ip-filter"],
@@ -96,5 +96,32 @@ fn unknown_fields_versions_and_stages_are_not_silently_ignored() {
         let out = build_json(&json!({"runtime":{"rulesProfile":profile}}).to_string());
         assert!(out["config"].is_null());
         assert!(out["configError"].is_string());
+    }
+}
+
+#[test]
+fn unsupported_encrypted_proxy_upstreams_cannot_replace_a_working_resolver() {
+    let mut profile: Value =
+        serde_json::from_str(include_str!("../defaults/routing-rules.json")).unwrap();
+    for key in [
+        "nameserver",
+        "default-nameserver",
+        "proxy-server-nameserver",
+    ] {
+        let original = profile["dns"][key].clone();
+        for server in [
+            "https://192.0.2.53/dns-query#{dnsPolicy}",
+            "tls://192.0.2.53:853#policy:ai",
+        ] {
+            profile["dns"][key] = json!([server]);
+            let out = build_json(&json!({"runtime":{"rulesProfile":profile}}).to_string());
+            assert!(out["config"].is_null());
+            assert!(out["configError"]
+                .as_str()
+                .unwrap()
+                .contains("DoH/DoT through a proxy is unsupported"));
+            assert!(out["pool"]["nodes"].is_array());
+        }
+        profile["dns"][key] = original;
     }
 }

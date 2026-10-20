@@ -21,6 +21,10 @@ pub mod backoff;
 pub mod conn;
 pub mod dial;
 pub mod dns_mode;
+// Shared std-only OS boundary; meow-manager remains independently buildable
+// when embedded in the desktop tray, like its shared data-directory module.
+#[path = "../../meow-manager/src/dns_cache.rs"]
+pub mod dns_cache;
 pub mod error;
 pub mod fs_util;
 pub mod home_dir;

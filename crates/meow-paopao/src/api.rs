@@ -60,6 +60,9 @@ pub struct BuildOutput {
     /// The user rules whose target does not lead where it says
     /// ([`rule_target_states`]): saved target → `{state, to?}`.
     pub rule_targets: Map<String, Value>,
+    /// Provider validation failure; the JSON boundary refuses application
+    /// while keeping the pool/tree available to a reopened panel.
+    pub config_error: Option<String>,
 }
 
 impl BuildOutput {
@@ -85,6 +88,10 @@ impl BuildOutput {
             "ruleTargets".into(),
             Value::Object(self.rule_targets.clone()),
         );
+        if let Some(error) = &self.config_error {
+            m.insert("config".into(), Value::Null);
+            m.insert("configError".into(), error.clone().into());
+        }
         Value::Object(m)
     }
 }
@@ -142,7 +149,8 @@ pub fn build(input: &BuildInput) -> BuildOutput {
         modules: &modules,
         utc_offset: input.utc_offset,
     };
-    let config = build_clash_config(&emit).config;
+    let built = build_clash_config(&emit);
+    let config = built.config;
     let rules = effective_rules(&config);
     let rule_targets = rule_target_states(&emit);
     BuildOutput {
@@ -152,6 +160,7 @@ pub fn build(input: &BuildInput) -> BuildOutput {
         rules,
         route_policies,
         rule_targets,
+        config_error: built.config_error,
     }
 }
 

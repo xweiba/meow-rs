@@ -353,6 +353,8 @@ pub fn create_router_with(
             get(provider_proxy_healthcheck),
         )
         // Rule providers
+        .route("/rule-data", get(crate::geodata::get_status))
+        .route("/rule-data/update", post(crate::geodata::update))
         .route("/providers/rules", get(get_rule_providers))
         .route(
             "/providers/rules/{name}",
@@ -4218,7 +4220,7 @@ struct ProviderInfo {
     updated_at: Option<String>,
 }
 
-fn unix_rfc3339(seconds: u64) -> Option<String> {
+pub(crate) fn unix_rfc3339(seconds: u64) -> Option<String> {
     use time::format_description::well_known::Rfc3339;
     (seconds > 0)
         .then(|| time::OffsetDateTime::from_unix_timestamp(seconds as i64).ok())

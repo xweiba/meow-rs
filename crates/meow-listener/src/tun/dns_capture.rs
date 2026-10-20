@@ -135,9 +135,11 @@ impl Drop for Capture {
     fn drop(&mut self) {
         drop(self.watchdog.stdin.take());
         // The watchdog removes the redirect before these sockets close.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(9);
         while std::time::Instant::now() < deadline {
-            if self.watchdog.try_wait().ok().flatten().is_some() { return; }
+            if self.watchdog.try_wait().ok().flatten().is_some() {
+                return;
+            }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         tracing::warn!("DNS capture watchdog is still cleaning up");
@@ -146,8 +148,11 @@ impl Drop for Capture {
 
 fn vpn_servers() -> String {
     use meow_common::route_table::{iface_dns, RouteIfaceKind};
-    let mut ips: Vec<_> = iface_dns().iter().filter(|d| d.kind == RouteIfaceKind::OtherVpn)
-        .flat_map(|d| d.servers.iter().map(ToString::to_string)).collect();
+    let mut ips: Vec<_> = iface_dns()
+        .iter()
+        .filter(|d| d.kind == RouteIfaceKind::OtherVpn)
+        .flat_map(|d| d.servers.iter().map(ToString::to_string))
+        .collect();
     ips.sort();
     ips.dedup();
     ips.join(",")
@@ -155,8 +160,15 @@ fn vpn_servers() -> String {
 
 fn rules(table: &str, port: u16, bypass: &str) -> String {
     // Only parsed IPs enter the nft program, never untrusted rule text.
-    let bypass: String = bypass.split(',').filter_map(|s| s.parse::<std::net::IpAddr>().ok())
-        .map(|ip| format!("{} daddr {ip} return\n", if ip.is_ipv4() { "ip" } else { "ip6" }))
+    let bypass: String = bypass
+        .split(',')
+        .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
+        .map(|ip| {
+            format!(
+                "{} daddr {ip} return\n",
+                if ip.is_ipv4() { "ip" } else { "ip6" }
+            )
+        })
         .collect();
     format!("table inet {table} {{\nchain output {{\ntype nat hook output priority -110; policy accept;\nmeta mark & {DNS_CAPTURE_MARK} != 0 return\nip daddr 127.0.0.0/8 return\nip6 daddr ::1 return\n{bypass}meta l4proto {{ tcp, udp }} th dport 53 redirect to :{port}\n}}\nchain input {{\ntype filter hook input priority -110; policy accept;\nmeta l4proto {{ tcp, udp }} th dport {port} ct original proto-dst != 53 drop\n}}\n}}\n")
 }
@@ -223,7 +235,10 @@ fn nft(args: &[&str], input: Option<&str>) -> io::Result<()> {
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "nft command timed out"));
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "nft command timed out",
+            ));
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -252,6 +267,11 @@ pub fn watch(port: u16) -> io::Result<()> {
         fn drop(&mut self) {
             if let Err(e) = nft(&["delete", "table", "inet", &self.0], None) {
                 eprintln!("DNS capture cleanup failed: {e}");
+            } else {
+                // The independent watchdog also survives parent SIGKILL.
+                // Remove interception first so a new lookup cannot refill
+                // the system cache with an address the dead core owned.
+                meow_common::dns_cache::flush_after_capture();
             }
         }
     }

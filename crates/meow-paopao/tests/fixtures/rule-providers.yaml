@@ -1,0 +1,36 @@
+# Synthetic, credential-free Clash subscription. No payload is downloaded.
+proxies:
+  - {name: sample, type: socks5, server: proxy.example.invalid, port: 1080}
+proxy-groups:
+  - {name: Main, type: select, proxies: [sample]}
+  - {name: Service, type: select, proxies: [Main, DIRECT]}
+  - {name: Fallback, type: select, proxies: [Main, DIRECT]}
+rule-providers:
+  common:
+    type: inline
+    behavior: domain
+    payload: ['+.service.example']
+    x-metadata: {label: synthetic, enabled: true}
+  ranges:
+    type: http
+    behavior: ipcidr
+    format: text
+    url: https://rules.example.invalid/ranges.txt
+    path: /etc/router/../../rules.txt
+    interval: 3600
+    proxy: Main
+    header: {User-Agent: [paopao-fixture]}
+  local:
+    type: file
+    behavior: classical
+    path: rules/local.yaml
+  unused:
+    type: http
+    behavior: domain
+    url: https://rules.example.invalid/unused.yaml
+rules:
+  - DOMAIN,priority.example,Service
+  - RULE-SET,common,Service
+  - RULE-SET,ranges,Service,No-Resolve,src
+  - AND,((RULE-SET,local),(NETWORK,UDP)),Service
+  - MATCH,Fallback

@@ -55,6 +55,7 @@ async fn pre_resolve_populates_dst_ip_for_ipcidr_rule() {
         rule_name,
         rule_payload: _payload,
         route: _route,
+        ..
     } = tunnel
         .inner()
         .resolve_proxy(&md)

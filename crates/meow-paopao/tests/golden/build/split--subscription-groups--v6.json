@@ -190,16 +190,38 @@
       "geodata": {
         "background-fetch": true,
         "auto-update": true,
+        "auto-update-interval": 24,
+        "proxy": "proxy",
+        "mirrors": [],
+        "sources": {
+          "mmdb": [
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb",
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/country.mmdb"
+          ],
+          "asn": [
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb",
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/GeoLite2-ASN.mmdb"
+          ],
+          "geosite": [
+            "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat",
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geosite.dat"
+          ]
+        },
         "url": {
           "mmdb": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb",
+          "asn": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb",
           "geosite": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
         }
       },
       "dns": {
         "enable": true,
+        "direct-nameserver": [
+          "system"
+        ],
+        "follow-domain-rules": true,
         "nameserver": [
-          "https://1.1.1.1/dns-query#proxy",
-          "https://8.8.8.8/dns-query#proxy"
+          "tcp://1.1.1.1:53#proxy",
+          "tcp://8.8.8.8:53#proxy"
         ],
         "default-nameserver": [
           "https://1.1.1.1/dns-query"
@@ -384,6 +406,7 @@
         "AND,((DST-PORT,443),(IP-CIDR6,2620:fe::9/128,no-resolve)),proxy",
         "DST-PORT,853,proxy",
         "AND,((NETWORK,UDP),(DST-PORT,3478/5349/19302-19309)),proxy",
+        "AND,((NETWORK,UDP),(DST-PORT,3478/5349/19302-19309)),REJECT",
         "DOMAIN-SUFFIX,netflix.com,sub:🎥 奈飞",
         "DOMAIN-SUFFIX,hbo.com,sub:Media",
         "DOMAIN-KEYWORD,google,proxy",

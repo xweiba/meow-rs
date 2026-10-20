@@ -157,6 +157,34 @@ impl DirectAdapter {
     /// Determine the concrete `SocketAddr` candidates to dial for `metadata`,
     /// avoiding the OS resolver whenever possible.
     async fn resolve_targets(&self, metadata: &Metadata) -> Result<Vec<SocketAddr>> {
+        // Routing/sniffing may have supplied an address from the AI DNS
+        // view. Once DIRECT wins, use the NIC's real address for this name.
+        // IP literals remain unchanged; Hosts still precede upstream DNS.
+        if !metadata.host.is_empty() && meow_common::metadata_ip_literal(&metadata.host).is_none() {
+            if let Some(slot) = &self.resolver {
+                let resolver = Arc::clone(&slot.read());
+                if resolver.uses_direct_system_dns() {
+                    let interface = self.pinned_interface();
+                    let ips = resolver
+                        .resolve_direct_ips_on(&metadata.host, interface.as_deref())
+                        .await
+                        .map_err(MeowError::Io)?;
+                    return ips
+                        .filter(|ips| !ips.is_empty())
+                        .map(|ips| {
+                            ips.into_iter()
+                                .map(|ip| SocketAddr::new(ip, metadata.dst_port))
+                                .collect()
+                        })
+                        .ok_or_else(|| {
+                            MeowError::Dns(format!(
+                                "direct: failed to resolve {} via interface DNS",
+                                metadata.host
+                            ))
+                        });
+                }
+            }
+        }
         // 1. Destination already resolved (e.g. by rule-matching pre_resolve,
         //    or when the client supplied an IP literal).
         if let Some(ip) = metadata.dst_ip {
@@ -268,6 +296,8 @@ impl ProxyConn for DirectConn {}
 // UDP wrapper
 struct DirectPacketConn {
     socket: UdpSocket,
+    /// Original client tuple when NIC DNS selected a different address.
+    reply_peer: Option<SocketAddr>,
     /// `Some` when the socket is `connect()`ed to a name-resolved target
     /// (a chained `UdpTarget::Name`, issue #657): writes ignore the
     /// advisory arg and reads report the connected peer.
@@ -277,7 +307,8 @@ struct DirectPacketConn {
 #[async_trait]
 impl ProxyPacketConn for DirectPacketConn {
     async fn read_packet(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
-        self.socket.recv_from(buf).await.map_err(MeowError::Io)
+        let (n, from) = self.socket.recv_from(buf).await.map_err(MeowError::Io)?;
+        Ok((n, self.reply_peer.unwrap_or(from)))
     }
 
     async fn write_packet(&self, buf: &[u8], addr: &SocketAddr) -> Result<usize> {
@@ -393,6 +424,10 @@ impl ProxyAdapter for DirectAdapter {
         true
     }
 
+    fn dns_interface(&self) -> Option<Arc<str>> {
+        self.pinned_interface()
+    }
+
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
         let mut dests = self.resolve_targets(metadata).await?;
         // PaoPao 签到助手 replays requests from rules it does not trust:
@@ -450,7 +485,13 @@ impl ProxyAdapter for DirectAdapter {
         // and *connect* the socket. The conn is bound: the caller holds no
         // literal for a name target and its write arg is only an advisory
         // placeholder.
-        if metadata.domain_udp_target().is_some() {
+        let direct_dns = self
+            .resolver
+            .as_ref()
+            .is_some_and(|slot| slot.read().uses_direct_system_dns())
+            && !metadata.host.is_empty()
+            && meow_common::metadata_ip_literal(&metadata.host).is_none();
+        if metadata.domain_udp_target().is_some() || direct_dns {
             let mut last_err = None;
             for addr in self.resolve_targets(metadata).await? {
                 let bind: SocketAddr = if addr.is_ipv4() {
@@ -469,6 +510,9 @@ impl ProxyAdapter for DirectAdapter {
                     Ok(()) => {
                         return Ok(Box::new(DirectPacketConn {
                             socket,
+                            reply_peer: metadata
+                                .dst_ip
+                                .map(|ip| SocketAddr::new(ip, metadata.dst_port)),
                             bound: Some(addr),
                         }));
                     }
@@ -507,6 +551,7 @@ impl ProxyAdapter for DirectAdapter {
             .map_err(MeowError::Io)?;
         Ok(Box::new(DirectPacketConn {
             socket,
+            reply_peer: None,
             bound: None,
         }))
     }
@@ -536,6 +581,67 @@ impl ProxyAdapter for DirectAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn nic_dns_adapter() -> DirectAdapter {
+        let mut hosts = meow_trie::DomainTrie::new();
+        hosts.insert(
+            "nic-view.test",
+            meow_dns::HostEntry::Addresses(vec!["127.0.0.1".parse().unwrap()]),
+        );
+        let mut resolver = Resolver::new(
+            vec![],
+            vec![],
+            meow_common::DnsMode::Normal,
+            hosts,
+            true,
+            true,
+        );
+        resolver.set_direct_system_dns(true);
+        DirectAdapter::new().with_resolver(Arc::new(resolver))
+    }
+
+    #[tokio::test]
+    async fn direct_dns_overrides_routing_hint_but_preserves_ip_literals() {
+        let adapter = nic_dns_adapter();
+        let mut meta = Metadata::default();
+        meta.host = "nic-view.test".into();
+        meta.dst_ip = Some("192.0.2.123".parse().unwrap());
+        meta.dst_port = 443;
+        assert_eq!(
+            adapter.resolve_targets(&meta).await.unwrap(),
+            vec!["127.0.0.1:443".parse().unwrap()]
+        );
+        meta.host = "192.0.2.123".into();
+        assert_eq!(
+            adapter.resolve_targets(&meta).await.unwrap(),
+            vec!["192.0.2.123:443".parse().unwrap()]
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_dns_udp_uses_new_address_and_preserves_reply_tuple() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        let mut meta = Metadata::default();
+        meta.host = "nic-view.test".into();
+        meta.dst_ip = Some("192.0.2.123".parse().unwrap());
+        meta.dst_port = addr.port();
+        let client_peer = SocketAddr::new(meta.dst_ip.unwrap(), addr.port());
+        let conn = nic_dns_adapter().dial_udp(&meta).await.unwrap();
+        conn.write_packet(b"request", &client_peer).await.unwrap();
+        let mut buf = [0; 64];
+        let (_, source) = tokio::time::timeout(Duration::from_secs(2), server.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        server.send_to(b"reply", source).await.unwrap();
+        let (n, peer) = tokio::time::timeout(Duration::from_secs(2), conn.read_packet(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf[..n], b"reply");
+        assert_eq!(peer, client_peer);
+    }
 
     /// PaoPao: a per-rule `interface-name` outranks both the system route
     /// to the destination (`tun.follow-system-routes`) and the default

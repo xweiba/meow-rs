@@ -175,10 +175,10 @@ mod resolved_cli_tests {
     }
 }
 
-/// The `search` / `domain` lines of a `resolv.conf`, verbatim — what our
-/// own rewrite of the file keeps, so short names still expand.
-#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-pub(super) fn resolv_conf_search_lines(text: &str) -> Vec<&str> {
+/// Preserve the legacy search-line parsing regression without compiling
+/// a helper for the removed resolver-write path into production.
+#[cfg(test)]
+fn resolv_conf_search_lines(text: &str) -> Vec<&str> {
     text.lines()
         .map(str::trim)
         .filter(|l| matches!(l.split_whitespace().next(), Some("search") | Some("domain")))

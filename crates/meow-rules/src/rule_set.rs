@@ -56,6 +56,8 @@ pub enum RuleSetFormat {
     Yaml,
     Text,
     Mrs,
+    Srs,
+    Json,
 }
 
 impl FromStr for RuleSetFormat {
@@ -65,6 +67,11 @@ impl FromStr for RuleSetFormat {
             "yaml" => Ok(Self::Yaml),
             "text" => Ok(Self::Text),
             "mrs" => Ok(Self::Mrs),
+            "srs" => Ok(Self::Srs),
+            "json" => Ok(Self::Json),
+            "binary" | "db" => Err(format!(
+                "unsupported sing-box rule-set format: {s}; use Clash YAML/text or MetaCubeX MRS"
+            )),
             other => Err(format!("unsupported rule-set format: {other}")),
         }
     }
@@ -146,7 +153,7 @@ pub fn build_rule_set_checked(
     }
 }
 
-/// Return `true` if `bytes` starts with the MRS magic `"MRS!"`.
+/// Recognise zstd-wrapped upstream MRS or the legacy local `MRS!` container.
 pub fn is_mrs_bytes(bytes: &[u8]) -> bool {
     bytes.len() >= 4
         && (bytes[..4] == crate::mrs_parser::MRS_MAGIC
@@ -237,8 +244,11 @@ pub fn build_rule_set_from_mrs_with_behavior(
             ));
         }
     }
-    let decoder = zstd::stream::Decoder::new(std::io::Cursor::new(compressed))
+    let mut decoder = zstd::stream::Decoder::new(std::io::Cursor::new(compressed))
         .map_err(|e| format!("mrs: zstd decompression failed: {e}"))?;
+    decoder
+        .window_log_max(26)
+        .map_err(|e| format!("mrs: zstd window limit: {e}"))?;
     let mut first_err = None;
     let result = match hdr.type_tag {
         TYPE_DOMAIN => {

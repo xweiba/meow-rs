@@ -3193,11 +3193,14 @@ name = "meow-rules"
 version = "0.22.0"
 dependencies = [
  "criterion",
+ "flate2",
  "ipnet",
  "maxminddb",
  "meow-common",
  "meow-trie",
  "regex",
+ "serde",
+ "serde_json",
  "smol_str",
  "tempfile",
  "thiserror 2.0.18",

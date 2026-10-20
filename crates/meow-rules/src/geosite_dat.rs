@@ -62,13 +62,13 @@ pub enum DatError {
 
 /// Minimal protobuf reader — only the wire-format primitives needed for the
 /// geosite schema. Holds a byte slice + cursor; all reads advance the cursor.
-struct PbReader<'a> {
+pub(crate) struct PbReader<'a> {
     buf: &'a [u8],
     pos: usize,
 }
 
 impl<'a> PbReader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
+    pub(crate) fn new(buf: &'a [u8]) -> Self {
         Self { buf, pos: 0 }
     }
 
@@ -76,11 +76,11 @@ impl<'a> PbReader<'a> {
         self.buf.len().saturating_sub(self.pos)
     }
 
-    fn is_at_end(&self) -> bool {
+    pub(crate) fn is_at_end(&self) -> bool {
         self.pos >= self.buf.len()
     }
 
-    fn read_varint(&mut self) -> Result<u64, DatError> {
+    pub(crate) fn read_varint(&mut self) -> Result<u64, DatError> {
         let start = self.pos;
         let mut result: u64 = 0;
         let mut shift: u32 = 0;
@@ -90,7 +90,7 @@ impl<'a> PbReader<'a> {
             }
             let b = self.buf[self.pos];
             self.pos += 1;
-            if shift >= 64 {
+            if shift >= 64 || (shift == 63 && b > 1) {
                 return Err(DatError::VarintOverflow(start));
             }
             result |= u64::from(b & 0x7F) << shift;
@@ -102,14 +102,14 @@ impl<'a> PbReader<'a> {
     }
 
     /// Read a wire tag — returns `(field_number, wire_type)`.
-    fn read_tag(&mut self) -> Result<(u32, u32), DatError> {
+    pub(crate) fn read_tag(&mut self) -> Result<(u32, u32), DatError> {
         let tag = self.read_varint()?;
         let field = (tag >> 3) as u32;
         let wire = (tag & 0x7) as u32;
         Ok((field, wire))
     }
 
-    fn read_length_delimited(&mut self) -> Result<&'a [u8], DatError> {
+    pub(crate) fn read_length_delimited(&mut self) -> Result<&'a [u8], DatError> {
         let start = self.pos;
         let len = self.read_varint()? as usize;
         if self.remaining() < len {
@@ -122,7 +122,7 @@ impl<'a> PbReader<'a> {
 
     /// Skip a field whose tag was just consumed. Required when an unknown
     /// field is encountered (e.g. `Domain.attribute`, field 3 wire-type 2).
-    fn skip_field(&mut self, wire: u32) -> Result<(), DatError> {
+    pub(crate) fn skip_field(&mut self, wire: u32) -> Result<(), DatError> {
         let start = self.pos;
         match wire {
             WIRE_VARINT => {

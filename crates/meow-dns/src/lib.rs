@@ -5,6 +5,7 @@
 
 pub mod cache;
 pub mod client;
+pub mod domain_route;
 pub mod fakeip;
 pub mod host_resolver_hook;
 pub mod paopao_hosts;

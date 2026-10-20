@@ -1,5 +1,5 @@
-//! Privacy egress must bind internal DNS, encrypted DNS rules and STUN to
-//! the same selected group; an ordinary site rule cannot bind core DNS.
+//! Business DNS follows domain routing. External encrypted DNS and STUN
+//! remain separately configurable instead of overriding business egress.
 use meow_paopao::{build, BuildInput};
 use serde_json::{json, Value};
 
@@ -16,17 +16,30 @@ fn assert_policy(value: &Value, expected: &str) {
     assert_eq!(servers.len(), 2);
     for server in servers {
         let server = server.as_str().unwrap();
-        assert!(server.starts_with("https://"));
-        assert!(server.ends_with(&format!("#{expected}")), "{server}");
+        assert!(
+            server.starts_with("tcp://"),
+            "proxy-tagged DoH/DoT is unsupported by the DNS client: {server}"
+        );
+        assert!(
+            server.ends_with(&format!("#{expected}")),
+            "IP-rule pre-resolution must use the configured protected DNS exit: {server}"
+        );
     }
     assert!(dns["proxy-server-nameserver"].as_array().is_some());
-    assert!(out.rules.contains(&format!(
-        "AND,((NETWORK,UDP),(DST-PORT,3478/5349/19302-19309)),{expected}"
-    )));
+    assert_eq!(dns["direct-nameserver"], json!(["system"]));
+    assert_eq!(dns["follow-domain-rules"], true);
+    let stun = format!("AND,((NETWORK,UDP),(DST-PORT,3478/5349/19302-19309)),{expected}");
+    let index = out.rules.iter().position(|r| r == &stun).unwrap();
+    // A TCP-only selected leaf is skipped by Clash-compatible routing.
+    // Fail closed here instead of sending STUN through a later policy.
+    assert_eq!(
+        out.rules[index + 1],
+        "AND,((NETWORK,UDP),(DST-PORT,3478/5349/19302-19309)),REJECT"
+    );
 }
 
 #[test]
-fn dns_and_stun_default_to_ai_in_all_modes() {
+fn domain_dns_follows_rules_while_external_dns_and_stun_use_policy() {
     let mut value = input();
     for mode in ["smart", "global", "direct"] {
         value["settings"]["mode"] = mode.into();
@@ -35,7 +48,7 @@ fn dns_and_stun_default_to_ai_in_all_modes() {
 }
 
 #[test]
-fn selected_group_applies_to_core_dns_external_dns_and_stun() {
+fn selected_group_changes_external_dns_and_stun_without_overriding_domain_dns() {
     let mut value = input();
     value["settings"]["dns_policy"] = "policy:google".into();
     value["runtime"]["encryptedDnsRules"] =

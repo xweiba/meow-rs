@@ -239,51 +239,169 @@ fn signed_by(exe: &Path, team: &str) -> bool {
 }
 
 struct Core {
-    child: Option<Child>,
+    child: Option<WatchedChild>,
+}
+
+/// The helper keeps a native exit watch even when neither panel nor tray
+/// polls it. Inspection and cache invalidation share a lock with stop/start,
+/// so one generation is flushed once, after reaping, before its replacement.
+struct WatchedChild {
+    state: std::sync::Arc<std::sync::Mutex<ChildState>>,
+}
+
+struct ChildState {
+    child: Child,
+    flushed: bool,
+    flush: fn(),
+}
+
+impl ChildState {
+    fn after_exit(&mut self) {
+        if !self.flushed {
+            self.flushed = true;
+            (self.flush)();
+        }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            self.after_exit();
+        }
+        Ok(status)
+    }
+}
+
+impl WatchedChild {
+    fn new(child: Child, flush: fn()) -> std::io::Result<Self> {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(ChildState {
+            child,
+            flushed: false,
+            flush,
+        }));
+        let weak = std::sync::Arc::downgrade(&state);
+        if let Err(e) = std::thread::Builder::new()
+            .name("helper-core-exit".into())
+            .spawn(move || loop {
+                let Some(shared) = weak.upgrade() else { break };
+                let exited = shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .try_wait()
+                    .is_ok_and(|status| status.is_some());
+                if exited {
+                    break;
+                }
+                drop(shared);
+                std::thread::sleep(Duration::from_millis(100));
+            })
+        {
+            // An unsupervised privileged core must not escape a failed
+            // start. The same exit gate handles this rollback too.
+            let mut s = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = s.child.kill();
+            if s.child.wait().is_ok() {
+                s.after_exit();
+            }
+            return Err(e);
+        }
+        Ok(Self { state })
+    }
+
+    #[cfg(unix)]
+    fn terminate(&mut self) -> std::io::Result<()> {
+        let mut s = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Keep the watcher from reaping between the live check and signal:
+        // a reaped PID could already belong to an unrelated process.
+        if s.try_wait()?.is_some() {
+            return Ok(());
+        }
+        let pid = i32::try_from(s.child.id()).map_err(std::io::Error::other)?;
+        // SAFETY: this is our unreaped child, protected by the same lock
+        // used by every wait operation.
+        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .try_wait()
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .child
+            .kill()
+    }
+
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let mut s = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let status = s.child.wait()?;
+        s.after_exit();
+        Ok(status)
+    }
 }
 
 impl Core {
     fn running(&mut self) -> bool {
         match &mut self.child {
-            Some(c) => matches!(c.try_wait(), Ok(None)),
+            Some(c) => !matches!(c.try_wait(), Ok(Some(_))),
             None => false,
         }
     }
 
     #[cfg(windows)]
-    fn stop(&mut self) {
+    fn stop(&mut self) -> bool {
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
-            let _ = c.wait();
+            if c.wait().is_err() {
+                self.child = Some(c);
+            }
         }
+        self.child.is_none()
     }
 
     #[cfg(unix)]
-    fn stop(&mut self) {
+    fn stop(&mut self) -> bool {
         if let Some(mut c) = self.child.take() {
-            #[allow(clippy::cast_possible_wrap, reason = "pids fit in pid_t")]
-            let pid = c.id() as libc::pid_t;
-            // SAFETY: plain kill(2) on our own child.
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
+            let _ = c.terminate();
             let deadline = Instant::now() + Duration::from_secs(5);
             while Instant::now() < deadline {
-                if !matches!(c.try_wait(), Ok(None)) {
-                    return;
+                if matches!(c.try_wait(), Ok(Some(_))) {
+                    return true;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             let _ = c.kill();
-            let _ = c.wait();
+            if c.wait().is_err() {
+                self.child = Some(c);
+            }
         }
+        self.child.is_none()
     }
 
     fn start(&mut self, config: &str, dir: &str, core: Option<&str>) -> Value {
         if !Path::new(config).is_absolute() || !Path::new(dir).is_absolute() {
             return json!({"ok": false, "error": "config and dir must be absolute paths"});
         }
-        self.stop();
+        if !self.stop() {
+            return json!({"ok": false, "error": "previous core shutdown is not confirmed"});
+        }
         let exe = match core {
             Some(c) => match trusted_core(c) {
                 Ok(e) => e,
@@ -315,7 +433,10 @@ impl Core {
         }
         let child = cmd.spawn();
         let mut child = match child {
-            Ok(c) => c,
+            Ok(c) => match WatchedChild::new(c, meow_common::dns_cache::flush_after_capture) {
+                Ok(child) => child,
+                Err(e) => return json!({"ok": false, "error": e.to_string()}),
+            },
             Err(e) => return json!({"ok": false, "error": e.to_string()}),
         };
         // A config the core refuses ends it at once: say why.
@@ -368,8 +489,11 @@ fn answer(core: &mut Core, line: &str) -> Value {
             )
         }
         "stop" => {
-            core.stop();
-            json!({"ok": true})
+            if core.stop() {
+                json!({"ok": true})
+            } else {
+                json!({"ok": false, "error": "core shutdown is not confirmed"})
+            }
         }
         "status" => json!({
             "ok": true,
@@ -500,6 +624,55 @@ pub fn call(socket: &str, op: &str, config: Option<&str>, dir: Option<&str>) -> 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_cache_cleanup_follows_normal_forced_and_unexpected_exit_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static FLUSHES: AtomicUsize = AtomicUsize::new(0);
+        fn flushed() {
+            FLUSHES.fetch_add(1, Ordering::SeqCst);
+        }
+        fn watched(child: Child) -> Core {
+            Core {
+                child: Some(WatchedChild::new(child, flushed).unwrap()),
+            }
+        }
+        // A live child never flushes. A normal stop confirms/reaps first.
+        let mut normal = watched(Command::new("/bin/sleep").arg("30").spawn().unwrap());
+        assert!(normal.running());
+        assert_eq!(FLUSHES.load(Ordering::SeqCst), 0);
+        assert_eq!(answer(&mut normal, r#"{"op":"stop"}"#), json!({"ok": true}));
+        assert_eq!(FLUSHES.load(Ordering::SeqCst), 1);
+        assert!(normal.stop());
+        assert_eq!(FLUSHES.load(Ordering::SeqCst), 1);
+
+        // Read readiness before stopping so SIGTERM is certainly ignored;
+        // stop must exercise its bounded force-kill/reap fallback.
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; echo ready; exec sleep 30"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready.trim(), "ready");
+        let mut forced = watched(child);
+        assert!(forced.stop());
+        assert_eq!(FLUSHES.load(Ordering::SeqCst), 2);
+
+        // No manager/status request: the helper's own watcher detects exit.
+        let mut unexpected = watched(Command::new("/bin/sleep").arg("0.05").spawn().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while FLUSHES.load(Ordering::SeqCst) < 3 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(FLUSHES.load(Ordering::SeqCst), 3);
+        assert!(!unexpected.running());
+        assert!(unexpected.stop());
+        assert_eq!(FLUSHES.load(Ordering::SeqCst), 3);
+    }
 
     #[test]
     fn colors_are_dropped_from_the_log() {

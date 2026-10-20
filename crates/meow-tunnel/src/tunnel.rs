@@ -328,6 +328,7 @@ impl TunnelInner {
             rule_name: SmolStr::new_static("OwnTraffic"),
             rule_payload: SmolStr::default(),
             route: self.route(),
+            chains: Default::default(),
         })
     }
 
@@ -373,6 +374,7 @@ impl TunnelInner {
                     rule_name: SmolStr::new_static("VpnGateway"),
                     rule_payload: metadata.host.clone(),
                     route: self.route(),
+                    chains: Default::default(),
                 },
                 None,
             ));
@@ -391,7 +393,10 @@ impl TunnelInner {
                 && (rt::vpn_dns_for(&metadata.host).is_some()
                     || meow_common::outbound_iface::has_other_vpn_routes()) =>
             {
-                let ip = self.resolver().resolve_ip_real(&metadata.host).await?;
+                let ip = self
+                    .resolver()
+                    .resolve_classification_ip(&metadata.host)
+                    .await?;
                 resolved = Some(ip);
                 ip
             }
@@ -410,6 +415,7 @@ impl TunnelInner {
                 rule_name: SmolStr::new_static("OtherRoute"),
                 rule_payload: SmolStr::new(&*hit.iface),
                 route: self.route(),
+                chains: Default::default(),
             },
             resolved,
         ))
@@ -435,6 +441,7 @@ impl TunnelInner {
             rule_name: SmolStr::new_static("VpnClient"),
             rule_payload: SmolStr::new(&info.name),
             route: self.route(),
+            chains: Default::default(),
         })
     }
 
@@ -586,6 +593,50 @@ impl TunnelInner {
         PreHandleVerdict::Continue
     }
 
+    /// Shared by every UDP listener: select a route before final DNS and
+    /// pin a concrete node for both lookup and data. Call once per flow,
+    /// after pre_handle_metadata restored any fake-IP hostname.
+    pub async fn resolve_udp_route(&self, metadata: &mut Metadata) -> Option<ResolvedTarget> {
+        let resolver = self.resolver();
+        if !resolver.uses_direct_system_dns() {
+            self.pre_resolve(metadata).await;
+            if metadata.dst_ip.is_none() && !metadata.host.is_empty() {
+                metadata.dst_ip = resolver.resolve_ip_real(&metadata.host).await;
+            }
+            return self.resolve_proxy(metadata).await;
+        }
+        let mut target =
+            meow_dns::domain_route::classify(self.resolve_proxy_lazy(metadata)).await?;
+        if metadata.host.is_empty() || metadata_ip_literal(&metadata.host).is_some() {
+            return Some(target);
+        }
+        let leaf = target.pin_dns_leaf(metadata, true).ok()?;
+        let answer = match target.adapter.adapter_type() {
+            AdapterType::Reject | AdapterType::RejectDrop | AdapterType::PassRule => {
+                return Some(target)
+            }
+            AdapterType::Direct | AdapterType::Compatible => {
+                let interface = target.adapter.dns_interface();
+                resolver
+                    .resolve_direct_ips_on(&metadata.host, interface.as_deref())
+                    .await
+            }
+            _ if resolver.follows_domain_rules() => {
+                resolver
+                    .resolve_via_proxy_ips(
+                        &metadata.host,
+                        leaf?,
+                        Arc::clone(&target.route) as Arc<dyn Send + Sync>,
+                    )
+                    .await
+            }
+            _ => resolver.resolve_ips(&metadata.host).await,
+        };
+        metadata.dst_ip = answer.ok().flatten().and_then(|ips| ips.into_iter().next());
+        metadata.dst_ip?;
+        Some(target)
+    }
+
     /// Pre-process metadata before rule matching: if any rule needs IP
     /// resolution and we don't yet have a destination IP, resolve
     /// `metadata.host` via the internal resolver and populate `dst_ip`.
@@ -600,7 +651,11 @@ impl TunnelInner {
         if metadata.host.is_empty() || metadata.dst_ip.is_some() {
             return;
         }
-        if let Some(real_ip) = self.resolver().resolve_ip_real(&metadata.host).await {
+        if let Some(real_ip) = self
+            .resolver()
+            .resolve_classification_ip(&metadata.host)
+            .await
+        {
             debug!("pre_resolve: {} -> {}", metadata.host, real_ip);
             metadata.dst_ip = Some(real_ip);
         }
@@ -648,6 +703,7 @@ impl TunnelInner {
                 rule_name: SmolStr::new_static("Direct"),
                 rule_payload: SmolStr::default(),
                 route: self.route(),
+                chains: Default::default(),
             }),
             TunnelMode::Global => {
                 let route = self.route();
@@ -667,6 +723,7 @@ impl TunnelInner {
                     rule_name,
                     rule_payload: SmolStr::default(),
                     route,
+                    chains: Default::default(),
                 })
             }
             TunnelMode::Rule => {
@@ -749,7 +806,11 @@ impl TunnelInner {
                 if needs_ip {
                     // `needs_ip` already encodes the `pre_resolve` guards:
                     // host present, dst_ip absent.
-                    if let Some(real_ip) = self.resolver().resolve_ip_real(&metadata.host).await {
+                    if let Some(real_ip) = self
+                        .resolver()
+                        .resolve_classification_ip(&metadata.host)
+                        .await
+                    {
                         debug!("lazy resolve: {} -> {}", metadata.host, real_ip);
                         metadata.dst_ip = Some(real_ip);
                     }
@@ -860,6 +921,7 @@ impl TunnelInner {
                 rule_name: SmolStr::new_static("PaoPaoHosts"),
                 rule_payload: metadata.host.clone(),
                 route: self.route(),
+                chains: Default::default(),
             },
             ip,
         ))
@@ -898,6 +960,7 @@ impl TunnelInner {
             rule_name: SmolStr::new_static("SpecialProxy"),
             rule_payload: metadata.special_proxy.clone(),
             route,
+            chains: Default::default(),
         }))
     }
 
@@ -979,6 +1042,7 @@ impl TunnelInner {
                     rule_name: SmolStr::new_static(m.rule_type.as_str()),
                     rule_payload: SmolStr::from(m.rule_payload),
                     route: Arc::clone(route),
+                    chains: Default::default(),
                 }
             }
             None => {
@@ -988,6 +1052,7 @@ impl TunnelInner {
                     rule_name: SmolStr::new_static("Final"),
                     rule_payload: SmolStr::default(),
                     route: Arc::clone(route),
+                    chains: Default::default(),
                 }
             }
         }
@@ -1015,6 +1080,10 @@ pub struct ResolvedTarget {
     /// the dial (`route: _route`) — dropping it early re-opens the reload
     /// race this type exists to close.
     pub route: Arc<RouteTable>,
+    /// Pinned selection path, leaf first and rule target last, captured by
+    /// the same traversal that selects the DNS/UDP node. Empty until pinned;
+    /// a nonempty path means dialing must not unwrap or reselect the adapter.
+    pub chains: smallvec::SmallVec<[Arc<str>; 1]>,
 }
 
 /// Answer of [`Tunnel::explain`]: the rule that decides a connection and
@@ -1152,7 +1221,7 @@ impl Tunnel {
                 .with_resolver_slot(Arc::clone(&resolver))
                 .with_physical_uplink(),
         );
-        Self {
+        let tunnel = Self {
             inner: Arc::new(TunnelInner {
                 mode: RwLock::new(TunnelMode::Rule),
                 route: RwLock::new(Arc::new(RouteTable::empty())),
@@ -1171,7 +1240,11 @@ impl Tunnel {
                 dialer_registry: std::sync::OnceLock::new(),
                 udp_flush: tokio::sync::watch::Sender::new(0),
             }),
-        }
+        };
+        tunnel
+            .resolver()
+            .set_domain_router(Arc::new(crate::dns_route::RoutedDns(tunnel.weak_inner())));
+        tunnel
     }
 
     pub fn inner(&self) -> &Arc<TunnelInner> {
@@ -1537,6 +1610,7 @@ impl Tunnel {
     /// persisted a new `dns:` section while the process kept resolving
     /// through the old one.
     pub fn set_resolver(&self, resolver: Arc<Resolver>) {
+        resolver.set_domain_router(Arc::new(crate::dns_route::RoutedDns(self.weak_inner())));
         // One write updates the routing snapshot, `inner.direct`, and every
         // rebuilt `DIRECT` — they all share this slot.
         *self.inner.resolver.write() = resolver;

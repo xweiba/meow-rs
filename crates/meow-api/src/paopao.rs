@@ -144,6 +144,10 @@ pub struct Runner {
     prefix: Vec<OsString>,
     slots: Arc<Semaphore>,
     max_output: usize,
+    /// File operations on a user's editable profile run as that owner,
+    /// including when the core itself is the privileged macOS service.
+    #[cfg(unix)]
+    file_owner: Option<(u32, u32)>,
 }
 
 /// What a child answered.
@@ -190,6 +194,8 @@ impl Runner {
             prefix: Vec::new(),
             slots: Arc::new(Semaphore::new(SLOTS)),
             max_output: MAX_OUTPUT,
+            #[cfg(unix)]
+            file_owner: None,
         }
     }
 
@@ -217,6 +223,17 @@ impl Runner {
     pub fn with_max_output(mut self, max_output: usize) -> Self {
         self.max_output = max_output;
         self
+    }
+
+    #[cfg(unix)]
+    pub(super) fn for_file_owner(&self, uid: u32, gid: u32) -> Self {
+        Self {
+            program: self.program.clone(),
+            prefix: self.prefix.clone(),
+            slots: Arc::clone(&self.slots),
+            max_output: self.max_output,
+            file_owner: Some((uid, gid)),
+        }
     }
 
     /// Runs `paopao <op>` with `input` on its stdin; killed after `limit`
@@ -261,6 +278,27 @@ impl Runner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        if let Some((uid, gid)) = self.file_owner {
+            // Only async-signal-safe identity syscalls between fork and
+            // exec. Drop supplementary root groups before the user id;
+            // ordinary user cores already have the required file access.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::geteuid() == 0 {
+                        if libc::setgroups(0, std::ptr::null()) != 0
+                            || libc::setgid(gid) != 0
+                            || libc::setuid(uid) != 0
+                        {
+                            return Err(io::Error::last_os_error());
+                        }
+                    } else if libc::geteuid() != uid {
+                        return Err(io::Error::from_raw_os_error(libc::EPERM));
+                    }
+                    Ok(())
+                });
+            }
+        }
         // A core without a console (started by the app) must not open one
         // for its child.
         #[cfg(windows)]
@@ -412,6 +450,10 @@ pub fn router<S: Clone + Send + Sync + 'static>(service: Arc<Service>) -> Router
         .route("/paopao/build", post(build))
         .route("/paopao/fetch", post(fetch))
         .route("/paopao/input", get(get_input).put(put_input))
+        .route(
+            "/paopao/rule-profile",
+            get(get_rule_profile).put(put_rule_profile),
+        )
         .route("/paopao/subscriptions", get(subscriptions))
         .route("/paopao/subscriptions/refresh", post(refresh))
         .route("/paopao/schedule", get(get_schedule).put(put_schedule))
@@ -570,6 +612,34 @@ async fn get_input(State(p): State<PaoPao>) -> Response {
             refuse(StatusCode::NOT_FOUND, JobError::NoInput)
         }
         Err(e) => refuse(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn get_rule_profile(State(p): State<PaoPao>) -> Response {
+    match p.rule_profile().await {
+        Ok(profile) => Json(profile).into_response(),
+        Err(error) => job_refusal(error),
+    }
+}
+
+async fn put_rule_profile(State(p): State<PaoPao>, body: Bytes) -> Response {
+    if body.len() > 512 * 1024 {
+        return refuse(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "rule profile exceeds 512 KiB",
+        );
+    }
+    let Ok(profile) = serde_json::from_slice(&body) else {
+        return refuse(StatusCode::BAD_REQUEST, "invalid rule profile JSON");
+    };
+    // A panel closing while Save is pending must not cancel file rollback.
+    match tokio::spawn(async move { p.set_rule_profile(profile).await }).await {
+        Ok(Ok(report)) => Json(report).into_response(),
+        Ok(Err(error)) => job_refusal(error),
+        Err(_) => refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "profile update task failed",
+        ),
     }
 }
 
@@ -917,11 +987,7 @@ fn giving_back(answer: futures::stream::BoxStream<'static, io::Result<Bytes>>) -
 /// Hands what the allocator holds free back to the system (glibc keeps
 /// freed memory in each thread's arena).
 pub(crate) fn give_back() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    // SAFETY: no arguments to get wrong; only returns free memory.
-    unsafe {
-        libc::malloc_trim(0);
-    }
+    meow_common::memory::release_free_memory();
 }
 
 /// The child's answer as it is: already JSON.

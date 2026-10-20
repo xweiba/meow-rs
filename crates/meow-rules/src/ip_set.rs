@@ -71,6 +71,8 @@ impl<A: Copy + Ord> Intervals<A> {
 pub struct IpRangeSet {
     v4: Intervals<u32>,
     v6: Intervals<u128>,
+    /// Complement of the stored exclusions, used by V2Ray inverse GeoIP.
+    inverse: bool,
 }
 
 impl IpRangeSet {
@@ -93,12 +95,12 @@ impl IpRangeSet {
 
     #[inline]
     pub fn contains_v4(&self, addr: Ipv4Addr) -> bool {
-        self.v4.contains(u32::from(addr))
+        self.v4.contains(u32::from(addr)) != self.inverse
     }
 
     #[inline]
     pub fn contains_v6(&self, addr: Ipv6Addr) -> bool {
-        self.v6.contains(u128::from(addr))
+        self.v6.contains(u128::from(addr)) != self.inverse
     }
 
     /// True iff every address of `net` is in the set.
@@ -106,11 +108,19 @@ impl IpRangeSet {
         match net {
             IpNet::V4(v4) => {
                 let (start, end) = v4_bounds(v4);
+                if self.inverse {
+                    let i = self.v4.starts.partition_point(|&s| s <= end);
+                    return i == 0 || self.v4.ends[i - 1] < start;
+                }
                 let idx = self.v4.starts.partition_point(|&s| s <= start);
                 idx > 0 && end <= self.v4.ends[idx - 1]
             }
             IpNet::V6(v6) => {
                 let (start, end) = v6_bounds(v6);
+                if self.inverse {
+                    let i = self.v6.starts.partition_point(|&s| s <= end);
+                    return i == 0 || self.v6.ends[i - 1] < start;
+                }
                 let idx = self.v6.starts.partition_point(|&s| s <= start);
                 idx > 0 && end <= self.v6.ends[idx - 1]
             }
@@ -118,15 +128,33 @@ impl IpRangeSet {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.v4.is_empty() && self.v6.is_empty()
+        if self.inverse {
+            !self.has_v4() && !self.has_v6()
+        } else {
+            self.v4.is_empty() && self.v6.is_empty()
+        }
     }
 
     pub fn has_v4(&self) -> bool {
-        !self.v4.is_empty()
+        if self.inverse {
+            !(self.v4.starts.as_ref() == [0] && self.v4.ends.as_ref() == [u32::MAX])
+        } else {
+            !self.v4.is_empty()
+        }
     }
 
     pub fn has_v6(&self) -> bool {
-        !self.v6.is_empty()
+        if self.inverse {
+            !(self.v6.starts.as_ref() == [0] && self.v6.ends.as_ref() == [u128::MAX])
+        } else {
+            !self.v6.is_empty()
+        }
+    }
+
+    /// Preserve V2Ray's inverse flag as metadata instead of expanding exclusions.
+    pub fn complement(mut self) -> Self {
+        self.inverse = !self.inverse;
+        self
     }
 
     /// Number of coalesced intervals (IPv4, IPv6).
@@ -164,6 +192,24 @@ impl IpRangeSetBuilder {
         push_merging(&mut self.v6, start, end, |a| a.checked_add(1));
     }
 
+    /// Add an inclusive binary interval without expanding it into CIDR strings.
+    pub(crate) fn add_range(&mut self, from: IpAddr, to: IpAddr) -> Result<(), String> {
+        match (from, to) {
+            (IpAddr::V4(a), IpAddr::V4(b)) if a <= b => {
+                push_merging(&mut self.v4, u32::from(a), u32::from(b), |n| {
+                    n.checked_add(1)
+                });
+            }
+            (IpAddr::V6(a), IpAddr::V6(b)) if a <= b => {
+                push_merging(&mut self.v6, u128::from(a), u128::from(b), |n| {
+                    n.checked_add(1)
+                });
+            }
+            _ => return Err("invalid or mixed-family IP range".into()),
+        }
+        Ok(())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.v4.is_empty() && self.v6.is_empty()
     }
@@ -172,6 +218,7 @@ impl IpRangeSetBuilder {
         IpRangeSet {
             v4: Intervals::from_unsorted(self.v4, |a| a.checked_add(1)),
             v6: Intervals::from_unsorted(self.v6, |a| a.checked_add(1)),
+            inverse: false,
         }
     }
 }

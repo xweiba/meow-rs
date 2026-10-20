@@ -362,6 +362,7 @@ pub async fn route_inbound_tcp<C>(
         rule_name,
         rule_payload,
         route,
+        ..
     } = target;
     let mut route = Some(route);
 

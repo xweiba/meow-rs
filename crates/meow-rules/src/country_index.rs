@@ -80,6 +80,20 @@ impl CountryKey {
 }
 
 impl CountryIndex {
+    /// Auto-detect country MMDB (including sing-box GeoIP DB) or V2Ray GeoIP DAT.
+    /// Only referenced countries allocate retained IP ranges.
+    pub fn from_bytes(bytes: &[u8], allowed: &HashSet<String>) -> Result<Self, String> {
+        if crate::geodata_format::is_mmdb(bytes) {
+            crate::geodata_format::validate_country(bytes)?;
+            let reader = maxminddb::Reader::from_source(bytes).map_err(|e| e.to_string())?;
+            Self::build(&reader, allowed)
+        } else {
+            Ok(Self {
+                by_country: crate::geoip_dat::read(bytes, allowed)?,
+            })
+        }
+    }
+
     /// Walk every record in `reader` and bin each network into the
     /// matching country bucket — but only for ISO codes present in
     /// `allowed`. Codes outside the allowlist are skipped during the walk
@@ -142,7 +156,12 @@ impl CountryIndex {
             let bucket_idx = match offset_cache.get(&offset) {
                 Some(&cached) => cached,
                 None => {
-                    let resolved = match lookup.decode_path::<&str>(&path) {
+                    let decoded = if reader.metadata.database_type == "sing-geoip" {
+                        lookup.decode::<&str>()
+                    } else {
+                        lookup.decode_path::<&str>(&path)
+                    };
+                    let resolved = match decoded {
                         Ok(Some(iso)) => {
                             let key = CountryKey::from_str_upper(iso);
                             allowed_keys

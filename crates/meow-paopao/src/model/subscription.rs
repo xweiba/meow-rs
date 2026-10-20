@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::dart::Dv;
 
-/// One `proxy-groups:` entry of a Clash subscription. JSON: `{n, t, m}`.
+/// One `proxy-groups:` entry of a Clash subscription. JSON: `{n, t, m, interval?}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SubGroup {
     /// The provider's name ("🎥 NETFLIX").
@@ -18,6 +18,10 @@ pub struct SubGroup {
     /// Node names, other group names, DIRECT / REJECT.
     #[serde(rename = "m")]
     pub members: Vec<String>,
+    /// Imported probe interval in seconds, including explicit zero. None
+    /// retains the generator's existing default for legacy subscriptions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interval: Option<u64>,
 }
 
 impl SubGroup {
@@ -41,22 +45,37 @@ impl SubGroup {
                 kind
             },
             members: dart_strings(o.get("m")),
+            interval: o.get("interval").and_then(Value::as_u64),
         })
     }
 }
 
 /// The split a provider ships with its subscription (ACL4SSR-style configs
 /// carry thousands of rules and groups such as "🎥 NETFLIX").
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize)]
 pub struct SubRules {
     pub groups: Vec<SubGroup>,
     /// Clash rule lines ("DOMAIN-SUFFIX,netflix.com,🎥 NETFLIX").
     pub rules: Vec<String>,
+    /// Native rule-provider definitions, without downloaded payloads. Missing
+    /// in older subscriptions; unknown descriptor fields survive persistence.
+    #[serde(skip_serializing_if = "serde_json::Map::is_empty")]
+    pub providers: serde_json::Map<String, Value>,
+}
+
+impl std::fmt::Debug for SubRules {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubRules")
+            .field("groups", &self.groups)
+            .field("rules", &self.rules)
+            .field("providers", &self.providers.len())
+            .finish()
+    }
 }
 
 impl SubRules {
     pub fn is_empty(&self) -> bool {
-        self.groups.is_empty() && self.rules.is_empty()
+        self.groups.is_empty() && self.rules.is_empty() && self.providers.is_empty()
     }
 
     /// Dart `SubRules.fromJson`: empty when not an object.
@@ -71,6 +90,11 @@ impl SubRules {
                 .map(|a| a.iter().filter_map(SubGroup::from_json).collect())
                 .unwrap_or_default(),
             rules: dart_strings(o.get("rules")),
+            providers: o
+                .get("providers")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 }

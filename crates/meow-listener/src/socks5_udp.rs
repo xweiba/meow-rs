@@ -21,8 +21,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use meow_common::{metadata_ip_literal, with_dial_timeout, ConnType, Metadata, Network};
-use meow_tunnel::{ResolvedTarget, Tunnel, TunnelInner};
+use meow_common::{metadata_ip_literal, ConnType, Metadata, Network};
+use meow_tunnel::{Tunnel, TunnelInner};
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 use tokio::io::AsyncReadExt;
@@ -473,6 +473,9 @@ async fn run_session(
     // Taken before the dial so a flush landing mid-dial still ends the
     // session (issue #695): its socket may predate the new outbound binding.
     let mut flush = inner.udp_flush_watch();
+    let original_peer = metadata
+        .dst_ip
+        .map(|ip| SocketAddr::new(ip, metadata.dst_port));
 
     let outcome = async {
         if matches!(
@@ -481,12 +484,7 @@ async fn run_session(
         ) {
             return Err("unmapped fake-ip destination".into());
         }
-        // UDP keeps the eager pre_resolve (no lazy enrichment): the writer
-        // needs a resolved dst_ip regardless of what the rules demand.
-        inner.pre_resolve(&mut metadata).await;
-        if metadata.dst_ip.is_none() && !metadata.host.is_empty() {
-            metadata.dst_ip = inner.resolver().resolve_ip_real(&metadata.host).await;
-        }
+        let selected = inner.resolve_udp_route(&mut metadata).await;
         let Some(dst_ip) = metadata.dst_ip else {
             return Err(format!(
                 "dst_ip not resolved for {}",
@@ -496,15 +494,8 @@ async fn run_session(
         let dst_addr = SocketAddr::new(dst_ip, metadata.dst_port);
 
         // Client UDP follows the configured routing policy, including port 53.
-        // `_route` pins this generation's dialer registry across `dial_udp`
-        // (issue #533 review).
-        let Some(ResolvedTarget {
-            adapter: proxy,
-            rule_name,
-            rule_payload,
-            route: _route,
-        }) = inner.resolve_proxy(&metadata).await
-        else {
+        // The tracked dial retains this route's registry until setup finishes.
+        let Some(target) = selected else {
             return Err(format!(
                 "no matching rule for {}",
                 metadata.remote_address()
@@ -514,21 +505,16 @@ async fn run_session(
             "UDP {} --> {} match {}({}) using {}",
             client,
             metadata.remote_address(),
-            rule_name,
-            rule_payload,
-            proxy.name()
+            target.rule_name,
+            target.rule_payload,
+            target.adapter.name()
         );
 
+        inner.enrich_process(&mut metadata).await;
         let conn: Arc<dyn meow_common::ProxyPacketConn> = Arc::from(
-            meow_common::outbound_balance::scoped(
-                meow_common::outbound_balance::DialScope::for_target(
-                    &metadata.host,
-                    metadata.dst_ip,
-                ),
-                with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata)),
-            )
-            .await
-            .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?,
+            meow_tunnel::udp::dial_tracked_udp(&inner, &metadata, target)
+                .await
+                .map_err(|e| format!("dial_udp: {e}"))?,
         );
         Ok((conn, dst_addr))
     }
@@ -543,18 +529,16 @@ async fn run_session(
             return;
         }
     };
+    if flush.is_flushed() {
+        let _ = conn.close();
+        return;
+    }
 
     // Reply reader: server→client. Wraps each datagram in the SOCKS5 UDP
     // header and sends it back to the client's UDP source address. The
     // `select!` below treats its exit as session death (a conn that cannot
-    // deliver replies must be re-dialed, issue #514); the AbortOnDrop guard
-    // kills it if the session task is aborted first.
-    struct AbortOnDrop(tokio::task::AbortHandle);
-    impl Drop for AbortOnDrop {
-        fn drop(&mut self) {
-            self.0.abort();
-        }
-    }
+    // deliver replies must be re-dialed, issue #514); the relay guard
+    // kills it and closes the socket if the session task is aborted first.
     let mut reply_task = tokio::spawn({
         let conn = Arc::clone(&conn);
         let last_activity_ms = Arc::clone(&last_activity_ms);
@@ -562,7 +546,7 @@ async fn run_session(
             let mut rbuf = vec![0u8; 65535];
             while let Ok((m, src)) = conn.read_packet(&mut rbuf).await {
                 let mut out: SmallVec<[u8; 1500]> = SmallVec::new();
-                encode_udp_header(&mut out, &src);
+                encode_udp_header(&mut out, &original_peer.unwrap_or(src));
                 out.extend_from_slice(&rbuf[..m]);
                 if relay.send_to(&out, client).await.is_err() {
                     break;
@@ -574,7 +558,8 @@ async fn run_session(
             }
         }
     });
-    let _reply_guard = AbortOnDrop(reply_task.abort_handle());
+    let _reply_guard =
+        meow_tunnel::udp::UdpRelayGuard::new(Arc::clone(&conn), reply_task.abort_handle());
 
     // Writer loop: drain the queue in FIFO order until the session is
     // evicted (all senders gone), the upstream write fails, or the reply

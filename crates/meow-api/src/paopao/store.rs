@@ -131,14 +131,25 @@ pub fn file_name_for(id: &str) -> String {
 /// Replaces `path` with `bytes`: written beside it, flushed, then renamed
 /// over it. `private`: readable by the owner alone (Unix).
 pub fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
+    // The macOS core may run as root while the editable profile belongs
+    // to the desktop user. An atomic save must not make it root-only.
+    #[cfg(unix)]
+    let owner = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).ok().map(|m| (m.uid(), m.gid()))
+    };
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(".{}.tmp", std::process::id()));
+    static NEXT_SCRATCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let sequence = NEXT_SCRATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    tmp.push(format!(".{}.{sequence}.tmp", std::process::id()));
     let tmp = PathBuf::from(tmp);
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    // Never follow a pre-existing scratch symlink in a user-owned data
+    // directory when the macOS helper's core is privileged.
+    options.write(true).create_new(true);
     #[cfg(unix)]
     if private {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -146,13 +157,24 @@ pub fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> 
     }
     #[cfg(not(unix))]
     let _ = private;
+    let mut created = false;
     let written = (|| {
         let mut f = options.open(&tmp)?;
+        created = true;
         f.write_all(bytes)?;
-        f.sync_all()
+        f.sync_all()?;
+        #[cfg(unix)]
+        if let Some((uid, gid)) = owner {
+            use std::os::unix::fs::MetadataExt;
+            let meta = f.metadata()?;
+            if meta.uid() != uid || meta.gid() != gid {
+                std::os::unix::fs::chown(&tmp, Some(uid), Some(gid))?;
+            }
+        }
+        Ok(())
     })();
     let done = written.and_then(|()| std::fs::rename(&tmp, path));
-    if done.is_err() {
+    if done.is_err() && created {
         let _ = std::fs::remove_file(&tmp);
     }
     done

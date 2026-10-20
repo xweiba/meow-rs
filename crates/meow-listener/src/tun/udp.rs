@@ -25,9 +25,9 @@ use std::time::Duration;
 use futures::{FutureExt, StreamExt};
 use ipnet::{Ipv4Net, Ipv6Net};
 use lwip::UdpSocket;
-use meow_common::{with_dial_timeout, ConnType, Metadata, Network};
+use meow_common::{ConnType, Metadata, Network};
 use meow_dns::server::{hex_prefix, DnsServer, LocalAnswer};
-use meow_tunnel::{ResolvedTarget, Tunnel};
+use meow_tunnel::Tunnel;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Instant};
 use tracing::{debug, info, warn};
@@ -374,19 +374,14 @@ async fn relay_flow(tunnel: &Tunnel, spec: FlowSpec) -> Result<(), String> {
     };
 
     let inner = tunnel.inner();
+    let mut flush = inner.udp_flush_watch();
     if matches!(
         inner.pre_handle_metadata(&mut metadata),
         meow_tunnel::PreHandleVerdict::Drop
     ) {
         return Err("unmapped fake-ip destination".into());
     }
-    // UDP keeps the eager pre_resolve (no lazy enrichment): the outbound
-    // packet API below needs a resolved dst_ip regardless of what the rules
-    // demand — including after a fake-IP was rewritten back to a hostname.
-    inner.pre_resolve(&mut metadata).await;
-    if metadata.dst_ip.is_none() && !metadata.host.is_empty() {
-        metadata.dst_ip = inner.resolver().resolve_ip_real(&metadata.host).await;
-    }
+    let selected = inner.resolve_udp_route(&mut metadata).await;
     let Some(dst_ip) = metadata.dst_ip else {
         return Err(format!(
             "dst_ip not resolved for {}",
@@ -396,13 +391,7 @@ async fn relay_flow(tunnel: &Tunnel, spec: FlowSpec) -> Result<(), String> {
     let dst_addr = SocketAddr::new(dst_ip, metadata.dst_port);
 
     // Non-hijacked client traffic follows the same policy on every port.
-    let Some(ResolvedTarget {
-        adapter: proxy,
-        rule_name,
-        rule_payload,
-        route: _route,
-    }) = inner.resolve_proxy(&metadata).await
-    else {
+    let Some(target) = selected else {
         return Err(format!(
             "no matching rule for {}",
             metadata.remote_address()
@@ -412,26 +401,23 @@ async fn relay_flow(tunnel: &Tunnel, spec: FlowSpec) -> Result<(), String> {
         "UDP {} --> {} match {}({}) using {}",
         src,
         metadata.remote_address(),
-        rule_name,
-        rule_payload,
-        proxy.name()
+        target.rule_name,
+        target.rule_payload,
+        target.adapter.name()
     );
 
-    // Taken before the dial so a flush landing mid-dial still ends the flow
-    // (issue #695): its socket may predate the new outbound binding.
-    let mut flush = inner.udp_flush_watch();
-    let conn: std::sync::Arc<dyn meow_common::ProxyPacketConn> = std::sync::Arc::from(
-        meow_common::outbound_balance::scoped(
-            meow_common::outbound_balance::DialScope::for_target(&metadata.host, metadata.dst_ip),
-            with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata)),
-        )
-        .await
-        .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?,
+    // The flush watch was taken before routing, so a flush during DNS or
+    // dial setup cannot leave a socket using the previous outbound binding.
+    inner.enrich_process(&mut metadata).await;
+    let conn: Arc<dyn meow_common::ProxyPacketConn> = Arc::from(
+        meow_tunnel::udp::dial_tracked_udp(inner, &metadata, target)
+            .await
+            .map_err(|e| format!("dial_udp: {e}"))?,
     );
-    // `_route` exists to pin the route-table generation across the dial
-    // only — a long-lived flow must not keep its dial-time generation
-    // alive across config reloads.
-    drop(_route);
+    if flush.is_flushed() {
+        let _ = conn.close();
+        return Ok(());
+    }
 
     // Upstream replies are pumped by a dedicated reader task holding one
     // persistent buffer: reads are never cancelled, so a stream-framed
@@ -457,6 +443,8 @@ async fn relay_flow(tunnel: &Tunnel, spec: FlowSpec) -> Result<(), String> {
             }
         }
     });
+    let _relay_guard =
+        meow_tunnel::udp::UdpRelayGuard::new(Arc::clone(&conn), reply_task.abort_handle());
 
     // Select over client datagrams (queued by the reader loop), upstream
     // replies, and the idle deadline. Reply source addresses are not
@@ -481,8 +469,10 @@ async fn relay_flow(tunnel: &Tunnel, spec: FlowSpec) -> Result<(), String> {
             },
             received = up_rx.recv() => match received {
                 Some(data) => {
-                    if reply_tx.send((data, dst, src)).await.is_err() {
-                        break Ok(()); // stack writer gone — listener shutdown
+                    // A full stack-writer queue drops a datagram; awaiting
+                    // capacity here would prevent close/flush/idle handling.
+                    if let Err(mpsc::error::TrySendError::Closed(_)) = reply_tx.try_send((data, dst, src)) {
+                        break Ok(());
                     }
                     last_activity.store(activity_ms(), Ordering::Relaxed);
                     idle.as_mut().reset(Instant::now() + udp_timeout);
@@ -642,6 +632,102 @@ mod tests {
             )
             .await;
             assert!(result.unwrap_err().contains("rejected"));
+            assert_eq!(tunnel.inner().stats.active_connection_count(), 0);
+        }
+    }
+
+    /// Exercises the actual TUN relay without creating a device or changing
+    /// installed routes: real loopback datagrams, API metadata/counters and
+    /// every normal/cancelled exit must share one cleanup path.
+    #[tokio::test]
+    async fn tun_udp_observability_and_all_exit_paths() {
+        use std::sync::{atomic::AtomicU64, Arc};
+        use std::time::Duration;
+        use tokio::sync::mpsc;
+        for exit in [
+            "delete",
+            "delete-all",
+            "flush",
+            "idle",
+            "abort",
+            "queue-close",
+            "writer-close",
+        ] {
+            let resolver = Arc::new(meow_dns::Resolver::new(
+                vec![],
+                vec![],
+                meow_common::DnsMode::Normal,
+                meow_trie::DomainTrie::new(),
+                false,
+                true,
+            ));
+            let tunnel = meow_tunnel::Tunnel::new(resolver);
+            let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let dst = server.local_addr().unwrap();
+            let src: SocketAddr = "127.0.0.1:43214".parse().unwrap();
+            let (tx, rx) = mpsc::channel(2);
+            let (reply_tx, mut reply_rx) = mpsc::channel(2);
+            let task = tokio::spawn({
+                let tunnel = tunnel.clone();
+                async move {
+                    super::relay_flow(
+                        &tunnel,
+                        super::FlowSpec {
+                            rx,
+                            reply_tx,
+                            key: (src, dst),
+                            udp_timeout: Duration::from_millis(200),
+                            in_name: "tun-observe".into(),
+                            last_activity: Arc::new(AtomicU64::new(0)),
+                        },
+                    )
+                    .await
+                }
+            });
+            tx.send(b"hello".to_vec()).await.unwrap();
+            let mut buf = [0; 32];
+            let (n, peer) =
+                tokio::time::timeout(Duration::from_secs(2), server.recv_from(&mut buf))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(&buf[..n], b"hello");
+            server.send_to(b"world!", peer).await.unwrap();
+            let (data, from, to) = tokio::time::timeout(Duration::from_secs(2), reply_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(data, b"world!");
+            assert_eq!((from, to), (dst, src));
+            let info = tunnel.inner().stats.active_connections().pop().unwrap();
+            assert_eq!(info.metadata.network, meow_common::Network::Udp);
+            assert_eq!(info.metadata.conn_type, meow_common::ConnType::Tun);
+            assert_eq!(info.metadata.in_name, "tun-observe");
+            assert_eq!(info.counters.upload_bytes(), 5);
+            assert_eq!(info.counters.download_bytes(), 6);
+            assert_eq!(&*info.chains[0], "DIRECT");
+            match exit {
+                "delete" => tunnel.inner().stats.close_connection(info.id),
+                "delete-all" => tunnel.inner().stats.close_all_connections(),
+                "flush" => {
+                    tunnel.close_all_udp_sessions();
+                }
+                "abort" => task.abort(),
+                "queue-close" => drop(tx),
+                "writer-close" => {
+                    drop(reply_rx);
+                    server.send_to(b"last", peer).await.unwrap();
+                }
+                "idle" => {}
+                _ => unreachable!(),
+            }
+            let result = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap();
+            if exit == "abort" {
+                assert!(result.unwrap_err().is_cancelled());
+            }
+            assert_eq!(tunnel.inner().stats.active_connection_count(), 0, "{exit}");
         }
     }
 

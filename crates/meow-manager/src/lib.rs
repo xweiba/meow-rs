@@ -7,6 +7,7 @@
 //! daemon gives it; nothing here spawns a process by itself.
 
 pub mod data;
+pub mod dns_cache;
 #[cfg(feature = "desktop")]
 pub mod desktop;
 pub mod http;

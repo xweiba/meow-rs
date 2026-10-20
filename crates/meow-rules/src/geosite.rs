@@ -1,10 +1,10 @@
 //! GEOSITE DB — category name → `DomainTrie<()>` of domains, loaded once
-//! from a `geosite.mrs` file and shared via `Arc` across all `GeoSiteRule`
+//! from V2Ray GeoSite DAT (or a legacy local `MRS!` container), shared via `Arc` across all `GeoSiteRule`
 //! instances.
 //!
 //! upstream references:
 //! - `rules/geosite.go` (rule application)
-//! - `component/geodata/metaresource/metaresource.go::Read` (mrs geosite format)
+//! - v2fly/v2ray-core `app/router/routercommon/common.proto` (GeoSiteList)
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -17,6 +17,14 @@ use crate::mrs_parser::{parse_header, stream_geosite_payload, GeositeItem, MrsEr
 
 #[derive(Debug, thiserror::Error)]
 pub enum GeositeError {
+    #[error("geosite: data exceeds 64 MiB")]
+    TooLarge,
+    #[error("geosite: sing-box DB parse error: {0}")]
+    SingDb(String),
+    #[error(
+        "geosite: a single-category SRS/MRS belongs in a rule provider; use V2Ray GeoSite DAT or sing-box GeoSite DB for named categories"
+    )]
+    UnsupportedContainer,
     #[error("geosite: unrecognised format (neither .mrs magic nor a parseable V2Ray .dat)")]
     WrongFormat,
     #[error("geosite: file I/O error: {0}")]
@@ -207,7 +215,9 @@ impl GeositeDB {
     }
 
     /// Load a geosite DB from bytes. Auto-detects format:
-    /// - `MRS!` magic → parsed as the upstream MetaCubeX `.mrs` binary.
+    /// - `MRS!` magic → parsed as the legacy local multi-category binary.
+    /// - zero version byte → legacy sing-box GeoSite DB (directory + typed items).
+    /// - upstream single-category MRS/SRS → explicit provider conversion hint.
     /// - anything else → parsed as a V2Ray `geosite.dat` protobuf.
     ///
     /// When `allowed` is `Some`, only the named categories are loaded;
@@ -220,6 +230,15 @@ impl GeositeDB {
         data: &[u8],
         allowed: Option<&HashSet<String>>,
     ) -> Result<Self, GeositeError> {
+        if data.len() > crate::data_reader::MAX_BYTES {
+            return Err(GeositeError::TooLarge);
+        }
+        if data.first() == Some(&0) {
+            return crate::sing_geosite::from_bytes(data, allowed).map_err(GeositeError::SingDb);
+        }
+        if data.starts_with(b"SRS") || data.starts_with(&crate::mrs_parser::ZSTD_MAGIC) {
+            return Err(GeositeError::UnsupportedContainer);
+        }
         match parse_header(data) {
             Ok((header, rest)) => {
                 if header.type_tag != TYPE_DOMAIN {
@@ -228,8 +247,9 @@ impl GeositeDB {
                 // Stream straight from the zstd decoder into per-category
                 // tries: neither the decompressed payload nor a per-domain
                 // string list is ever held in memory.
-                let decoder = zstd::stream::Decoder::new(std::io::Cursor::new(rest))
+                let mut decoder = zstd::stream::Decoder::new(std::io::Cursor::new(rest))
                     .map_err(MrsError::Zstd)?;
+                decoder.window_log_max(26).map_err(MrsError::Zstd)?;
                 let mut categories: HashMap<String, DomainTrie<()>> = HashMap::new();
                 let mut counts: HashMap<String, usize> = HashMap::new();
                 let mut current: Option<(String, DomainTrie<()>, usize)> = None;
@@ -284,7 +304,14 @@ impl GeositeDB {
         path: &Path,
         allowed: Option<&HashSet<String>>,
     ) -> Result<Self, GeositeError> {
-        let bytes = std::fs::read(path)?;
+        use std::io::Read;
+        let file = std::fs::File::open(path)?;
+        if file.metadata()?.len() > crate::data_reader::MAX_BYTES as u64 {
+            return Err(GeositeError::TooLarge);
+        }
+        let mut bytes = Vec::new();
+        file.take(crate::data_reader::MAX_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
         Self::from_bytes(&bytes, allowed)
     }
 }
@@ -310,17 +337,17 @@ fn geosite_config_dir() -> PathBuf {
 /// Candidate paths for the geosite DB, in priority order. Returned
 /// regardless of whether the files exist; caller decides.
 ///
-/// Both `.mrs` (MetaCubeX binary) and `.dat` (V2Ray protobuf) are accepted —
-/// the loader auto-detects via magic bytes. `.mrs` is preferred when both
-/// are present, since it parses ~10× faster and has no per-entry type
-/// fidelity loss.
+/// Accepts V2Ray `.dat`, sing-box `.db`, and legacy local `.mrs` caches.
+/// The loader detects their bytes independently of the filename.
 pub fn default_geosite_candidates() -> Vec<PathBuf> {
     let cfg = geosite_config_dir();
     vec![
         cfg.join("geosite.mrs"),
         cfg.join("geosite.dat"),
+        cfg.join("geosite.db"),
         PathBuf::from("./meow/geosite.mrs"),
         PathBuf::from("./meow/geosite.dat"),
+        PathBuf::from("./meow/geosite.db"),
     ]
 }
 

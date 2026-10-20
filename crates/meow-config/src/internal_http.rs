@@ -204,7 +204,7 @@ pub async fn fetch_response(
 
 /// [`fetch`] with the body cap as a parameter, so tests can exercise the
 /// oversize paths without transferring hundreds of megabytes.
-async fn fetch_capped(
+pub(crate) async fn fetch_capped(
     url: &str,
     proxy: Option<&Arc<dyn Proxy>>,
     headers: &[(String, String)],

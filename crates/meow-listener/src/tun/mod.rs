@@ -26,13 +26,15 @@
 //! into the device makes meow's *own* outbound dials re-enter the tun. v1
 //! avoids the whole problem class by capturing only the fake-IP range:
 //!
-//! 1. The OS resolver is pointed at an address inside the routed range, so
-//!    DNS queries enter the tun and `dns-hijack` answers them with fake IPs.
+//! 1. With auto-route and DNS hijack, existing upstream DNS queries are
+//!    captured without changing the OS resolver configuration (Linux packet
+//!    interception; desktop host routes elsewhere).
 //! 2. Client connections to those fake IPs route into the tun; the fake-IP
 //!    rewrite recovers the hostname and rules match on domain.
 //! 3. Outbound dials — proxy upstreams *and* DIRECT — go to real IPs, which
 //!    are never inside the fake range, so they take the physical route and
-//!    cannot loop. No SO_MARK, interface binding, or bypass routes needed.
+//!    cannot loop. DNS host-route capture also requires outbound interface
+//!    binding so the core's own DNS queries bypass those host routes.
 //!
 //! The trade-off: IP-literal traffic (no DNS lookup) is not captured.
 //!
@@ -62,12 +64,66 @@ pub mod dns_capture;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod dns_routes;
 mod iface_dns;
-#[cfg(target_os = "windows")]
-mod local_dns;
 mod outbound_binding;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod route;
 mod vpn_clients;
+
+/// Keep read-only NIC DNS discovery alive even when only the proxy port is
+/// enabled. TUN's monitor uses the same reader/cache and published snapshot.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub struct SystemDnsMonitor {
+    stop: std::sync::mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+impl SystemDnsMonitor {
+    pub fn start() -> io::Result<Self> {
+        let (stop, rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let thread = std::thread::Builder::new()
+            .name("system-dns".into())
+            .spawn(move || {
+                let refresh = || {
+                    if let Ok(raw) = route::system_routes() {
+                        let before = meow_common::route_table::route_table();
+                        let table = meow_common::route_table::RouteTable::build(
+                            raw,
+                            meow_common::route_table::is_own_tun,
+                            route::route_kind,
+                        );
+                        meow_common::route_table::publish_route_table(table);
+                        let table = meow_common::route_table::route_table();
+                        iface_dns::refresh(&table, !std::sync::Arc::ptr_eq(&before, &table));
+                    }
+                };
+                refresh();
+                let _ = ready_tx.send(());
+                while rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .is_err_and(|e| matches!(e, std::sync::mpsc::RecvTimeoutError::Timeout))
+                {
+                    refresh();
+                }
+            })?;
+        let _ = ready_rx.recv_timeout(std::time::Duration::from_secs(5));
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+impl Drop for SystemDnsMonitor {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 // Phones: the platform VPN owns the device's routes.
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[path = "route_platform.rs"]
@@ -227,11 +283,12 @@ pub struct TunListenerConfig {
     pub auto_route: bool,
     /// Scope of the installed routes (#375).
     pub route_scope: TunRouteScope,
-    /// Physical interface outbound sockets bind to in global scope; `None`
-    /// = auto-detect from the default route. Ignored in fake-IP scope.
+    /// Interface outbound sockets bind to in global scope or when DNS
+    /// interception installs routes; `None` auto-detects the default route.
     pub outbound_interface: Option<String>,
     /// PaoPao (`tun.default-via`, `tun.follow-system-routes`): how the
-    /// outbound binding behaves next to another VPN. Global scope only.
+    /// outbound binding behaves next to another VPN. Fake-IP DNS capture
+    /// always follows specific system routes to preserve VPN reachability.
     pub outbound_policy: OutboundPolicy,
     /// PaoPao (`tun.route-exclude-address`): nets cut out of the global
     /// routes, so traffic to them never enters the device. Global scope
@@ -255,10 +312,25 @@ pub struct TunListenerConfig {
     pub file_descriptor: Option<i32>,
 }
 
+impl TunListenerConfig {
+    /// Manual/platform-owned routing never grants permission to install
+    /// interception routes or packet rules, regardless of DNS settings.
+    fn captures_system_dns(&self) -> bool {
+        self.auto_route
+            && self.dns_hijack
+            && self.file_descriptor.is_none()
+            && cfg!(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "windows"
+            ))
+    }
+}
+
 /// Which routes `auto_route` installs (#375).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TunRouteScope {
-    /// v1: route only the fake-IP range — loop-free by construction.
+    /// Route the fake-IP range, plus DNS interception when requested.
     #[default]
     FakeIp,
     /// Route all IPv4 (split defaults `0.0.0.0/1` + `128.0.0.0/1`) — and
@@ -348,6 +420,12 @@ impl Drop for ReadyNotifier {
 /// away — ensuring route deletion always succeeds because the adapter is
 /// still alive.
 struct TunDevice {
+    /// DNS routes/monitor share the last device owner's lifetime. They go
+    /// before the binding and device, so teardown cannot leave a live
+    /// capture after its upstream bypass has been released.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[allow(dead_code)]
+    dns_routes: Option<dns_routes::DnsRoutes>,
     /// Held only for its `Drop` side effect — routes are deleted when
     /// this field is dropped, before `device` is destroyed.
     #[allow(dead_code)]
@@ -368,6 +446,10 @@ struct TunDevice {
     /// PaoPao: keeps the hand-entered VPN entries installed.
     #[allow(dead_code)]
     vpn_manual: meow_common::route_table::VpnManualGuard,
+    /// Must be last: invalidate system fake-IP answers only after this
+    /// generation's routes, interface binding and adapter are gone.
+    #[allow(dead_code)]
+    dns_cache: meow_common::dns_cache::FlushOnDrop,
 }
 
 pub struct TunListener {
@@ -637,18 +719,34 @@ impl TunListener {
         // reload before the reload's first dial; issue #695).
         // Fail closed — a global default route without working loop
         // avoidance would blackhole the host's connectivity.
-        let iface_guard = if cfg.auto_route && cfg.route_scope == TunRouteScope::Global {
-            Some(match preinstalled {
-                Some(binding) => binding,
-                None => OutboundBinding::install(
-                    cfg.outbound_interface.as_deref(),
-                    &cfg.outbound_policy,
-                )?,
-            })
-        } else {
-            drop(preinstalled);
-            None
-        };
+        let capture_dns = cfg.captures_system_dns();
+        let iface_guard =
+            if cfg.auto_route && (cfg.route_scope == TunRouteScope::Global || capture_dns) {
+                let mut policy = cfg.outbound_policy.clone();
+                if cfg.route_scope != TunRouteScope::Global {
+                    // Fake-IP scope previously used ordinary system routes.
+                    // Bind DNS bypass sockets without losing specific VPN/LAN
+                    // routes while capturing the original resolver addresses.
+                    policy.follow_routes = true;
+                }
+                Some(match preinstalled {
+                    Some(binding) if cfg.route_scope == TunRouteScope::Global => binding,
+                    binding => {
+                        drop(binding);
+                        OutboundBinding::install(cfg.outbound_interface.as_deref(), &policy)?
+                    }
+                })
+            } else {
+                drop(preinstalled);
+                None
+            };
+        if capture_dns {
+            // Earlier config-build DNS pools may predate the binding.
+            // Retire them before adding DNS routes so they are not reused
+            // as unbound upstream sockets inside our own capture.
+            meow_dns::reset_pooled_connections();
+            self.tunnel.resolver().reset_connections();
+        }
 
         // auto-route: install the scope's routes (see module docs).
         //
@@ -733,75 +831,27 @@ impl TunListener {
         // is dropped (routes deleted) **before** `device` (adapter destroyed)
         // when the last `Arc` clone goes away — ensuring route deletion always
         // succeeds because the adapter is still alive.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let dns_routes = if capture_dns && !cfg!(target_os = "linux") {
+            let ipv6 = cfg.inet6_address.is_some();
+            Some(
+                tokio::task::spawn_blocking(move || dns_routes::DnsRoutes::setup(if_index, ipv6))
+                    .await
+                    .map_err(io::Error::other)??,
+            )
+        } else {
+            None
+        };
         let device = Arc::new(TunDevice {
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            dns_routes,
             route_guard,
             iface_guard,
             device,
             own_tun,
             vpn_manual,
+            dns_cache: meow_common::dns_cache::FlushOnDrop::new(capture_dns),
         });
-
-        // Windows: bind the loopback DNS sockets *before* DnsGuard repoints
-        // the OS resolver at them. If port 53 is already taken (ICS, Docker,
-        // another resolver), this fails startup loudly instead of silently
-        // leaving the whole machine with DNS aimed at a dead address.
-        #[cfg(target_os = "windows")]
-        let local_dns_sockets = if cfg.dns_hijack
-            && cfg.auto_route
-            && cfg.route_scope != TunRouteScope::Global
-            && self.tunnel.resolver().fake_ip_v4_gateway().is_some()
-        {
-            Some(local_dns::bind().await.map_err(|e| {
-                io::Error::other(format!("loopback DNS server startup failed: {e}"))
-            })?)
-        } else {
-            None
-        };
-
-        // When dns-hijack is on and we're in fake-IP mode, point the OS
-        // resolver at the loopback DNS server.  The backup + set calls into
-        // PowerShell (Get-DnsClientServerAddress / Set-DnsClientServerAddress)
-        // which can take tens of seconds on Windows, so run them on a
-        // blocking thread. The outer TUN_STARTUP_TIMEOUT guards the overall
-        // startup.
-        // Desktop global TUN: capture the original upstream DNS with
-        // temporary routes. No resolv.conf/networksetup/adapter DNS writes.
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        let _dns_routes = if cfg.dns_hijack
-            && cfg.auto_route
-            && cfg.route_scope == TunRouteScope::Global
-            && !cfg!(target_os = "linux")
-        {
-            Some(dns_routes::DnsRoutes::setup(
-                if_index,
-                cfg.inet6_address.is_some(),
-            )?)
-        } else {
-            None
-        };
-        let _dns_guard =
-            if cfg.dns_hijack && cfg.auto_route && cfg.route_scope != TunRouteScope::Global {
-                let t_dns = Instant::now();
-                let guard = match self.tunnel.resolver().fake_ip_v4_gateway() {
-                    Some(gateway) => {
-                        let g = tokio::task::spawn_blocking(move || dns::DnsGuard::setup(gateway))
-                            .await
-                            .map_err(|join_err| {
-                                Box::new(io::Error::other(format!(
-                                    "dns-guard spawn_blocking panicked: {join_err}"
-                                )))
-                            })?;
-                        let dns_ms = t_dns.elapsed().as_secs_f64() * 1000.0;
-                        let dns_active = g.is_some();
-                        info!("dns-guard setup took {dns_ms:.0}ms (active: {dns_active})");
-                        g
-                    }
-                    None => None,
-                };
-                guard
-            } else {
-                None
-            };
 
         // lwIP answers ICMP echo itself. The core task is spawned inside
         // `NetStack::new` (one live stack per process — await `core_done`
@@ -858,25 +908,13 @@ impl TunListener {
         let mut tasks = TaskGroup::new();
 
         #[cfg(target_os = "linux")]
-        if cfg.dns_hijack && cfg.auto_route && cfg.route_scope == TunRouteScope::Global {
+        if capture_dns {
             let capture = dns_capture::Capture::setup().await?;
             let tunnel = self.tunnel.clone();
             tasks.spawn(async move {
                 if let Err(e) = capture.run(tunnel).await {
                     warn!("system DNS capture stopped: {e}");
                 }
-            });
-        }
-
-        // Windows: start the local DNS server on the sockets bound earlier
-        // (before DnsGuard repointed system DNS at 127.0.0.1 / ::1). The
-        // server answers queries using the same DnsServer::handle_query
-        // pipeline as the TUN dns-hijack path, returning fake IPs.
-        #[cfg(target_os = "windows")]
-        if let Some(sockets) = local_dns_sockets {
-            let resolver = self.tunnel.resolver_slot();
-            tasks.spawn(async move {
-                local_dns::run(sockets, resolver).await;
             });
         }
 
@@ -1374,6 +1412,49 @@ mod tests {
     use std::task::{Context, Poll};
     use std::time::Duration;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
+
+    #[test]
+    fn dns_capture_requires_explicit_auto_route_in_both_scopes() {
+        use super::{TunListenerConfig, TunRouteScope};
+        let mut cfg = TunListenerConfig {
+            device: None,
+            mtu: 1500,
+            inet4_address: "172.19.0.1/30".parse().unwrap(),
+            inet6_address: None,
+            auto_route: true,
+            route_scope: TunRouteScope::FakeIp,
+            outbound_interface: None,
+            outbound_policy: Default::default(),
+            route_exclude: Vec::new(),
+            vpn_manual: Default::default(),
+            dns_hijack: true,
+            udp_timeout: Duration::from_secs(60),
+            max_connections: 0,
+            file_descriptor: None,
+        };
+        for scope in [TunRouteScope::FakeIp, TunRouteScope::Global] {
+            cfg.route_scope = scope;
+            for auto in [false, true] {
+                for hijack in [false, true] {
+                    for fd in [None, Some(42)] {
+                        cfg.auto_route = auto;
+                        cfg.dns_hijack = hijack;
+                        cfg.file_descriptor = fd;
+                        assert_eq!(
+                            cfg.captures_system_dns(),
+                            auto && hijack
+                                && fd.is_none()
+                                && cfg!(any(
+                                    target_os = "linux",
+                                    target_os = "macos",
+                                    target_os = "windows"
+                                ))
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

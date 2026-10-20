@@ -28,6 +28,12 @@ pub struct GeoDataConfig {
     pub geosite_url: String,
     /// `geodata.background-fetch`: missing DBs never block startup.
     pub background_fetch: bool,
+    /// Explicit download exit; no direct fallback when a proxy is named.
+    pub proxy: Option<String>,
+    /// Additional source URLs keyed by mmdb, asn or geosite.
+    pub sources: std::collections::HashMap<String, Vec<String>>,
+    /// Public GitHub mirror URL templates containing `{url}`.
+    pub mirrors: Vec<String>,
 }
 
 impl Default for GeoDataConfig {
@@ -42,6 +48,9 @@ impl Default for GeoDataConfig {
             asn_url: DEFAULT_ASN_URL.to_string(),
             geosite_url: DEFAULT_GEOSITE_URL.to_string(),
             background_fetch: false,
+            proxy: None,
+            sources: Default::default(),
+            mirrors: Vec::new(),
         }
     }
 }
@@ -88,6 +97,28 @@ pub fn parse_geodata(raw: Option<&RawGeoDataConfig>) -> Result<GeoDataConfig, an
     }
 
     let urls = r.url.as_ref();
+    for (id, links) in &r.sources {
+        if !matches!(id.as_str(), "mmdb" | "asn" | "geosite") || links.len() > 8 {
+            return Err(anyhow!("invalid geodata.sources resource or too many URLs"));
+        }
+        for link in links {
+            validate_url(link)?;
+        }
+    }
+    if r.mirrors.len() > 8 {
+        return Err(anyhow!("at most 8 geodata mirrors are allowed"));
+    }
+    for template in &r.mirrors {
+        if template.matches("{url}").count() != 1 {
+            return Err(anyhow!("geodata mirror must contain exactly one {{url}}"));
+        }
+        validate_url(&template.replace("{url}", "https://github.com/example/data"))?;
+    }
+    if let Some(urls) = urls {
+        for link in [&urls.mmdb, &urls.asn, &urls.geosite].into_iter().flatten() {
+            validate_url(link)?;
+        }
+    }
     Ok(GeoDataConfig {
         mmdb_path: r.mmdb_path.as_deref().map(PathBuf::from),
         asn_path: r.asn_path.as_deref().map(PathBuf::from),
@@ -104,7 +135,47 @@ pub fn parse_geodata(raw: Option<&RawGeoDataConfig>) -> Result<GeoDataConfig, an
             .and_then(|u| u.geosite.clone())
             .unwrap_or_else(|| DEFAULT_GEOSITE_URL.to_string()),
         background_fetch: r.background_fetch,
+        proxy: r.proxy.clone().filter(|s| !s.trim().is_empty()),
+        sources: r.sources.clone(),
+        mirrors: r.mirrors.clone(),
     })
+}
+
+fn validate_url(link: &str) -> Result<(), anyhow::Error> {
+    let url = url::Url::parse(link).map_err(|_| anyhow!("invalid geodata URL"))?;
+    if !matches!(url.scheme(), "https" | "http") || url.host_str().is_none() {
+        return Err(anyhow!("geodata URL must use HTTP or HTTPS"));
+    }
+    Ok(())
+}
+
+/// Sources are data, not routing code. Mirrors receive only public GitHub
+/// URLs; private subscription credentials are never copied to a third party.
+pub fn configured_links(geo: &GeoDataConfig, id: &str, primary: &str) -> Vec<String> {
+    let mut links = vec![primary.to_owned()];
+    if let Some(extra) = geo.sources.get(id) {
+        links.extend(extra.iter().cloned());
+    }
+    let originals = links.clone();
+    for link in originals {
+        let public = url::Url::parse(&link).ok().is_some_and(|u| {
+            matches!(
+                u.host_str(),
+                Some("github.com" | "raw.githubusercontent.com")
+            ) && u.username().is_empty()
+                && u.password().is_none()
+                && u.query().is_none()
+                && u.fragment().is_none()
+        });
+        if public {
+            links.extend(geo.mirrors.iter().map(|m| m.replace("{url}", &link)));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    links.retain(|link| seen.insert(link.clone()));
+    // Explicit sources have priority; bound the generated cross-product.
+    links.truncate(16);
+    links
 }
 
 /// Download `url` and atomically replace `dest` via a `.tmp` sibling.
@@ -167,7 +238,7 @@ pub async fn download_and_replace(
     let bytes = internal_http::fetch(url, proxy, &[])
         .await
         .map_err(|e| anyhow!("fetching {url}: {e}"))?;
-    write_atomically(dest, &tmp, &bytes).await
+    write_atomically(dest, &tmp, bytes, None).await
 }
 
 /// Which rule data a download is — decides how it is checked before it
@@ -176,6 +247,10 @@ pub async fn download_and_replace(
 pub enum GeoKind {
     /// A MaxMind DB (`Country.mmdb`, `GeoLite2-ASN.mmdb`).
     Mmdb,
+    /// Country-record MMDB, sing-box GeoIP MMDB or V2Ray GeoIP DAT.
+    Country,
+    /// ASN MMDB with actual autonomous_system_number records.
+    Asn,
     /// GeoSite data (`geosite.dat` protobuf or MetaCubeX `.mrs`).
     Geosite,
 }
@@ -228,6 +303,8 @@ pub fn mirrors(url: &str) -> Vec<String> {
 pub fn usable(kind: GeoKind, bytes: &[u8]) -> bool {
     match kind {
         GeoKind::Mmdb => maxminddb::Reader::from_source(bytes).is_ok(),
+        GeoKind::Country => meow_rules::geodata_format::validate_country(bytes).is_ok(),
+        GeoKind::Asn => meow_rules::geodata_format::validate_asn(bytes).is_ok(),
         GeoKind::Geosite => {
             // No category kept: the parse walks (and so checks) the whole
             // file without building any matcher.
@@ -255,16 +332,91 @@ pub async fn download_checked_from(
     d: &GeoDownload,
     proxies: &[Arc<dyn Proxy>],
 ) -> Result<String, anyhow::Error> {
+    download_checked_via(links, d, proxies, true).await
+}
+
+/// Small state for the UI. Payloads remain in the native loaders/on disk.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadStatus {
+    pub updating: bool,
+    pub checked_at: Option<u64>,
+    pub last_error: Option<String>,
+}
+
+static DOWNLOADS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<PathBuf, DownloadStatus>>,
+> = std::sync::LazyLock::new(Default::default);
+// One bounded data buffer process-wide, including background/manual jobs.
+static DOWNLOAD_SLOT: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(1)));
+const GEO_DOWNLOAD_MAX: usize = 64 * 1024 * 1024;
+
+pub fn download_status(path: &Path) -> DownloadStatus {
+    DOWNLOADS.lock().get(path).cloned().unwrap_or_default()
+}
+
+/// Explicit proxy requests fail closed, never retry via the physical NIC.
+/// Attempts are sequential and bodies capped, avoiding four database-sized
+/// racing response buffers and validation copies during a refresh.
+pub async fn download_checked_via(
+    links: &[String],
+    d: &GeoDownload,
+    proxies: &[Arc<dyn Proxy>],
+    direct: bool,
+) -> Result<String, anyhow::Error> {
+    let permit = Arc::new(
+        Arc::clone(&DOWNLOAD_SLOT)
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("data updater stopped"))?,
+    );
+    let status = DownloadStatus {
+        updating: true,
+        checked_at: None,
+        last_error: None,
+    };
+    DOWNLOADS.lock().insert(d.dest.clone(), status);
+    struct Finish(PathBuf);
+    impl Drop for Finish {
+        fn drop(&mut self) {
+            if let Some(s) = DOWNLOADS.lock().get_mut(&self.0) {
+                s.updating = false;
+            }
+        }
+    }
+    let _finish = Finish(d.dest.clone());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
     let mut errors = Vec::new();
     for link in links {
-        info!("geodata: downloading {} from {link}", d.dest.display());
-        let direct = std::iter::once(None);
-        let attempts = direct.chain(proxies.iter().map(Some)).map(|p| {
-            Box::pin(async move {
-                let bytes = internal_http::fetch(link, p, &[])
-                    .await
-                    .map_err(|e| anyhow!("{e}"))?;
-                if usable(d.kind, &bytes) {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        info!("geodata: downloading {}", d.dest.display());
+        let attempts = proxies.iter().map(Some).chain(direct.then_some(None));
+        for proxy in attempts {
+            let attempt = async {
+                let bytes = tokio::time::timeout_at(
+                    deadline,
+                    internal_http::fetch_capped(link, proxy, &[], GEO_DOWNLOAD_MAX),
+                )
+                .await
+                .map_err(|_| anyhow!("data download deadline exceeded"))?
+                .map_err(|e| anyhow!("{e}"))?;
+                // Full MMDB/DAT validation is CPU work. Keep it off the
+                // socket workers and keep its download permit alive even if
+                // the async caller is cancelled while parsing continues.
+                let kind = d.kind;
+                let validation_permit = Arc::clone(&permit);
+                let (bytes, valid) = crate::spawn_blocking_with_current_dispatcher(move || {
+                    let _permit = validation_permit;
+                    let valid = usable(kind, &bytes);
+                    meow_common::memory::release_free_memory();
+                    (bytes, valid)
+                })
+                .await
+                .map_err(|_| anyhow!("data validation worker failed"))?;
+                if valid {
                     Ok(bytes)
                 } else {
                     Err(anyhow!(
@@ -273,44 +425,89 @@ pub async fn download_checked_from(
                         bytes.len()
                     ))
                 }
-            })
-        });
-        match futures::future::select_ok(attempts).await {
-            Ok((bytes, _)) => {
-                let tmp = crate::unique_scratch_path(&d.dest);
-                write_atomically(&d.dest, &tmp, &bytes).await?;
-                return Ok(link.clone());
             }
-            Err(e) => {
-                warn!("geodata: {link}: {e:#}");
-                errors.push(format!("{link}: {e:#}"));
+            .await;
+            match attempt {
+                Ok(bytes) => {
+                    let tmp = crate::unique_scratch_path(&d.dest);
+                    write_atomically(&d.dest, &tmp, bytes, Some(Arc::clone(&permit))).await?;
+                    if let Some(s) = DOWNLOADS.lock().get_mut(&d.dest) {
+                        s.checked_at = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .ok()
+                            .map(|d| d.as_secs());
+                        s.last_error = None;
+                    }
+                    return Ok(link.clone());
+                }
+                Err(e) => {
+                    // URLs may carry credentials. Keep diagnostics useful without
+                    // copying arbitrary URL/token text into status or logs.
+                    warn!("geodata: download or validation failed for {:?}", d.kind);
+                    errors.push(e);
+                }
             }
         }
     }
-    Err(anyhow!("no usable download: {}", errors.join("; ")))
+    let message = format!(
+        "no usable data after {} attempts; previous file retained",
+        errors.len()
+    );
+    if let Some(s) = DOWNLOADS.lock().get_mut(&d.dest) {
+        s.last_error = Some(message.clone());
+    }
+    Err(anyhow!(message))
 }
 
-async fn write_atomically(dest: &Path, tmp: &Path, bytes: &[u8]) -> Result<(), anyhow::Error> {
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(tmp, bytes).await?;
-
-    if let Err(e) = tokio::fs::rename(tmp, dest).await {
-        let _ = tokio::fs::remove_file(tmp).await;
-        return Err(anyhow!(
-            "atomic rename {} → {}: {}",
-            tmp.display(),
-            dest.display(),
-            e
-        ));
-    }
-
-    info!(
-        "auto-update: {} updated ({} bytes)",
-        dest.display(),
-        bytes.len()
-    );
+async fn write_atomically(
+    dest: &Path,
+    tmp: &Path,
+    bytes: Vec<u8>,
+    hold: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+) -> Result<(), anyhow::Error> {
+    let size = bytes.len();
+    let destination = dest.to_path_buf();
+    let scratch = tmp.to_path_buf();
+    // tokio::fs::write on a borrowed slice copies the whole database.
+    // Move the existing buffer to the file worker, retaining the same
+    // permit if cancellation detaches this bounded write from its caller.
+    crate::spawn_blocking_with_current_dispatcher(move || {
+        use std::io::Write as _;
+        let _hold = hold;
+        let result = (|| -> Result<(), anyhow::Error> {
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                // Cache data remains readable when switching between the
+                // privileged service and the same user's ordinary core.
+                options.mode(0o644);
+            }
+            // A collision/symlink is not our scratch and must not be
+            // followed, truncated or removed during error cleanup.
+            let mut file = options.open(&scratch)?;
+            let written = (|| -> Result<(), anyhow::Error> {
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+                std::fs::rename(&scratch, &destination)?;
+                Ok(())
+            })();
+            drop(file);
+            if written.is_err() {
+                let _ = std::fs::remove_file(&scratch);
+            }
+            written
+        })();
+        drop(bytes);
+        meow_common::memory::release_free_memory();
+        result
+    })
+    .await??;
+    info!("auto-update: {} updated ({} bytes)", dest.display(), size);
     Ok(())
 }
 
@@ -318,6 +515,36 @@ async fn write_atomically(dest: &Path, tmp: &Path, bytes: &[u8]) -> Result<(), a
 mod tests {
     use super::*;
     use crate::raw::{RawGeoDataConfig, RawGeoDataUrls};
+
+    #[tokio::test]
+    async fn atomic_writer_keeps_last_good_and_does_not_touch_reserved_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("country.mmdb");
+        let reserved = dir.path().join("reserved.tmp");
+        std::fs::write(&dest, b"last-good").unwrap();
+        std::fs::write(&reserved, b"other-owner").unwrap();
+        assert!(write_atomically(&dest, &reserved, b"new".to_vec(), None)
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"last-good");
+        assert_eq!(std::fs::read(&reserved).unwrap(), b"other-owner");
+        let scratch = dir.path().join("owned.tmp");
+        write_atomically(&dest, &scratch, b"new".to_vec(), None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+        assert!(!scratch.exists());
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.tmp");
+            std::os::unix::fs::symlink(&reserved, &link).unwrap();
+            assert!(write_atomically(&dest, &link, b"bad".to_vec(), None)
+                .await
+                .is_err());
+            assert_eq!(std::fs::read(&reserved).unwrap(), b"other-owner");
+            assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        }
+    }
 
     /// A minimal IPv4 MaxMind DB: `0.0.0.0/1` → `{country: {iso_code}}`,
     /// the other half without data.
@@ -434,6 +661,42 @@ mod tests {
             vec!["https://example.com/x/rules.dat".to_owned()]
         );
         assert_eq!(mirrors(DEFAULT_ASN_URL), vec![DEFAULT_ASN_URL.to_owned()]);
+    }
+
+    #[test]
+    fn configured_mirrors_never_receive_private_urls() {
+        let geo = GeoDataConfig {
+            mirrors: vec!["https://mirror.example/{url}".into()],
+            sources: std::collections::HashMap::from([(
+                "mmdb".into(),
+                vec!["https://backup.example/country.mmdb".into()],
+            )]),
+            ..GeoDataConfig::default()
+        };
+        let public = "https://github.com/example/data/releases/latest/download/country.mmdb";
+        assert_eq!(
+            configured_links(&geo, "mmdb", public),
+            vec![
+                public.to_owned(),
+                "https://backup.example/country.mmdb".into(),
+                format!("https://mirror.example/{public}")
+            ]
+        );
+        for private in [
+            "https://github.com/example/data?token=test",
+            "https://test:synthetic@github.com/example/data",
+        ] {
+            let links = configured_links(&geo, "asn", private);
+            assert_eq!(links, vec![private.to_owned()]);
+        }
+        let mut raw = RawGeoDataConfig {
+            mirrors: vec!["https://mirror.example/no-placeholder".into()],
+            ..RawGeoDataConfig::default()
+        };
+        assert!(parse_geodata(Some(&raw)).is_err());
+        raw.mirrors.clear();
+        raw.sources.insert("typo".into(), vec![]);
+        assert!(parse_geodata(Some(&raw)).is_err());
     }
 
     #[test]

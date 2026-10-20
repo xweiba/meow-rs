@@ -1511,6 +1511,20 @@ pub async fn parse_dns_from_raw(
     dialer_registry: Option<&meow_proxy::dialer::ProxyRegistry>,
 ) -> Result<DnsConfig, anyhow::Error> {
     let geo = geodata::parse_geodata(raw.geodata.as_ref())?;
+    // Disabled DNS still validates hosts and builds its normal resolver,
+    // but needs no second country/ASN/GeoSite context beside routing's.
+    if !raw.dns.as_ref().is_some_and(|dns| dns.enable == Some(true)) {
+        return dns_parser::parse_dns(
+            raw,
+            geo.mmdb_path.as_deref(),
+            cache_dir,
+            proxy_registry,
+            None,
+            &HashMap::new(),
+            prior_resolver,
+        )
+        .await;
+    }
     let empty = rule_provider::PrefetchedPayloads::default();
     let payloads: &rule_provider::PrefetchedPayloads =
         prefetched_payloads.map_or(&empty, Arc::as_ref);
@@ -3235,10 +3249,10 @@ fn missing_geodata_downloads<'a>(
 
     let mut downloads = Vec::new();
     if geoip_missing {
-        downloads.push((&geo.mmdb_url, geoip_path, geodata::GeoKind::Mmdb));
+        downloads.push((&geo.mmdb_url, geoip_path, geodata::GeoKind::Country));
     }
     if asn_missing {
-        downloads.push((&geo.asn_url, asn_path, geodata::GeoKind::Mmdb));
+        downloads.push((&geo.asn_url, asn_path, geodata::GeoKind::Asn));
     }
     if geosite_missing {
         downloads.push((&geo.geosite_url, geosite_path, geodata::GeoKind::Geosite));
@@ -3421,12 +3435,30 @@ fn build_parser_context_at_opts(
             Some(Arc::new(meow_rules::country_index::CountryIndex::default()))
         }
         Some(trigger) => {
-            let reader = load_mmdb_mmap(geoip_path, "GeoIP", trigger)?;
+            let file = std::fs::File::open(geoip_path).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to load GeoIP database at {} required by rule {}: {e}",
+                    geoip_path.display(),
+                    trigger.trim()
+                )
+            })?;
+            if file.metadata()?.len() > 64 * 1024 * 1024 {
+                anyhow::bail!("GeoIP database exceeds 64 MiB limit");
+            }
+            // Updates atomically rename complete files; this mapping pins
+            // the old inode while an index is built and releases its pages
+            // immediately afterwards, without retaining a full byte buffer.
+            let mapped = unsafe { maxminddb::Mmap::map(&file) }.map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to load GeoIP database at {} required by rule {}: {e}",
+                    geoip_path.display(),
+                    trigger.trim()
+                )
+            })?;
             let allowed = collect_geoip_countries(&lines);
-            let index = meow_rules::country_index::CountryIndex::build(&reader, &allowed)
+            let index = meow_rules::country_index::CountryIndex::from_bytes(&mapped, &allowed)
                 .map_err(|e| anyhow::anyhow!("failed to build GeoIP country index: {e}"))?;
-            // reader is mmap-backed — pages are returned to the OS on drop.
-            drop(reader);
+            drop(mapped);
             Some(Arc::new(index))
         }
         None => None,
@@ -3484,9 +3516,30 @@ fn load_mmdb_mmap(
     kind: &str,
     trigger: &str,
 ) -> Result<maxminddb::Reader<maxminddb::Mmap>, anyhow::Error> {
-    // Safety: the file is read-only and not modified during the reader's
-    // lifetime (dropped before the function returns to the caller).
-    let reader = unsafe { maxminddb::Reader::open_mmap(path) }.map_err(|e| {
+    let file = std::fs::File::open(path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to load {kind} database at {} required by rule {}: {e}",
+            path.display(),
+            trigger.trim()
+        )
+    })?;
+    if file.metadata()?.len() > 64 * 1024 * 1024 {
+        anyhow::bail!("{kind} database exceeds 64 MiB limit");
+    }
+    // Updates replace an inode, never mutate its mapped contents. Validate
+    // the record type as well: an ASN setting pointed at a country DB must
+    // report an error instead of producing an empty matching index.
+    let mapped = unsafe { maxminddb::Mmap::map(&file) }.map_err(|e| anyhow::anyhow!(e))?;
+    if kind == "GeoLite2-ASN" {
+        meow_rules::geodata_format::validate_asn(&mapped).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to load {kind} database at {} required by rule {}: {e}",
+                path.display(),
+                trigger.trim()
+            )
+        })?;
+    }
+    let reader = maxminddb::Reader::from_source(mapped).map_err(|e| {
         anyhow::anyhow!(
             "Failed to load {} database at {}\n  required by rule: {}\n  underlying error: {}",
             kind,
@@ -5796,6 +5849,9 @@ mod geoip_context_tests {
         providers.insert(
             "my-provider".to_string(),
             raw::RawRuleProvider {
+                background_fetch: false,
+                sources: Vec::new(),
+                mirrors: Vec::new(),
                 provider_type: "inline".to_string(),
                 behavior: "classical".to_string(),
                 format: None,
@@ -5824,6 +5880,9 @@ mod geoip_context_tests {
     #[test]
     fn scan_lines_include_prefetched_provider_payloads() {
         let provider = || raw::RawRuleProvider {
+            background_fetch: false,
+            sources: Vec::new(),
+            mirrors: Vec::new(),
             provider_type: "file".to_string(),
             behavior: "classical".to_string(),
             format: None,
@@ -5961,7 +6020,7 @@ mod geoip_context_tests {
         let missing = missing_geodata_for(&raw, &geo);
         assert_eq!(
             missing.iter().map(|d| d.kind).collect::<Vec<_>>(),
-            vec![geodata::GeoKind::Mmdb, geodata::GeoKind::Geosite]
+            vec![geodata::GeoKind::Country, geodata::GeoKind::Geosite]
         );
         let want: Vec<PathBuf> = missing.into_iter().map(|d| d.dest).collect();
         assert_eq!(

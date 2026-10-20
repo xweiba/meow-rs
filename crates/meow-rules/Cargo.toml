@@ -18,6 +18,9 @@ smol_str = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 zstd = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+flate2 = "1.1.9"
 
 [[bench]]
 name = "rules_bench"

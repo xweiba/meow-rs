@@ -4,6 +4,7 @@
 //! plus the built-in web dashboard.
 
 pub mod checkin;
+pub mod geodata;
 pub mod log_stream;
 mod network;
 pub mod paopao;

@@ -31,6 +31,11 @@ pub fn parse_subscription(body: &str) -> Result<ParseResult, ParseError> {
     }
     if text.starts_with('{') || text.starts_with('[') {
         if let Some(json) = try_json(&text) {
+            // Clash subscriptions can be JSON (also valid YAML). Keep their
+            // provider metadata instead of treating them as sing-box JSON.
+            if matches!(json.get("proxies"), Dv::List(_)) {
+                return Ok(parse_clash(&text));
+            }
             return Ok(parse_json(&json));
         }
     }

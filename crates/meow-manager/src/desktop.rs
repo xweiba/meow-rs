@@ -85,6 +85,7 @@ impl HelperClient {
         use std::os::unix::net::UnixStream;
         let mut s = UnixStream::connect(&self.socket).ok()?;
         s.set_read_timeout(Some(timeout)).ok()?;
+        s.set_write_timeout(Some(timeout)).ok()?;
         writeln!(s, "{req}").ok()?;
         let mut line = String::new();
         BufReader::new(&s).read_line(&mut line).ok()?;
@@ -177,6 +178,9 @@ pub struct DesktopCore {
     on_helper: bool,
     /// The running core's run directory (its [`BUILD_FILE`]).
     run_dir: Option<PathBuf>,
+    /// This core may have returned fake IPs; flush once after confirmed
+    /// exit, including a crash while the Flutter panel is absent.
+    dns_cache_pending: bool,
     digests: Digests,
 }
 
@@ -233,6 +237,7 @@ impl DesktopCore {
             adopted: None,
             on_helper: false,
             run_dir: None,
+            dns_cache_pending: false,
             digests: Digests::default(),
         };
         core.adopt();
@@ -258,9 +263,19 @@ impl DesktopCore {
     /// A core left running by an earlier run of the tray (it crashed, was
     /// updated): taken on as it runs (no gap), not started again.
     fn adopt(&mut self) {
-        if self.helper.as_ref().is_some_and(HelperClient::running) {
+        let helper_running = self.helper.as_ref().and_then(HelperClient::running_status);
+        // The first helper query can fail too, before on_helper has ever
+        // been set. Retain a previous TUN run provisionally until status
+        // confirms exit; otherwise boot may replace a healthy service core.
+        let helper_unresolved = helper_running.is_none()
+            && self.helper.as_ref().is_some_and(HelperClient::installed)
+            && Manager::read_keys(&self.helper_run().config)
+                .get("tun")
+                .is_some_and(|t| t["enable"] == true);
+        if helper_running == Some(true) || helper_unresolved {
             self.on_helper = true;
             self.run_dir = Some(self.helper_run().dir);
+            self.dns_cache_pending = true;
             return;
         }
         let pid_file = self.user_run().dir.join("core.pid");
@@ -270,6 +285,9 @@ impl DesktopCore {
         if let Some(pid) = pid.filter(|&p| is_core(p, &self.meow)) {
             self.adopted = Some(pid);
             self.run_dir = Some(self.user_run().dir);
+            self.dns_cache_pending = Manager::read_keys(&self.user_run().config)
+                .get("tun")
+                .is_some_and(|t| t["enable"] == true);
         }
     }
 
@@ -288,6 +306,16 @@ impl DesktopCore {
         self.run_dir = Some(dir.to_owned());
     }
 
+    fn finish_dns_cleanup(&mut self) {
+        if self.child.is_none()
+            && self.adopted.is_none()
+            && !self.on_helper
+            && std::mem::take(&mut self.dns_cache_pending)
+        {
+            crate::dns_cache::flush_after_capture();
+        }
+    }
+
     fn stop_child(&mut self) {
         if let Some(mut c) = self.child.take() {
             terminate(c.id());
@@ -296,7 +324,11 @@ impl DesktopCore {
                 std::thread::sleep(Duration::from_millis(50));
             }
             let _ = c.kill();
-            let _ = c.wait();
+            if c.wait().is_err() {
+                // Do not lose the process handle or flush on an
+                // unconfirmed exit; a later stop/status can retry.
+                self.child = Some(c);
+            }
         }
         if let Some(pid) = self.adopted.take() {
             terminate(pid);
@@ -306,15 +338,33 @@ impl DesktopCore {
             }
             if alive(pid) {
                 kill(pid);
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < deadline && alive(pid) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if alive(pid) {
+                    // Keep ownership so stop/status can retry and never
+                    // flush while this generation could still return fake IPs.
+                    self.adopted = Some(pid);
+                }
             }
         }
-        let _ = std::fs::remove_file(self.user_run().dir.join("core.pid"));
+        if self.adopted.is_none() && self.child.is_none() {
+            let _ = std::fs::remove_file(self.user_run().dir.join("core.pid"));
+        }
     }
 
     fn stop_helper(&mut self) {
         if self.on_helper {
             if let Some(h) = &self.helper {
-                h.call(&json!({"op": "stop"}), Duration::from_secs(15));
+                let stopped = h.call(&json!({"op": "stop"}), Duration::from_secs(15));
+                if !stopped.is_some_and(|v| v["ok"] == true || v["running"] == false)
+                    && h.running_status() != Some(false)
+                {
+                    // A timeout does not establish that interception ended.
+                    tracing::warn!("helper stop not confirmed; DNS cache cleanup remains pending");
+                    return;
+                }
             }
             self.on_helper = false;
         }
@@ -371,10 +421,18 @@ impl Core for DesktopCore {
         // One core at a time: the other one goes first.
         self.stop_child();
         self.stop_helper();
+        if self.on_helper || self.adopted.is_some() || self.child.is_some() {
+            return Err(Failure::new("previous core has not confirmed shutdown"));
+        }
+        self.finish_dns_cleanup();
         self.run_dir = None;
         let _ = std::fs::remove_file(run.dir.join(BUILD_FILE));
         if !helper {
-            return self.start_child(run);
+            let result = self.start_child(run);
+            if result.is_ok() {
+                self.dns_cache_pending = tun;
+            }
+            return result;
         }
         let Some(h) = &self.helper else {
             unreachable!()
@@ -388,6 +446,7 @@ impl Core for DesktopCore {
         match reply {
             Some(v) if v["ok"] == true => {
                 self.on_helper = true;
+                self.dns_cache_pending = tun;
                 // The helper runs its copy of `self.meow`, made at this start.
                 self.note_build(&run.dir);
                 Ok(())
@@ -399,14 +458,25 @@ impl Core for DesktopCore {
                     .to_owned(),
                 log: v["log"].as_str().map(str::to_owned),
             }),
-            None => Err(Failure::new("no answer from the privileged helper")),
+            None => {
+                // The request may have succeeded but its reply was lost.
+                // Keep ownership so status/stop can reconcile it without
+                // leaking a privileged TUN core after a startup timeout.
+                self.on_helper = true;
+                self.dns_cache_pending = tun;
+                self.run_dir = Some(run.dir.clone());
+                Err(Failure::new("no answer from the privileged helper"))
+            }
         }
     }
 
     fn stop(&mut self) {
         self.stop_child();
         self.stop_helper();
-        self.run_dir = None;
+        self.finish_dns_cleanup();
+        if self.child.is_none() && self.adopted.is_none() && !self.on_helper {
+            self.run_dir = None;
+        }
     }
 
     /// The build noted at its start against `self.meow` now (an update of
@@ -426,7 +496,8 @@ impl Core for DesktopCore {
 
     fn running(&mut self) -> bool {
         if let Some(c) = &mut self.child {
-            if matches!(c.try_wait(), Ok(None)) {
+            // Failure to inspect a child is not evidence of its exit.
+            if !matches!(c.try_wait(), Ok(Some(_))) {
                 return true;
             }
             self.child = None;
@@ -437,11 +508,15 @@ impl Core for DesktopCore {
             }
             self.adopted = None;
         }
-        self.on_helper
-            && self
-                .helper
-                .as_ref()
-                .is_some_and(|h| h.running_status() != Some(false))
+        if self.on_helper {
+            match self.helper.as_ref().and_then(HelperClient::running_status) {
+                Some(false) => self.on_helper = false,
+                // A transient API failure must never be mistaken for exit.
+                _ => return true,
+            }
+        }
+        self.finish_dns_cleanup();
+        false
     }
 
     fn place(&self, tun: bool) -> Option<Run> {
@@ -493,8 +568,33 @@ fn kill(pid: u32) {
 
 #[cfg(unix)]
 fn alive(pid: u32) -> bool {
+    // A zombie retains its PID until its original parent reaps it, but
+    // owns no sockets/routes and cannot answer DNS. Waiting for kill(0)
+    // alone prevented an adopted core from ever completing shutdown.
+    #[cfg(target_os = "linux")]
+    if std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| {
+            s.rsplit_once(") ")
+                .and_then(|(_, tail)| tail.chars().next())
+        })
+        .is_some_and(|state| state == 'Z' || state == 'X')
+    {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    if SysCommands
+        .out("/bin/ps", &["-o", "stat=", "-p", &pid.to_string()])
+        .is_some_and(|s| s.starts_with('Z'))
+    {
+        return false;
+    }
     // SAFETY: signal 0 only checks.
-    i32::try_from(pid).is_ok_and(|p| unsafe { libc::kill(p, 0) } == 0)
+    i32::try_from(pid).is_ok_and(|p| {
+        p > 1
+            && (unsafe { libc::kill(p, 0) } == 0
+                || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+    })
 }
 
 #[cfg(windows)]
@@ -509,12 +609,18 @@ fn kill(pid: u32) {
 
 #[cfg(windows)]
 fn alive(pid: u32) -> bool {
-    SysCommands
-        .out(
-            "tasklist",
-            &["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"],
-        )
-        .is_some_and(|o| o.contains(&format!("\"{pid}\"")))
+    let output = SysCommands.out(
+        "tasklist",
+        &["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"],
+    );
+    tasklist_alive(pid, output.as_deref())
+}
+
+/// A failed Windows process query is unknown, just like EPERM on Unix:
+/// retain ownership and defer DNS cleanup until exit is confirmed.
+#[cfg(any(windows, test))]
+fn tasklist_alive(pid: u32, output: Option<&str>) -> bool {
+    pid > 1 && output.is_none_or(|o| o.contains(&format!("\"{pid}\"")))
 }
 
 /// Whether `pid` runs the core (`meow`), not another program given the
@@ -525,12 +631,32 @@ fn is_core(pid: u32, meow: &Path) -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
-        exe.is_some_and(|e| {
-            e == meow
-                || e.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with("meow"))
-        })
+        let proc = PathBuf::from(format!("/proc/{pid}"));
+        match std::fs::read_link(proc.join("exe")) {
+            Ok(e) => {
+                e == meow
+                    || e.file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with("meow"))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                use std::os::unix::{ffi::OsStrExt as _, fs::MetadataExt as _};
+                // File capabilities make the core non-dumpable, hiding exe
+                // even from its user. Require that user plus the exact
+                // launch path and kernel task name; a PID/name alone is
+                // insufficient evidence for adopting or terminating it.
+                // SAFETY: geteuid has no preconditions.
+                let uid = unsafe { libc::geteuid() };
+                let same_user = std::fs::metadata(&proc).is_ok_and(|m| m.uid() == uid);
+                let argv = std::fs::read(proc.join("cmdline")).unwrap_or_default();
+                let comm = std::fs::read(proc.join("comm")).unwrap_or_default();
+                let name = meow.file_name().map(|n| n.as_bytes()).unwrap_or_default();
+                same_user
+                    && !name.is_empty()
+                    && argv.split(|&c| c == 0).next() == Some(meow.as_os_str().as_bytes())
+                    && comm.strip_suffix(b"\n").unwrap_or(&comm) == &name[..name.len().min(15)]
+            }
+            Err(_) => false,
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -573,6 +699,9 @@ pub fn can_tun(meow: &Path, helper: Option<&Path>) -> bool {
         // SAFETY: a size query (null buffer, 0 length) on valid C strings.
         let n = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
         n > 0
+            && meow
+                .to_str()
+                .is_some_and(|exe| SysCommands.ok(exe, &["network-permissions", "check"]))
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -819,6 +948,107 @@ mod tests {
     use super::*;
 
     #[test]
+    fn windows_process_query_failure_is_not_a_confirmed_exit() {
+        assert!(tasklist_alive(123, None));
+        assert!(tasklist_alive(123, Some(r#""meow.exe","123","Console""#)));
+        assert!(!tasklist_alive(123, Some(r#""meow.exe","1234","Console""#)));
+        assert!(!tasklist_alive(123, Some("INFO: No tasks are running.")));
+        assert!(!tasklist_alive(0, None));
+        assert!(!tasklist_alive(1, None));
+    }
+
+    /// Serve only a local protocol fixture; never start a real helper,
+    /// change resolver settings, or invalidate the host's DNS caches.
+    fn helper_fixture(path: &Path, replies: &[&str]) -> std::thread::JoinHandle<Vec<Value>> {
+        use std::os::unix::net::UnixListener;
+        let listener = UnixListener::bind(path).unwrap();
+        let replies: Vec<String> = replies.iter().map(|s| (*s).to_owned()).collect();
+        std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for reply in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                std::io::BufRead::read_line(&mut std::io::BufReader::new(&stream), &mut request)
+                    .unwrap();
+                requests.push(serde_json::from_str(&request).unwrap());
+                if !reply.is_empty() {
+                    writeln!(stream, "{reply}").unwrap();
+                }
+            }
+            requests
+        })
+    }
+
+    #[test]
+    fn first_unknown_helper_reply_preserves_a_previous_tun_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("helper.sock");
+        let run = dir.path().join("core-service");
+        std::fs::create_dir(&run).unwrap();
+        let config = br#"{"tun":{"enable":true}}"#;
+        std::fs::write(run.join("config.json"), config).unwrap();
+        let server = helper_fixture(
+            &path,
+            &[
+                r#"{"error":"temporarily busy"}"#,
+                r#"{"running":true}"#,
+                r#"{"running":false}"#,
+            ],
+        );
+        let mut core = DesktopCore::new(dir.path().join("meow"), dir.path().into(), Some(path));
+        assert!(core.on_helper);
+        assert_eq!(core.run_dir, Some(run.clone()));
+        assert!(core.running());
+        assert!(core.dns_cache_pending);
+        // Cache commands have their own injected-command tests.
+        core.dns_cache_pending = false;
+        assert!(!core.running());
+        assert_eq!(std::fs::read(run.join("config.json")).unwrap(), config);
+        assert!(server.join().unwrap().iter().all(|r| r["op"] == "status"));
+    }
+
+    #[test]
+    fn lost_start_reply_keeps_helper_ownership_until_stop_is_confirmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("helper.sock");
+        let server = helper_fixture(
+            &path,
+            &[
+                r#"{"running":false}"#,
+                "", // Start was accepted, but the connection lost its reply.
+                r#"{"error":"busy"}"#,
+                r#"{"error":"busy"}"#,
+                r#"{"ok":true}"#,
+            ],
+        );
+        let mut core = DesktopCore::new(dir.path().join("meow"), dir.path().into(), Some(path));
+        let run = core.place(true).unwrap();
+        std::fs::create_dir_all(&run.dir).unwrap();
+        let config = br#"{"tun":{"enable":true}}"#;
+        std::fs::write(&run.config, config).unwrap();
+        assert!(core.start(&run).is_err());
+        assert!(core.on_helper);
+        assert!(core.dns_cache_pending);
+        core.stop();
+        assert!(core.on_helper, "an unconfirmed stop retains ownership");
+        assert!(core.dns_cache_pending);
+        assert_eq!(core.run_dir, Some(run.dir.clone()));
+        core.dns_cache_pending = false;
+        core.stop();
+        assert!(!core.on_helper);
+        assert!(core.run_dir.is_none());
+        assert_eq!(std::fs::read(&run.config).unwrap(), config);
+        let requests = server.join().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|r| r["op"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["status", "start", "stop", "status", "stop"]
+        );
+    }
+
+    #[test]
     fn helper_unknown_status_keeps_the_confirmed_core_running() {
         use std::os::unix::net::UnixListener;
         let dir = tempfile::tempdir().unwrap();
@@ -828,7 +1058,8 @@ mod tests {
             for reply in ["{\"error\":\"temporarily busy\"}", "{\"running\":false}"] {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = String::new();
-                std::io::BufRead::read_line(&mut std::io::BufReader::new(&stream), &mut request).unwrap();
+                std::io::BufRead::read_line(&mut std::io::BufReader::new(&stream), &mut request)
+                    .unwrap();
                 writeln!(stream, "{reply}").unwrap();
             }
         });
@@ -845,18 +1076,142 @@ mod tests {
     fn fake_meow(dir: &Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         let p = dir.join("meow");
+        let exec = if cfg!(target_os = "macos") {
+            "exec \"$(dirname \"$0\")/fixture-core/meow\" \"$@\""
+        } else {
+            "exec \"$(dirname \"$0\")/meow-sleep\" 30"
+        };
         std::fs::write(
             &p,
-            "#!/bin/sh\nif [ \"$1\" = paopao ]; then cat > \"$(dirname \"$0\")/apply.json\"; \
+            [
+                "#!/bin/sh\nif [ \"$1\" = paopao ]; then cat > \"$(dirname \"$0\")/apply.json\"; \
 echo '{\"next\":true}'; exit 0; fi\n\
 grep -q refuse \"$2\" && { echo 'bad config' >&2; exit 3; }\n\
-echo \"$@\" > \"$4/args\"; exec \"$(dirname \"$0\")/meow-sleep\" 30\n",
+echo \"$@\" > \"$4/args\"; ",
+                exec,
+                "\n",
+            ]
+            .concat(),
         )
         .unwrap();
         // As the core shows in the process list.
+        #[cfg(not(target_os = "macos"))]
         std::fs::copy("/bin/sleep", dir.join("meow-sleep")).unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            // macOS adoption requires an actual executable named meow.
+            // Keep the script for builder/digest tests, but exec an owned
+            // binary with the real -f/-d arguments, not a renamed sleep.
+            let child_dir = dir.join("fixture-core");
+            std::fs::create_dir(&child_dir).unwrap();
+            let child = child_dir.join("meow");
+            let source = child_dir.join("meow.c");
+            std::fs::write(
+                &source,
+                "#include <unistd.h>\n#include <string.h>\n#include <stdio.h>\n\
+                 int main(int argc, char **argv) {\n\
+                 if (argc != 5 || strcmp(argv[1], \"-f\") || strcmp(argv[3], \"-d\")) return 64;\n\
+                 char marker[4096];\n\
+                 int n = snprintf(marker, sizeof(marker), \"%s/fixture.ready\", argv[4]);\n\
+                 if (n < 0 || n >= (int)sizeof(marker)) return 65;\n\
+                 FILE *ready = fopen(marker, \"w\");\n\
+                 if (!ready) return 65;\n\
+                 if (fprintf(ready, \"%ld\\n\", (long)getpid()) < 0) return 65;\n\
+                 if (fclose(ready)) return 65;\n\
+                 sleep(30); return 0; }\n",
+            )
+            .unwrap();
+            let status = Command::new("/usr/bin/cc")
+                .arg(&source)
+                .arg("-o")
+                .arg(&child)
+                .status()
+                .expect("compile the owned macOS wait fixture");
+            assert!(status.success(), "fixture compilation failed: {status}");
+            let status = Command::new("/usr/bin/codesign")
+                .args(["--force", "--sign", "-"])
+                .arg(&child)
+                .status()
+                .expect("ad-hoc sign the owned macOS wait fixture");
+            assert!(status.success(), "fixture codesign failed: {status}");
+        }
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         p
+    }
+
+    /// Wait for this PID's native entry point, not merely its launcher.
+    /// A marker for a different PID cannot establish readiness.
+    #[cfg(target_os = "macos")]
+    fn wait_for_fake_meow(core: &mut DesktopCore, run: &Run) {
+        let pid = core.child.as_ref().expect("fixture child started").id();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let ready = std::fs::read_to_string(run.dir.join("fixture.ready"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok());
+            if ready == Some(pid) && is_core(pid, &core.meow) {
+                return;
+            }
+            if !core.running() || Instant::now() >= deadline {
+                let identity = SysCommands.out(
+                    "/bin/ps",
+                    &["-o", "comm=,args=,stat=", "-p", &pid.to_string()],
+                );
+                let log = log_tail(&run.dir.join("core.log"));
+                core.stop();
+                panic!(
+                    "native fixture {pid} not ready: marker={ready:?}, ps={identity:?}, log={log}"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restricted_user_core_is_adopted_by_exact_path() {
+        // Root may inspect non-dumpable processes, so cannot exercise the
+        // permission-denied branch. No capabilities or system changes needed.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let source = d.path().join("restricted.c");
+        let meow = d.path().join("meow");
+        std::fs::write(&source, "#include <sys/prctl.h>\n#include <unistd.h>\n#include <stdio.h>\nint main(int argc,char **argv) { if(prctl(PR_SET_DUMPABLE,0)) return 2; FILE *f=fopen(argv[1],\"w\"); if(!f) return 3; fclose(f); sleep(30); return 0; }\n").unwrap();
+        assert!(Command::new("cc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&meow)
+            .status()
+            .unwrap()
+            .success());
+        let marker = d.path().join("ready");
+        let mut child = Command::new(&meow).arg(&marker).spawn().unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !marker.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(marker.exists(), "restricted fixture did not start");
+            let error = std::fs::read_link(format!("/proc/{}/exe", child.id())).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(is_core(child.id(), &meow));
+            assert!(!is_core(child.id(), &d.path().join("other/meow")));
+            let data = d.path().join("data");
+            std::fs::create_dir_all(data.join("meow")).unwrap();
+            std::fs::write(data.join("meow/core.pid"), child.id().to_string()).unwrap();
+            let mut adopted = DesktopCore::new(meow, data, None);
+            assert!(adopted.running());
+            assert_eq!(adopted.adopted, Some(child.id()));
+            adopted.stop();
+            assert!(!adopted.running());
+        });
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Err(error) = result {
+            std::panic::resume_unwind(error);
+        }
     }
 
     #[test]
@@ -871,6 +1226,8 @@ echo \"$@\" > \"$4/args\"; exec \"$(dirname \"$0\")/meow-sleep\" 30\n",
         std::fs::create_dir_all(&run.dir).unwrap();
         std::fs::write(&run.config, "{}").unwrap();
         core.start(&run).unwrap();
+        #[cfg(target_os = "macos")]
+        wait_for_fake_meow(&mut core, &run);
         assert!(core.running());
         let pid: u32 = std::fs::read_to_string(run.dir.join("core.pid"))
             .unwrap()
@@ -903,6 +1260,8 @@ echo \"$@\" > \"$4/args\"; exec \"$(dirname \"$0\")/meow-sleep\" 30\n",
         std::fs::create_dir_all(&run.dir).unwrap();
         std::fs::write(&run.config, "{}").unwrap();
         core.start(&run).unwrap();
+        #[cfg(target_os = "macos")]
+        wait_for_fake_meow(&mut core, &run);
         assert_eq!(core.same_build(), Some(true));
         // A tray started again (the app the same) takes it on as the same.
         let mut again = DesktopCore::new(meow.clone(), data.clone(), None);
@@ -920,6 +1279,8 @@ echo \"$@\" > \"$4/args\"; exec \"$(dirname \"$0\")/meow-sleep\" 30\n",
         assert_eq!(updated.same_build(), None);
         // Started again: the app's build.
         updated.start(&run).unwrap();
+        #[cfg(target_os = "macos")]
+        wait_for_fake_meow(&mut updated, &run);
         assert_eq!(updated.same_build(), Some(true));
         updated.stop();
         assert_eq!(updated.same_build(), None);

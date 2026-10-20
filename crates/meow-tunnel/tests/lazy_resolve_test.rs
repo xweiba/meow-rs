@@ -65,6 +65,7 @@ async fn lazy_resolves_ip_when_scan_reaches_ipcidr_rule() {
         rule_name,
         rule_payload: _payload,
         route: _route,
+        ..
     } = tunnel
         .inner()
         .resolve_proxy_lazy(&mut md)
@@ -102,6 +103,7 @@ async fn lazy_skips_dns_when_domain_rule_matches_first() {
         rule_name,
         rule_payload: _payload,
         route: _route,
+        ..
     } = tunnel
         .inner()
         .resolve_proxy_lazy(&mut md)
@@ -137,6 +139,7 @@ async fn lazy_falls_through_to_final_when_nothing_matches() {
         rule_name,
         rule_payload: _payload,
         route: _route,
+        ..
     } = tunnel
         .inner()
         .resolve_proxy_lazy(&mut md)

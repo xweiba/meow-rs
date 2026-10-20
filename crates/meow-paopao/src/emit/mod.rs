@@ -106,6 +106,9 @@ pub struct ClashConfig {
     pub config: Map<String, Value>,
     /// Lines the core can't run (plain HTTP …), left out of the pool.
     pub unsupported: usize,
+    /// Configuration is unusable when a referenced provider is missing or
+    /// unsafe. Callers must retain their running configuration on this error.
+    pub config_error: Option<String>,
 }
 
 impl std::fmt::Debug for ClashConfig {
@@ -224,8 +227,7 @@ impl<'a> Plan<'a> {
                 .dns_fallbacks
                 .iter()
                 .find(|t| self.known(t))
-                .map(String::as_str)
-                .unwrap_or("REJECT")
+                .map_or("REJECT", String::as_str)
         }
     }
 
@@ -323,14 +325,18 @@ impl<'a> Plan<'a> {
             .encrypted_dns_rules
             .as_ref()
             .filter(|_| self.input.runtime.rules_profile.is_none())
-            .map(|dns| dns.lines(target))
-            .unwrap_or_else(|| {
-                profile
-                    .encrypted_dns_rules
-                    .iter()
-                    .map(|r| crate::rule_profile::RuleProfile::expand(r, &[("dnsPolicy", target)]))
-                    .collect()
-            });
+            .map_or_else(
+                || {
+                    profile
+                        .encrypted_dns_rules
+                        .iter()
+                        .map(|r| {
+                            crate::rule_profile::RuleProfile::expand(r, &[("dnsPolicy", target)])
+                        })
+                        .collect()
+                },
+                |dns| dns.lines(target),
+            );
         stages.insert(
             "encrypted-dns",
             encrypted
@@ -617,12 +623,31 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
         .iter()
         .map(|g| {
             let mut m = clash_group(g, input.strategy);
-            // 后台测速间隔: how often a smart group re-probes its lines.
-            if let Some(s) = rt
-                .probe_interval
-                .filter(|_| m.get("type").and_then(Value::as_str) == Some("smart"))
-            {
-                m.insert("interval".into(), s.into());
+            // An explicit global probe setting applies to every periodic
+            // automatic group, including raw subscription groups. Selectors
+            // and relays do not probe and must not gain an interval field.
+            if matches!(
+                m.get("type").and_then(Value::as_str),
+                Some("smart" | "url-test" | "fallback" | "load-balance")
+            ) {
+                // A raw group's original interval survives when the user
+                // has not chosen a global override. Do not apply imported
+                // intervals to generated layered groups with similar tags.
+                let imported = g.raw_type.as_ref().and_then(|_| {
+                    input
+                        .split
+                        .groups
+                        .iter()
+                        .find(|raw| raw.tag == g.tag)
+                        .and_then(|raw| raw.interval)
+                });
+                if let Some(interval) = rt
+                    .probe_interval
+                    .map(Value::from)
+                    .or_else(|| imported.map(Value::from))
+                {
+                    m.insert("interval".into(), interval);
+                }
             }
             Value::Object(m)
         })
@@ -646,10 +671,26 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
         plan.profile().template("ownApp", &[("app", &app)])
     });
     let rules = plan.rules(speed_test.is_some(), own_app, route_policies, &mods.rules);
+    let providers = crate::plan::rule_providers::referenced_providers(
+        &rules,
+        &plan.profile().rule_providers,
+        &input.split.providers,
+        |proxy| plan.known(proxy),
+    );
+    let config_error = match providers {
+        Ok(providers) => {
+            if !providers.is_empty() {
+                c.insert("rule-providers".into(), providers.into());
+            }
+            None
+        }
+        Err(error) => Some(error),
+    };
     c.insert("rules".into(), rules.into());
     ClashConfig {
         config: c,
         unsupported: input.pool.unsupported,
+        config_error,
     }
 }
 

@@ -32,6 +32,18 @@ def tables():
     return subprocess.check_output(["nft", "list", "tables"], text=True)
 
 
+def system_query(name, use_cache=True):
+    try:
+        result = subprocess.run(
+            ["resolvectl", "--cache=" + ("yes" if use_cache else "no"), "--type=A", "query", name],
+            text=True, capture_output=True, timeout=8,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "system resolver query timed out"
+    return result.returncode, result.stdout + result.stderr
+
+
 def query(server, iface, tcp=False, bound=False, name="dns-capture.invalid"):
     body = b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0"
     wire = struct.pack("!6H", 1234, 0x100, 1, 0, 0, 0) + body + struct.pack("!2H", 1, 1)
@@ -90,16 +102,23 @@ def main():
     parser.add_argument("--iface", required=True)
     parser.add_argument("--upstream", default="223.5.5.5", help="reachable real DNS upstream")
     parser.add_argument("--core-user", help="exercise a file-capability core as this existing user")
+    parser.add_argument("--check-system-cache", action="store_true", help="require running systemd-resolved; verify cached answers disappear on exit")
     args = parser.parse_args()
     assert os.geteuid() == 0
     assert "paopao_dns_" not in tables(), "a DNS capture already runs on this test host"
     original = Path("/etc/resolv.conf").read_bytes()
     query(args.upstream, args.iface, name="example.com")
+    system_dns_healthy = args.check_system_cache and system_query("example.com")[0] == 0
+    if args.check_system_cache and not system_dns_healthy:
+        print("baseline system DNS unavailable; checking direct upstream after shutdown", flush=True)
     with tempfile.TemporaryDirectory(prefix="paopao-dns-e2e-") as folder:
         config = {
             "mode": "rule", "ipv6": False, "log-level": "debug",
             "dns": {"enable": True, "nameserver": [args.upstream]},
-            "paopao-hosts": [{"type": "exact", "value": "dns-capture.invalid", "address": "192.0.2.123"}],
+            "paopao-hosts": [
+                {"type": "exact", "value": "dns-capture.invalid", "address": "192.0.2.123"},
+                {"type": "exact", "value": "dns-cache-capture.example.com", "address": "192.0.2.123"},
+            ],
             "tun": {"enable": True, "device": "pp-dns-test", "auto-route": "global",
                     "inet6-address": ["fdfe:dcba:9876::1/126"],
                     "dns-hijack": ["any:53"], "follow-system-routes": True},
@@ -128,10 +147,27 @@ def main():
                     # Its own DNS upstream must escape interception, including
                     # a LAN upstream also queried by the system resolver.
                     query(args.dns, args.iface, name="example.com")
+                    if args.check_system_cache:
+                        cache_name = "dns-cache-capture.example.com"
+                        code, answer = system_query(cache_name, use_cache=False)
+                        assert code == 0 and "192.0.2.123" in answer, answer
+                        code, answer = system_query(cache_name)
+                        assert code == 0 and "192.0.2.123" in answer and "cache" in answer.lower(), answer
+                        print("seeded system resolver cache with intercepted answer", flush=True)
                     assert Path("/etc/resolv.conf").read_bytes() == original
                     core.send_signal(kill_signal)
                     core.wait(timeout=15)
                     wait_for(lambda: "paopao_dns_" not in tables(), "capture leaked after core exit")
+                    if args.check_system_cache:
+                        # Do not flush from the test: native teardown must
+                        # invalidate the positive entry before its 60s TTL.
+                        wait_for(lambda: "192.0.2.123" not in system_query(cache_name)[1], "system resolver retained intercepted answer after exit")
+                        if system_dns_healthy:
+                            code, answer = system_query("example.com")
+                            assert code == 0 and "192.0.2.123" not in answer, answer
+                        else:
+                            query(args.upstream, args.iface, name="example.com")
+                        print("PASS system resolver cache cleared by native cleanup", flush=True)
                     assert Path("/etc/resolv.conf").read_bytes() == original
                     print(f"PASS UDP/TCP, bound/unbound, upstream, unchanged DNS, {kill_signal.name}")
                 except BaseException:

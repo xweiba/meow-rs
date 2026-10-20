@@ -18,6 +18,7 @@ pub mod group_tree;
 mod input;
 pub mod legacy;
 mod route;
+pub(crate) mod rule_providers;
 pub mod sub_rules;
 
 #[cfg(test)]
@@ -87,7 +88,9 @@ pub fn our_group_for(name: &str, settings: &ProxySettings, groups: &[NodeGroup])
 
 /// The subscriptions' own groups and rules, merged by priority and mapped
 /// onto the pooled lines (Dart `ProxyController.importedSplit`). Only
-/// subscriptions with `use_split` and a non-empty split take part.
+/// subscriptions with a non-empty split take part. In layered mode their
+/// saved `use_split` preference applies; raw mode uses every split without
+/// changing that preference, so switching back restores the user's choice.
 ///
 /// `settings` are the ones in force (`group_mode` for following the
 /// subscription exactly, `built_in_groups` for aliases), the same the tree
@@ -102,7 +105,9 @@ pub fn imported_split(input: &BuildInput, pool: &Pool, settings: &ProxySettings)
     let used: Vec<_> = input
         .subscriptions
         .iter()
-        .filter(|s| s.use_split && !s.split.is_empty())
+        .filter(|s| {
+            (settings.group_mode == GroupMode::Subscription || s.use_split) && !s.split.is_empty()
+        })
         .collect();
     // `{for n in nodes: n.name: ?tagOf[endpoint]}`: a name with no line is
     // left out; a repeated name takes the later line.
@@ -122,6 +127,7 @@ pub fn imported_split(input: &BuildInput, pool: &Pool, settings: &ProxySettings)
         .iter()
         .zip(&line_maps)
         .map(|(s, l)| SubSplit {
+            namespace: &s.id,
             rules: &s.split,
             line_of: l,
         })

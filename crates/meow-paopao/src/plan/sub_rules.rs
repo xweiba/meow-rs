@@ -13,6 +13,9 @@ use crate::model::subscription::{SubGroup, SubRules};
 /// serves maps to that line; info rows map to nothing).
 #[derive(Debug, Clone, Copy)]
 pub struct SubSplit<'a> {
+    /// Stable subscription id; provider names and caches must not depend on
+    /// subscription priority or expose the subscription URL.
+    pub namespace: &'a str,
     /// The provider's groups and rules.
     pub rules: &'a SubRules,
     /// Node name → line tag in the pool.
@@ -35,6 +38,9 @@ pub struct ImportedGroup {
     /// load-balance …); `select` unless following the subscription
     /// exactly.
     pub kind: String,
+    /// Raw provider probe interval in seconds; first subscription wins,
+    /// as for the group type. Layered selectors have no probe interval.
+    pub interval: Option<u64>,
 }
 
 impl ImportedGroup {
@@ -45,20 +51,34 @@ impl ImportedGroup {
             name: name.to_owned(),
             members: members.iter().map(|m| (*m).to_owned()).collect(),
             kind: "select".to_owned(),
+            interval: None,
         }
     }
 }
 
 /// What the subscriptions' splits add to a Clash config.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct ImportedSplit {
     /// Groups in the order they were first made.
     pub groups: Vec<ImportedGroup>,
     /// Rewritten to our names, de-duplicated (the first subscription that
-    /// matches something decides), MATCH and RULE-SET left out.
+    /// matches something decides), MATCH left out.
     pub rules: Vec<String>,
+    /// Namespaced native definitions used by the rewritten rules.
+    pub providers: serde_json::Map<String, serde_json::Value>,
     /// Exactly as written: where MATCH sends the rest.
     pub final_target: Option<String>,
+}
+
+impl std::fmt::Debug for ImportedSplit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImportedSplit")
+            .field("groups", &self.groups)
+            .field("rules", &self.rules)
+            .field("providers", &self.providers.len())
+            .field("final_target", &self.final_target)
+            .finish()
+    }
 }
 
 /// Where provider groups that mean one of ours go.
@@ -101,6 +121,7 @@ pub fn merge_subscription_splits(
     let mut groups: IndexMap<String, ImportedGroup> = IndexMap::new();
     let mut final_target: Option<String> = None;
     let mut rules = Vec::new();
+    let mut providers = serde_json::Map::new();
     // Matcher → where the first subscription sent it.
     let mut seen_matchers: HashMap<String, String> = HashMap::new();
 
@@ -153,13 +174,34 @@ pub fn merge_subscription_splits(
         }
         for line in &split.rules.rules {
             let Some(r) = parse_rule(line) else { continue };
-            if r.kind == "MATCH" || r.kind == "RULE-SET" {
+            if r.kind == "MATCH" {
                 continue;
             }
             let Some(target) = m.resolve(&r.target, &mut Vec::new()) else {
                 continue;
             };
-            let matcher = format!("{},{}", r.kind, r.value);
+            // RULE-SET names are local to one subscription, even when their
+            // original spelling is identical. Rewrite nested logic rules too.
+            let value = super::rule_providers::rewrite_references(
+                &format!("{},{}", r.kind, r.value),
+                |name| {
+                    let tag = super::rule_providers::provider_tag(split.namespace, name);
+                    if let Some(definition) = split.rules.providers.get(name) {
+                        let mut definition = definition.clone();
+                        if let Some(proxy) =
+                            definition.get("proxy").and_then(serde_json::Value::as_str)
+                        {
+                            let mapped = m
+                                .resolve(proxy, &mut Vec::new())
+                                .unwrap_or_else(|| proxy.to_owned());
+                            definition["proxy"] = mapped.into();
+                        }
+                        providers.insert(tag.clone(), definition);
+                    }
+                    tag
+                },
+            );
+            let matcher = value.clone();
             if let Some(first) = seen_matchers.get(&matcher) {
                 // Claimed by a higher-priority subscription: its rule
                 // stays; two groups of their own for one thing become one.
@@ -174,10 +216,7 @@ pub fn merge_subscription_splits(
                 continue;
             }
             seen_matchers.insert(matcher, target.clone());
-            let mut parts = vec![r.kind];
-            if !r.value.is_empty() {
-                parts.push(r.value);
-            }
+            let mut parts = vec![value.trim_end_matches(',').to_owned()];
             parts.push(target);
             parts.extend(r.options);
             rules.push(parts.join(","));
@@ -186,6 +225,7 @@ pub fn merge_subscription_splits(
     ImportedSplit {
         groups: groups.into_values().collect(),
         rules,
+        providers,
         final_target,
     }
 }
@@ -264,6 +304,7 @@ impl Merger<'_, '_> {
                     name: name.to_owned(),
                     members: Vec::new(),
                     kind,
+                    interval: g.interval,
                 });
             self.resolved.insert(name.to_owned(), Some(tag.clone()));
             for m in &g.members {
@@ -317,6 +358,7 @@ impl Merger<'_, '_> {
                         name: name.to_owned(),
                         members,
                         kind: "select".into(),
+                        interval: None,
                     },
                 );
                 Some(sub_tag)

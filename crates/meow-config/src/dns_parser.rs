@@ -70,6 +70,13 @@ pub async fn parse_dns(
     };
 
     let use_hosts = dns.use_hosts.unwrap_or(true);
+    let direct_system = match dns.direct_nameserver.as_deref().unwrap_or(&[]) {
+        [] => false,
+        [value] if value == "system" => true,
+        _ => {
+            anyhow::bail!("dns.direct-nameserver currently accepts only [system] or an empty list")
+        }
+    };
     let use_system_hosts = dns.use_system_hosts.unwrap_or(true);
 
     let main_urls = parse_nameserver_entries(dns.nameserver.as_deref().unwrap_or(&[]))?;
@@ -202,6 +209,40 @@ pub async fn parse_dns(
         install_fakeip(&mut resolver, dns, cache_dir, prior).await?;
     }
     resolver.set_paopao_hosts(paopao_hosts);
+
+    let follow_rules = dns.follow_domain_rules.unwrap_or(false);
+    if follow_rules
+        && dns
+            .nameserver
+            .iter()
+            .flatten()
+            .chain(dns.fallback.iter().flatten())
+            .map(String::as_str)
+            .chain(
+                dns.nameserver_policy
+                    .iter()
+                    .flat_map(|map| map.values())
+                    .flat_map(crate::raw::RawNspValue::as_urls),
+            )
+            .any(|s| s.starts_with("https://") || s.starts_with("tls://"))
+    {
+        anyhow::bail!(
+            "dns.follow-domain-rules needs UDP/TCP upstreams; proxied DoH/DoT is unsupported"
+        );
+    }
+    resolver.set_direct_system_dns(direct_system || follow_rules);
+    if follow_rules
+        && proxy_resolver.is_none()
+        && proxy_registry.values().any(|proxy| {
+            let address = proxy.addr();
+            !address.is_empty()
+                && address.parse::<SocketAddr>().is_err()
+                && meow_common::metadata_ip_literal(address).is_none()
+        })
+    {
+        anyhow::bail!("dns.follow-domain-rules needs independent proxy-server-nameserver for hostname-based proxy servers");
+    }
+    resolver.set_follow_domain_rules(follow_rules);
 
     let resolver = Arc::new(resolver);
     Ok(DnsConfig {
@@ -1114,6 +1155,40 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
 
+    #[tokio::test]
+    async fn direct_system_dns_is_opt_in_and_preserves_main_upstreams() {
+        for (setting, enabled) in [("[system]", true), ("[]", false)] {
+            let raw: RawConfig = serde_yaml::from_str(&format!(
+                "dns:\n  enable: true\n  nameserver: [127.0.0.1:19953]\n  direct-nameserver: {setting}\n"
+            )).unwrap();
+            let dns = parse_dns(
+                &raw,
+                None,
+                None,
+                &HashMap::new(),
+                None,
+                &HashMap::new(),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(dns.resolver.uses_direct_system_dns(), enabled);
+            assert_eq!(dns.resolver.main_nameservers().len(), 1);
+        }
+        let raw: RawConfig = serde_yaml::from_str("dns:\n  enable: true\n  nameserver: [127.0.0.1:19953]\n  direct-nameserver: [invalid]\n").unwrap();
+        assert!(parse_dns(
+            &raw,
+            None,
+            None,
+            &HashMap::new(),
+            None,
+            &HashMap::new(),
+            None
+        )
+        .await
+        .is_err());
+    }
+
     fn one(s: &str) -> HostsValue {
         HostsValue::One(s.to_string())
     }
@@ -1894,6 +1969,9 @@ paopao-hosts:
             raw.insert(
                 (*name).to_string(),
                 RawRuleProvider {
+                    background_fetch: false,
+                    sources: Vec::new(),
+                    mirrors: Vec::new(),
                     provider_type: "inline".to_string(),
                     behavior: (*behavior).to_string(),
                     format: None,

@@ -25,7 +25,7 @@ pub struct PolicyRules {
 
 /// All shipped network matching data. Fields are required so a truncated
 /// or misspelled file cannot silently remove a user's privacy policy.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuleProfile {
     /// Schema version, currently 1.
@@ -67,6 +67,21 @@ pub struct RuleProfile {
     pub sniffer: Value,
     /// Rule-data source URLs and update settings in native config format.
     pub geodata: Value,
+    /// Native rule-provider descriptors referenced by profile rules. Absent
+    /// in version 1 files written before provider support; payloads stay native.
+    #[serde(default)]
+    pub rule_providers: serde_json::Map<String, Value>,
+}
+
+impl std::fmt::Debug for RuleProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Provider descriptors can contain private URLs and request headers.
+        f.debug_struct("RuleProfile")
+            .field("version", &self.version)
+            .field("policies", &self.policies.len())
+            .field("rule_providers", &self.rule_providers.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl RuleProfile {
@@ -97,6 +112,18 @@ impl RuleProfile {
 
     /// Structural checks run before any new config can replace a live one.
     pub fn validate(&self) -> Result<(), String> {
+        for (name, definition) in &self.rule_providers {
+            if name.is_empty()
+                || name.trim() != name
+                || name.starts_with("sub-provider:")
+                || name.contains([',', '(', ')'])
+                || name.chars().any(char::is_control)
+            {
+                return Err("invalid or reserved rule provider name".into());
+            }
+            crate::plan::rule_providers::validate_definition(definition)
+                .map_err(|reason| format!("rule provider definition: {reason}"))?;
+        }
         if self.version != 1 {
             return Err("unsupported routing profile version".into());
         }
@@ -128,6 +155,18 @@ impl RuleProfile {
                 return Err(format!("{name} must be an object"));
             }
         }
+        if let Some(value) = self.dns.get("direct-nameserver") {
+            if value != &serde_json::json!(["system"]) && value != &serde_json::json!([]) {
+                return Err("dns.direct-nameserver must be [system] or an empty list".into());
+            }
+        }
+        if self
+            .dns
+            .get("follow-domain-rules")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            return Err("dns.follow-domain-rules must be a boolean".into());
+        }
         for key in [
             "nameserver",
             "default-nameserver",
@@ -141,6 +180,27 @@ impl RuleProfile {
                     .is_none_or(|s| s.is_empty() || s.chars().any(char::is_control))
             }) {
                 return Err(format!("invalid dns.{key} upstream"));
+            }
+            // The native DNS client supports proxy-tagged UDP/TCP only.
+            // Reject an unsupported transport before it can replace a
+            // working resolver and break even DIRECT application traffic.
+            for server in servers.iter().filter_map(Value::as_str) {
+                let server = server.to_ascii_lowercase();
+                if server
+                    .split_once('#')
+                    .is_some_and(|(_, tag)| !tag.is_empty())
+                    && (server.starts_with("https://") || server.starts_with("tls://"))
+                {
+                    return Err(format!(
+                        "dns.{key}: DoH/DoT through a proxy is unsupported; use a tcp:// upstream with the same policy tag"
+                    ));
+                }
+                if key == "nameserver"
+                    && self.dns["follow-domain-rules"] == true
+                    && (server.starts_with("https://") || server.starts_with("tls://"))
+                {
+                    return Err("dns.follow-domain-rules requires UDP/TCP nameservers; proxied DoH/DoT is unsupported".into());
+                }
             }
         }
         let mut groups = std::collections::HashSet::new();
@@ -200,7 +260,8 @@ pub(crate) fn read_document(path: &str, limit: u64) -> Result<Option<Value>, Str
 }
 
 /// Load a whole profile; absence seeds defaults, invalid files refuse the
-/// rebuild. Only the unprivileged panel persists the returned document.
+/// rebuild. The panel may persist the returned seed; the native rule-profile
+/// API validates and atomically persists edits, preserving the file owner.
 pub fn materialize(input: &mut Value) -> Result<Option<Value>, String> {
     let Some(path) = input.pointer("/runtime/rulesFile").and_then(Value::as_str) else {
         return Ok(None);

@@ -1147,6 +1147,7 @@ async fn run_ss_udp_flow<S>(
             rule_name,
             rule_payload,
             route: _route,
+            ..
         }) = inner.resolve_proxy(&metadata).await
         else {
             debug!(

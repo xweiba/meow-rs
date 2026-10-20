@@ -1,12 +1,15 @@
 //! Interval-refresh supervision for HTTP rule-providers.
 //!
-//! One background task per (`name`, `interval`) HTTP provider keeps calling
+//! One background task per HTTP provider keeps calling
 //! [`RuleProvider::refresh`]. [`RefreshSupervisor::reconcile`] is invoked on
 //! every successful config commit — after the rebuilt provider map has been
 //! swapped into the registry — so providers added, removed, or re-
 //! `interval`ed by a reload gain/lose their task without a restart (issue
 //! #543). Before this supervisor existed the tasks were spawned once at
 //! startup, so reloads could only ever refresh startup-era providers.
+//! Opted-in providers without usable cached data fetch immediately. Failures
+//! retry with bounded exponential backoff; success returns to the configured
+//! interval, or ends a one-shot (`interval: 0`) initial acquisition.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -20,10 +23,27 @@ use crate::rule_provider::{ProviderType, RuleProvider};
 
 /// Largest interval the supervisor will spawn a loop for (~10 years).
 /// `RawRuleProvider.interval` is an unchecked `u64`: an absurd value
-/// would overflow `Instant + Duration` inside `tokio::time::interval`
+/// would overflow `Instant + Duration` inside `tokio::time::sleep`
 /// and panic the task on every reconcile — an over-ceiling provider is
 /// treated as non-refreshable instead (issue #543 review).
 const MAX_REFRESH_INTERVAL_SECS: u64 = meow_common::MAX_DURATION_SECS;
+/// Failed acquisitions retry promptly without hammering an offline source.
+const INITIAL_RETRY_SECS: u64 = 5;
+const MAX_RETRY_SECS: u64 = 600;
+
+struct RefreshTask {
+    interval: u64,
+    background_fetch: bool,
+    /// Only weak identity is retained between fetches. Rebinding an empty
+    /// provider must not inherit the retired generation's daily countdown.
+    provider: Weak<RuleProvider>,
+    initially_missing: bool,
+    task: JoinHandle<()>,
+}
+
+fn needs_initial_fetch(provider: &RuleProvider) -> bool {
+    provider.background_fetch() && provider.updated_at_secs() == 0
+}
 
 /// Tracks the live refresh task per provider name. Cheap to share via
 /// `Arc`; all mutation goes through [`reconcile`](Self::reconcile), which
@@ -31,7 +51,7 @@ const MAX_REFRESH_INTERVAL_SECS: u64 = meow_common::MAX_DURATION_SECS;
 /// abort what's gone or whose interval changed.
 #[derive(Default)]
 pub struct RefreshSupervisor {
-    tasks: Mutex<HashMap<String, (u64, JoinHandle<()>)>>,
+    tasks: Mutex<HashMap<String, RefreshTask>>,
 }
 
 impl RefreshSupervisor {
@@ -49,7 +69,7 @@ impl RefreshSupervisor {
     /// matcher sees (issue #514 review).
     ///
     /// Every call must pass the **same** registry `Arc` — spawned loops
-    /// capture the `Arc` they were spawned with, so an embedder that
+    /// capture a weak reference to that allocation, so an embedder that
     /// replaces the whole `Arc<RwLock<…>>` (rather than the map inside it)
     /// strands its loops on a dead registry. In-tree the `Arc` is created
     /// once at startup and only its contents are swapped.
@@ -68,7 +88,7 @@ impl RefreshSupervisor {
             tokio::runtime::Handle::try_current().is_ok(),
             "RefreshSupervisor::reconcile must run inside a tokio runtime"
         );
-        let wanted: HashMap<String, u64> = registry
+        let wanted: HashMap<String, Arc<RuleProvider>> = registry
             .read()
             .iter()
             .filter(|(_, p)| {
@@ -80,29 +100,47 @@ impl RefreshSupervisor {
                     );
                     return false;
                 }
-                p.interval > 0 && p.provider_type == ProviderType::Http
+                p.provider_type == ProviderType::Http && (p.interval > 0 || needs_initial_fetch(p))
             })
-            .map(|(name, p)| (name.clone(), p.interval))
+            .map(|(name, p)| (name.clone(), Arc::clone(p)))
             .collect();
 
         let mut tasks = self.tasks.lock();
-        tasks.retain(|name, (interval, task)| {
-            let keep = wanted.get(name) == Some(interval) && !task.is_finished();
+        tasks.retain(|name, job| {
+            let keep = wanted.get(name).is_some_and(|provider| {
+                let rebound = !job.provider.ptr_eq(&Arc::downgrade(provider));
+                provider.interval == job.interval
+                    && provider.background_fetch() == job.background_fetch
+                    && !job.task.is_finished()
+                    && !(rebound && (needs_initial_fetch(provider) || job.initially_missing))
+            });
             if !keep {
-                task.abort();
+                job.task.abort();
+            } else if let Some(provider) = wanted.get(name) {
+                job.provider = Arc::downgrade(provider);
+                job.initially_missing = needs_initial_fetch(provider);
             }
             keep
         });
-        for (name, interval) in wanted {
+        for (name, provider) in wanted {
             if tasks.contains_key(&name) {
                 continue;
             }
             let task = tokio::spawn(refresh_loop(
                 name.clone(),
-                interval,
+                provider.interval,
                 Arc::downgrade(registry),
             ));
-            tasks.insert(name, (interval, task));
+            tasks.insert(
+                name,
+                RefreshTask {
+                    interval: provider.interval,
+                    background_fetch: provider.background_fetch(),
+                    provider: Arc::downgrade(&provider),
+                    initially_missing: needs_initial_fetch(&provider),
+                    task,
+                },
+            );
         }
     }
 
@@ -128,14 +166,14 @@ impl RefreshSupervisor {
     /// Interval a running task was spawned with (test introspection).
     #[cfg(test)]
     fn task_interval(&self, name: &str) -> Option<u64> {
-        self.tasks.lock().get(name).map(|(iv, _)| *iv)
+        self.tasks.lock().get(name).map(|job| job.interval)
     }
 
     /// Identity of a running task's `JoinHandle` (test introspection) —
     /// distinguishes a respawned task from a kept one.
     #[cfg(test)]
     fn task_id(&self, name: &str) -> Option<tokio::task::Id> {
-        self.tasks.lock().get(name).map(|(_, t)| t.id())
+        self.tasks.lock().get(name).map(|job| job.task.id())
     }
 
     /// Insert an already-finished task — exercises the reap-and-respawn
@@ -147,7 +185,16 @@ impl RefreshSupervisor {
         let mut task = tokio::spawn(async {});
         (&mut task).await.unwrap();
         debug_assert!(task.is_finished());
-        self.tasks.lock().insert(name.to_string(), (interval, task));
+        self.tasks.lock().insert(
+            name.to_string(),
+            RefreshTask {
+                interval,
+                background_fetch: false,
+                provider: Weak::new(),
+                initially_missing: false,
+                task,
+            },
+        );
     }
 }
 
@@ -156,8 +203,8 @@ impl Drop for RefreshSupervisor {
     /// drop and, while the registry is still alive, the loops keep
     /// refreshing providers nobody supervises.
     fn drop(&mut self) {
-        for (_, (_, task)) in self.tasks.get_mut().drain() {
-            task.abort();
+        for (_, job) in self.tasks.get_mut().drain() {
+            job.task.abort();
         }
     }
 }
@@ -167,38 +214,560 @@ async fn refresh_loop(
     interval_secs: u64,
     registry: Weak<RwLock<HashMap<String, Arc<RuleProvider>>>>,
 ) {
-    let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
-    // `Delay` — a suspend longer than `interval` must not fire every missed
-    // tick back-to-back (a refresh storm of real HTTP fetches); same policy
-    // as the health-check supervisor.
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ticker.tick().await; // skip the immediate first tick
+    let Some(provider) = current_provider(&registry, &name) else {
+        return;
+    };
+    let mut binding = Arc::downgrade(&provider);
+    let mut delay = if needs_initial_fetch(&provider) {
+        0
+    } else {
+        interval_secs
+    };
+    // An interval-zero legacy provider is never a supervised acquisition.
+    if delay == 0 && !needs_initial_fetch(&provider) {
+        return;
+    }
+    drop(provider);
+    let mut retry = INITIAL_RETRY_SECS;
+    let mut recovering = false;
     loop {
-        ticker.tick().await;
-        // Weak like the health-check loop: a supervisor that outlives its
-        // embedder's registry must not pin the map (and transitively a
-        // proxy-registry generation via `FetchContext`) forever — the
-        // task exits and reconcile will not respawn it.
-        let Some(registry) = registry.upgrade() else {
+        // Nothing strong crosses this sleep: old provider generations and
+        // the registry may be collected even with a 24-hour interval.
+        tokio::time::sleep(Duration::from_secs(delay)).await;
+        let Some(provider) = current_provider(&registry, &name) else {
             return;
         };
-        let Some(provider) = registry.read().get(&name).cloned() else {
-            debug!(provider = %name, "rule-provider gone; refresh task idle until reconcile aborts it");
-            continue;
-        };
+        if !binding.ptr_eq(&Arc::downgrade(&provider)) {
+            binding = Arc::downgrade(&provider);
+            retry = INITIAL_RETRY_SECS;
+            // A valid replacement must not inherit an old failure's short
+            // retry schedule. Normal interval ticks still follow swaps.
+            if recovering && !needs_initial_fetch(&provider) {
+                recovering = false;
+                if interval_secs == 0 {
+                    return;
+                }
+                delay = interval_secs;
+                drop(provider);
+                continue;
+            }
+        }
+        if interval_secs == 0 && !needs_initial_fetch(&provider) {
+            return;
+        }
         // The provider re-parses the payload in its own load-time
         // ParserContext and declared format, so geo-dependent entries
         // survive refreshes (issue #533 review).
-        if let Err(e) = provider.refresh().await {
-            error!(provider = %provider.name, "background refresh failed: {:#}", e);
+        match provider.refresh().await {
+            Ok(()) => {
+                if interval_secs == 0 {
+                    return;
+                }
+                delay = interval_secs;
+                retry = INITIAL_RETRY_SECS;
+                recovering = false;
+            }
+            Err(e) => {
+                delay = retry.min(MAX_RETRY_SECS);
+                if interval_secs > 0 {
+                    delay = delay.min(interval_secs);
+                }
+                retry = retry.saturating_mul(2).min(MAX_RETRY_SECS);
+                recovering = true;
+                error!(provider = %provider.name, retry_secs = delay, "background refresh failed: {:#}", e);
+            }
         }
     }
+}
+
+fn current_provider(
+    registry: &Weak<RwLock<HashMap<String, Arc<RuleProvider>>>>,
+    name: &str,
+) -> Option<Arc<RuleProvider>> {
+    let registry = registry.upgrade()?;
+    let provider = registry.read().get(name).cloned();
+    if provider.is_none() {
+        debug!(provider = %name, "rule-provider gone; refresh task exiting");
+    }
+    provider
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rule_provider::test_provider;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct AbortOnDrop(tokio::task::AbortHandle);
+
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    /// Keep a paused clock from auto-advancing while real local HTTP and
+    /// blocking parse workers are making progress; tests advance it explicitly.
+    fn hold_clock() -> AbortOnDrop {
+        let task = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        AbortOnDrop(task.abort_handle())
+    }
+
+    struct HttpSource {
+        url: String,
+        requests: Arc<AtomicUsize>,
+        status: Arc<AtomicUsize>,
+        body: Arc<Mutex<&'static str>>,
+        blocked: Arc<AtomicUsize>,
+        _task: AbortOnDrop,
+    }
+
+    async fn http_source() -> HttpSource {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/rules", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let status = Arc::new(AtomicUsize::new(200));
+        let body = Arc::new(Mutex::new("payload:\n  - 'live.example'\n"));
+        let blocked = Arc::new(AtomicUsize::new(0));
+        let task = tokio::spawn({
+            let requests = Arc::clone(&requests);
+            let status = Arc::clone(&status);
+            let body = Arc::clone(&body);
+            let blocked = Arc::clone(&blocked);
+            async move {
+                let mut children = tokio::task::JoinSet::new();
+                loop {
+                    tokio::select! {
+                        accepted = listener.accept() => {
+                            let (mut socket, _) = accepted.unwrap();
+                            let requests = Arc::clone(&requests);
+                            let status = Arc::clone(&status);
+                            let body = Arc::clone(&body);
+                            let blocked = Arc::clone(&blocked);
+                            children.spawn(async move {
+                                let mut request = Vec::new();
+                                let mut buf = [0; 1024];
+                                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                                    let n = socket.read(&mut buf).await.unwrap();
+                                    if n == 0 { return; }
+                                    request.extend_from_slice(&buf[..n]);
+                                }
+                                requests.fetch_add(1, Ordering::SeqCst);
+                                if blocked.load(Ordering::SeqCst) != 0 {
+                                    // Wait for cancellation to drop the HTTP
+                                    // socket, so teardown is observable too.
+                                    while socket.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+                                    return;
+                                }
+                                let status = status.load(Ordering::SeqCst);
+                                let body = *body.lock();
+                                let response = format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                                let _ = socket.write_all(response.as_bytes()).await;
+                            });
+                        }
+                        Some(done) = children.join_next(), if !children.is_empty() => done.unwrap(),
+                    }
+                }
+            }
+        });
+        HttpSource {
+            url,
+            requests,
+            status,
+            body,
+            blocked,
+            _task: AbortOnDrop(task.abort_handle()),
+        }
+    }
+
+    fn background_provider(
+        source: &HttpSource,
+        dir: &std::path::Path,
+        interval: u64,
+        behavior: &str,
+        cache: Option<&str>,
+    ) -> Arc<RuleProvider> {
+        if let Some(cache) = cache {
+            std::fs::write(dir.join("rules.yaml"), cache).unwrap();
+        }
+        let raw = crate::raw::RawRuleProvider {
+            provider_type: "http".into(),
+            behavior: behavior.into(),
+            format: Some("yaml".into()),
+            url: Some(source.url.clone()),
+            path: Some("rules.yaml".into()),
+            interval: Some(interval),
+            background_fetch: true,
+            sources: vec![],
+            mirrors: vec![],
+            proxy: None,
+            header: None,
+            payload: None,
+        };
+        crate::rule_provider::load_providers(
+            &HashMap::from([("p".into(), raw)]),
+            Some(dir),
+            &meow_rules::ParserContext::empty(),
+            None,
+            true,
+        )
+        .unwrap()
+        .remove("p")
+        .unwrap()
+    }
+
+    async fn wait_until(mut ready: impl FnMut() -> bool) {
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            assert!(
+                std::time::Instant::now() < end,
+                "background HTTP work did not settle"
+            );
+            tokio::task::yield_now().await;
+        }
+        // Let the refresh loop leave refresh() and arm its next sleep.
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn advance(seconds: u64) {
+        tokio::time::advance(Duration::from_secs(seconds)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn missing_background_providers_start_without_http_and_fetch_immediately() {
+        let _clock = hold_clock();
+        for behavior in ["domain", "ipcidr"] {
+            let source = http_source().await;
+            if behavior == "ipcidr" {
+                *source.body.lock() = "payload:\n  - '198.51.100.0/24'\n";
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let provider = background_provider(&source, dir.path(), 86400, behavior, None);
+            assert!(provider.background_fetch());
+            assert_eq!(provider.updated_at_secs(), 0);
+            assert_eq!(source.requests.load(Ordering::SeqCst), 0);
+            let live = crate::rule_provider::live_ruleset_map(&HashMap::from([(
+                "p".into(),
+                Arc::clone(&provider),
+            )]));
+            assert_eq!(live["p"].len(), 0);
+            let reg = Arc::new(RwLock::new(HashMap::from([(
+                "p".into(),
+                Arc::clone(&provider),
+            )])));
+            let sup = RefreshSupervisor::default();
+            sup.reconcile(&reg);
+            wait_until(|| provider.updated_at_secs() > 0 && Arc::strong_count(&provider) == 3)
+                .await;
+            assert_eq!(
+                live["p"].len(),
+                1,
+                "native matcher must see the installed data without Flutter"
+            );
+            assert_eq!(source.requests.load(Ordering::SeqCst), 1);
+            advance(86399).await;
+            assert_eq!(source.requests.load(Ordering::SeqCst), 1);
+            advance(1).await;
+            wait_until(|| {
+                source.requests.load(Ordering::SeqCst) == 2 && Arc::strong_count(&provider) == 3
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_initial_fetch_retries_exponentially_then_resumes_normal_interval() {
+        let _clock = hold_clock();
+        let source = http_source().await;
+        source.status.store(503, Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        let provider = background_provider(&source, dir.path(), 86400, "domain", None);
+        let reg = Arc::new(RwLock::new(HashMap::from([(
+            "p".into(),
+            Arc::clone(&provider),
+        )])));
+        let sup = RefreshSupervisor::default();
+        sup.reconcile(&reg);
+        wait_until(|| {
+            provider
+                .last_error()
+                .is_some_and(|e| e.contains("refresh failed"))
+                && Arc::strong_count(&provider) == 2
+        })
+        .await;
+        assert_eq!(source.requests.load(Ordering::SeqCst), 1);
+        for (i, delay) in [5, 10, 20, 40, 80, 160, 320, 600, 600]
+            .into_iter()
+            .enumerate()
+        {
+            advance(delay - 1).await;
+            assert_eq!(source.requests.load(Ordering::SeqCst), i + 1);
+            advance(1).await;
+            wait_until(|| {
+                source.requests.load(Ordering::SeqCst) == i + 2 && Arc::strong_count(&provider) == 2
+            })
+            .await;
+        }
+        source.status.store(200, Ordering::SeqCst);
+        advance(600).await;
+        wait_until(|| provider.updated_at_secs() > 0 && Arc::strong_count(&provider) == 2).await;
+        let successful = source.requests.load(Ordering::SeqCst);
+        assert!(provider.last_error().is_none());
+        advance(86399).await;
+        assert_eq!(source.requests.load(Ordering::SeqCst), successful);
+        advance(1).await;
+        wait_until(|| {
+            source.requests.load(Ordering::SeqCst) == successful + 1
+                && Arc::strong_count(&provider) == 2
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_delay_never_exceeds_a_short_configured_interval() {
+        let _clock = hold_clock();
+        let source = http_source().await;
+        source.status.store(503, Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        let provider = background_provider(&source, dir.path(), 3, "domain", None);
+        let reg = Arc::new(RwLock::new(HashMap::from([(
+            "p".into(),
+            Arc::clone(&provider),
+        )])));
+        let sup = RefreshSupervisor::default();
+        sup.reconcile(&reg);
+        wait_until(|| {
+            provider
+                .last_error()
+                .is_some_and(|e| e.contains("refresh failed"))
+                && Arc::strong_count(&provider) == 2
+        })
+        .await;
+        for count in 1..4 {
+            advance(2).await;
+            assert_eq!(source.requests.load(Ordering::SeqCst), count);
+            advance(1).await;
+            wait_until(|| {
+                source.requests.load(Ordering::SeqCst) == count + 1
+                    && Arc::strong_count(&provider) == 2
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interval_zero_fetches_until_success_then_exits_and_legacy_stays_disabled() {
+        let _clock = hold_clock();
+        let source = http_source().await;
+        source.status.store(503, Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        let provider = background_provider(&source, dir.path(), 0, "domain", None);
+        let reg = Arc::new(RwLock::new(HashMap::from([
+            ("p".into(), Arc::clone(&provider)),
+            (
+                "legacy".into(),
+                test_provider("legacy", ProviderType::Http, 0),
+            ),
+        ])));
+        let sup = RefreshSupervisor::default();
+        sup.reconcile(&reg);
+        assert_eq!(sup.task_count(), 1);
+        wait_until(|| {
+            provider
+                .last_error()
+                .is_some_and(|e| e.contains("refresh failed"))
+                && Arc::strong_count(&provider) == 2
+        })
+        .await;
+        source.status.store(200, Ordering::SeqCst);
+        advance(5).await;
+        wait_until(|| provider.updated_at_secs() > 0 && sup.tasks.lock()["p"].task.is_finished())
+            .await;
+        assert_eq!(source.requests.load(Ordering::SeqCst), 2);
+        advance(86400).await;
+        assert_eq!(source.requests.load(Ordering::SeqCst), 2);
+        sup.reconcile(&reg);
+        assert_eq!(sup.task_count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn valid_cache_waits_for_interval_and_zero_cache_spawns_no_job() {
+        let _clock = hold_clock();
+        for interval in [0, 60] {
+            let source = http_source().await;
+            let dir = tempfile::tempdir().unwrap();
+            let provider = background_provider(
+                &source,
+                dir.path(),
+                interval,
+                "domain",
+                Some("payload:\n  - 'cached.example'\n"),
+            );
+            assert!(provider.updated_at_secs() > 0);
+            assert_eq!(provider.rule_count(), 1);
+            let reg = Arc::new(RwLock::new(HashMap::from([("p".into(), provider)])));
+            let sup = RefreshSupervisor::default();
+            sup.reconcile(&reg);
+            assert_eq!(sup.task_count(), usize::from(interval != 0));
+            advance(0).await;
+            advance(59).await;
+            assert_eq!(source.requests.load(Ordering::SeqCst), 0);
+            advance(1).await;
+            if interval != 0 {
+                wait_until(|| source.requests.load(Ordering::SeqCst) == 1).await;
+            } else {
+                assert_eq!(source.requests.load(Ordering::SeqCst), 0);
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sleeping_tasks_hold_neither_provider_nor_registry_alive() {
+        let _clock = hold_clock();
+        for empty in [false, true] {
+            let source = http_source().await;
+            source.status.store(503, Ordering::SeqCst);
+            let dir = tempfile::tempdir().unwrap();
+            let cache = (!empty).then_some("payload:\n  - 'cached.example'\n");
+            let provider = background_provider(&source, dir.path(), 86400, "domain", cache);
+            let weak_provider = Arc::downgrade(&provider);
+            let reg = Arc::new(RwLock::new(HashMap::from([(
+                "p".into(),
+                Arc::clone(&provider),
+            )])));
+            let weak_registry = Arc::downgrade(&reg);
+            let sup = RefreshSupervisor::default();
+            sup.reconcile(&reg);
+            if empty {
+                wait_until(|| {
+                    provider
+                        .last_error()
+                        .is_some_and(|e| e.contains("refresh failed"))
+                        && Arc::strong_count(&provider) == 2
+                })
+                .await;
+            } else {
+                advance(0).await;
+            }
+            reg.write().clear();
+            drop(provider);
+            wait_until(|| weak_provider.upgrade().is_none()).await;
+            drop(reg);
+            assert!(weak_registry.upgrade().is_none());
+            advance(86400).await;
+            wait_until(|| sup.tasks.lock()["p"].task.is_finished()).await;
+            assert_eq!(source.requests.load(Ordering::SeqCst), usize::from(empty));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rebind_empty_provider_cancels_old_fetch_and_starts_new_generation_immediately() {
+        let _clock = hold_clock();
+        let old_source = http_source().await;
+        old_source.blocked.store(1, Ordering::SeqCst);
+        let old_dir = tempfile::tempdir().unwrap();
+        let old = background_provider(&old_source, old_dir.path(), 86400, "domain", None);
+        let old_weak = Arc::downgrade(&old);
+        let reg = Arc::new(RwLock::new(HashMap::from([("p".into(), old)])));
+        let sup = RefreshSupervisor::default();
+        sup.reconcile(&reg);
+        let old_task = sup.task_id("p");
+        wait_until(|| old_source.requests.load(Ordering::SeqCst) == 1).await;
+        let new_source = http_source().await;
+        let new_dir = tempfile::tempdir().unwrap();
+        let new = background_provider(&new_source, new_dir.path(), 86400, "domain", None);
+        sup.commit_registry(&reg, HashMap::from([("p".into(), Arc::clone(&new))]));
+        assert_ne!(sup.task_id("p"), old_task);
+        wait_until(|| {
+            new.updated_at_secs() > 0
+                && Arc::strong_count(&new) == 2
+                && old_weak.upgrade().is_none()
+        })
+        .await;
+        assert_eq!(new_source.requests.load(Ordering::SeqCst), 1);
+        advance(86400).await;
+        wait_until(|| {
+            new_source.requests.load(Ordering::SeqCst) == 2 && Arc::strong_count(&new) == 2
+        })
+        .await;
+        assert_eq!(old_source.requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn valid_replacement_does_not_inherit_the_retired_providers_retry() {
+        let _clock = hold_clock();
+        let old_source = http_source().await;
+        old_source.status.store(503, Ordering::SeqCst);
+        let old_dir = tempfile::tempdir().unwrap();
+        let old = background_provider(&old_source, old_dir.path(), 86400, "domain", None);
+        let reg = Arc::new(RwLock::new(HashMap::from([("p".into(), Arc::clone(&old))])));
+        let sup = RefreshSupervisor::default();
+        sup.reconcile(&reg);
+        wait_until(|| {
+            old.last_error()
+                .is_some_and(|e| e.contains("refresh failed"))
+                && Arc::strong_count(&old) == 2
+        })
+        .await;
+        let new_source = http_source().await;
+        let new_dir = tempfile::tempdir().unwrap();
+        let new = background_provider(
+            &new_source,
+            new_dir.path(),
+            86400,
+            "domain",
+            Some("payload:\n  - 'cached.example'\n"),
+        );
+        sup.commit_registry(&reg, HashMap::from([("p".into(), Arc::clone(&new))]));
+        advance(0).await;
+        advance(86399).await;
+        assert_eq!(new_source.requests.load(Ordering::SeqCst), 0);
+        assert_eq!(old_source.requests.load(Ordering::SeqCst), 1);
+        advance(1).await;
+        wait_until(|| {
+            new_source.requests.load(Ordering::SeqCst) == 1 && Arc::strong_count(&new) == 2
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_supervisor_or_removing_provider_cancels_pending_fetch() {
+        let _clock = hold_clock();
+        for remove in [false, true] {
+            let source = http_source().await;
+            source.blocked.store(1, Ordering::SeqCst);
+            let dir = tempfile::tempdir().unwrap();
+            let provider = background_provider(&source, dir.path(), 86400, "domain", None);
+            let reg = Arc::new(RwLock::new(HashMap::from([(
+                "p".into(),
+                Arc::clone(&provider),
+            )])));
+            let sup = RefreshSupervisor::default();
+            sup.reconcile(&reg);
+            wait_until(|| source.requests.load(Ordering::SeqCst) == 1).await;
+            if remove {
+                sup.commit_registry(&reg, HashMap::new());
+                assert_eq!(sup.task_count(), 0);
+                wait_until(|| Arc::strong_count(&provider) == 1).await;
+            } else {
+                drop(sup);
+                wait_until(|| Arc::strong_count(&provider) == 2).await;
+            }
+            advance(86400).await;
+            assert_eq!(provider.updated_at_secs(), 0);
+            assert_eq!(source.requests.load(Ordering::SeqCst), 1);
+        }
+    }
 
     fn registry_map(entries: &[(&str, ProviderType, u64)]) -> HashMap<String, Arc<RuleProvider>> {
         entries
