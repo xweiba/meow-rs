@@ -249,7 +249,10 @@ fn process_name(pid: u32) -> Option<String> {
             .ok()?;
         let text = String::from_utf8_lossy(&out.stdout);
         let line = text.lines().find(|l| l.contains(&format!("\"{pid}\"")))?;
-        return line.split(',').next().map(|n| n.trim_matches('"').to_owned());
+        return line
+            .split(',')
+            .next()
+            .map(|n| n.trim_matches('"').to_owned());
     }
     let out = quiet("/bin/ps")
         .args(["-o", "comm=", "-p", &pid.to_string()])
@@ -293,7 +296,8 @@ fn helper_stop() {
 fn helper_call(line: &str, secs: u64) -> Option<String> {
     use std::io::{BufRead as _, Write as _};
     let mut s = std::os::unix::net::UnixStream::connect("/var/run/paopao-core.sock").ok()?;
-    s.set_read_timeout(Some(std::time::Duration::from_secs(secs))).ok()?;
+    s.set_read_timeout(Some(std::time::Duration::from_secs(secs)))
+        .ok()?;
     writeln!(s, "{line}").ok()?;
     let mut reply = String::new();
     std::io::BufReader::new(&s).read_line(&mut reply).ok()?;
@@ -518,9 +522,15 @@ mod tests {
             &["paopao-tray", "PaoPao Menu"]
         ));
         assert!(is_named("meow.exe", &["meow"]));
-        assert!(is_named("/Applications/PaoPao Proxy.app/Contents/MacOS/meow", &["meow"]));
+        assert!(is_named(
+            "/Applications/PaoPao Proxy.app/Contents/MacOS/meow",
+            &["meow"]
+        ));
         // Not another program given the pid since.
-        assert!(!is_named("paopao-device-agent", &["paopao-tray", "PaoPao Menu"]));
+        assert!(!is_named(
+            "paopao-device-agent",
+            &["paopao-tray", "PaoPao Menu"]
+        ));
         assert!(!is_named("PaoPao Proxy", &["paopao-tray", "PaoPao Menu"]));
         assert!(!is_named("meowx", &["meow"]));
         // No such process.

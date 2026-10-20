@@ -203,6 +203,33 @@ impl RuleProfile {
                 }
             }
         }
+        // The core refuses DoH/DoT anywhere among its upstreams beside
+        // follow-domain-rules (meow-config `dns_parser`), `fallback` and
+        // `nameserver-policy` included: caught here, a saved file is
+        // refused before it can replace a working configuration, instead
+        // of the core not starting with it.
+        if self.dns["follow-domain-rules"] == true {
+            let fallback = self.dns["fallback"].as_array().into_iter().flatten();
+            let policy = self.dns["nameserver-policy"]
+                .as_object()
+                .into_iter()
+                .flat_map(|m| m.values())
+                .flat_map(|v| match v {
+                    Value::Array(list) => list.iter().collect::<Vec<_>>(),
+                    other => vec![other],
+                });
+            for (key, server) in fallback
+                .map(|s| ("fallback", s))
+                .chain(policy.map(|s| ("nameserver-policy", s)))
+            {
+                let server = server.as_str().unwrap_or_default().to_ascii_lowercase();
+                if server.starts_with("https://") || server.starts_with("tls://") {
+                    return Err(format!(
+                        "dns.{key}: dns.follow-domain-rules requires UDP/TCP upstreams; DoH/DoT is unsupported"
+                    ));
+                }
+            }
+        }
         let mut groups = std::collections::HashSet::new();
         for p in &self.policies {
             if p.group.is_empty() || !groups.insert(&p.group) {
@@ -308,6 +335,42 @@ pub fn load(input: &mut Value) -> Result<Option<(&'static str, Value)>, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn doh_beside_follow_domain_rules_is_refused_wherever_it_is() {
+        // As meow-config refuses it at start: nameserver, fallback and
+        // nameserver-policy alike.
+        for (key, value) in [
+            (
+                "fallback",
+                serde_json::json!(["https://dns.example/dns-query"]),
+            ),
+            (
+                "nameserver-policy",
+                serde_json::json!({"geosite:cn": ["https://223.5.5.5/dns-query"]}),
+            ),
+            (
+                "nameserver-policy",
+                serde_json::json!({"+.corp.example": "tls://10.0.0.2"}),
+            ),
+        ] {
+            let mut profile = RuleProfile::shipped().clone();
+            profile.dns["follow-domain-rules"] = true.into();
+            profile.dns[key] = value;
+            let err = profile.validate().unwrap_err();
+            assert!(err.contains(key) && err.contains("DoH/DoT"), "{err}");
+        }
+        // Plain upstreams there are fine, and so is DoH without it.
+        let mut profile = RuleProfile::shipped().clone();
+        profile.dns["follow-domain-rules"] = true.into();
+        profile.dns["nameserver-policy"] =
+            serde_json::json!({"geosite:cn": ["223.5.5.5", "tcp://119.29.29.29"]});
+        profile.validate().unwrap();
+        profile.dns["follow-domain-rules"] = false.into();
+        profile.dns["nameserver-policy"] =
+            serde_json::json!({"geosite:cn": ["https://223.5.5.5/dns-query"]});
+        profile.validate().unwrap();
+    }
+
     #[test]
     fn distribution_profile_is_complete() {
         RuleProfile::shipped().validate().unwrap();
