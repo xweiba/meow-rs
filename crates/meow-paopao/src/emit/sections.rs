@@ -23,8 +23,14 @@ pub fn dns(
     if let Some(servers) = d.get_mut("nameserver").and_then(Value::as_array_mut) {
         for server in servers {
             if let Some(s) = server.as_str() {
+                // Direct: a plain upstream, no adapter tag.
+                let s = if policy == "DIRECT" {
+                    s.replace("#{dnsPolicy}", "")
+                } else {
+                    s.to_owned()
+                };
                 *server =
-                    crate::rule_profile::RuleProfile::expand(s, &[("dnsPolicy", policy)]).into();
+                    crate::rule_profile::RuleProfile::expand(&s, &[("dnsPolicy", policy)]).into();
             }
         }
     }

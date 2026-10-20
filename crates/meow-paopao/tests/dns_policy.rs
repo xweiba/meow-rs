@@ -20,10 +20,14 @@ fn assert_policy(value: &Value, expected: &str) {
             server.starts_with("tcp://"),
             "proxy-tagged DoH/DoT is unsupported by the DNS client: {server}"
         );
-        assert!(
-            server.ends_with(&format!("#{expected}")),
-            "IP-rule pre-resolution must use the configured protected DNS exit: {server}"
-        );
+        if expected == "DIRECT" {
+            assert!(!server.contains('#'), "direct needs no adapter: {server}");
+        } else {
+            assert!(
+                server.ends_with(&format!("#{expected}")),
+                "IP-rule pre-resolution must use the DNS exit {expected}: {server}"
+            );
+        }
     }
     assert!(dns["proxy-server-nameserver"].as_array().is_some());
     assert_eq!(dns["direct-nameserver"], json!(["system"]));
@@ -38,31 +42,62 @@ fn assert_policy(value: &Value, expected: &str) {
     );
 }
 
-#[test]
-fn domain_dns_follows_rules_while_external_dns_and_stun_use_policy() {
-    let mut value = input();
-    for mode in ["smart", "global", "direct"] {
-        value["settings"]["mode"] = mode.into();
-        assert_policy(&value, "policy:ai");
-    }
+/// Where `MATCH` sends in this build.
+fn catch_all(value: &Value) -> String {
+    let out = build(&BuildInput::from_json(value));
+    let last = out.rules.last().unwrap();
+    last.strip_prefix("MATCH,").unwrap().to_owned()
 }
 
 #[test]
-fn selected_group_changes_external_dns_and_stun_without_overriding_domain_dns() {
+fn unplaced_names_and_stun_follow_where_match_sends_in_each_mode() {
+    let mut value = input();
+    value["settings"]["mode"] = "smart".into();
+    let smart = catch_all(&value);
+    assert_ne!(smart, "DIRECT");
+    assert_policy(&value, &smart);
+    value["settings"]["mode"] = "global".into();
+    let global = catch_all(&value);
+    assert_policy(&value, &global);
+    // Direct mode: nothing through a proxy, DNS included.
+    value["settings"]["mode"] = "direct".into();
+    assert_policy(&value, "DIRECT");
+}
+
+#[test]
+fn selected_group_changes_external_dns_and_stun_except_in_direct_mode() {
     let mut value = input();
     value["settings"]["dns_policy"] = "policy:google".into();
     value["runtime"]["encryptedDnsRules"] =
         json!({"domains": ["dns.google"], "addresses": [], "ports": [853]});
-    assert_policy(&value, "policy:google");
-    let out = build(&BuildInput::from_json(&value));
-    assert!(out
-        .rules
-        .contains(&"DOMAIN-SUFFIX,dns.google,policy:google".into()));
+    for mode in ["smart", "global"] {
+        value["settings"]["mode"] = mode.into();
+        assert_policy(&value, "policy:google");
+        let out = build(&BuildInput::from_json(&value));
+        assert!(out
+            .rules
+            .contains(&"DOMAIN-SUFFIX,dns.google,policy:google".into()));
+    }
+    value["settings"]["mode"] = "direct".into();
+    assert_policy(&value, "DIRECT");
 }
 
 #[test]
-fn removed_group_falls_back_to_ai_without_direct_upstream() {
+fn removed_group_falls_back_without_direct_upstream() {
     let mut value = input();
     value["settings"]["dns_policy"] = "group:removed".into();
     assert_policy(&value, "policy:ai");
+}
+
+#[test]
+fn mainland_encrypted_dns_goes_direct() {
+    let out = build(&BuildInput::from_json(&input()));
+    for rule in [
+        "DOMAIN-SUFFIX,doh.pub,DIRECT",
+        "DOMAIN-SUFFIX,dns.alidns.com,DIRECT",
+        "AND,((DST-PORT,443),(IP-CIDR,223.5.5.5/32,no-resolve)),DIRECT",
+        "AND,((DST-PORT,443),(IP-CIDR,119.29.29.29/32,no-resolve)),DIRECT",
+    ] {
+        assert!(out.rules.contains(&rule.into()), "{rule}");
+    }
 }

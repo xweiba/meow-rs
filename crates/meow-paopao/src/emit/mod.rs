@@ -41,6 +41,10 @@ pub use groups::{clash_auto_group, clash_group};
 /// Supported interpreter stages (schema identifiers, not routing data).
 /// The profile's `order` chooses their actual execution order. Privacy
 /// rules run in every mode; only service/subscription splitting is smart-only.
+/// `defaultDnsPolicy` / `dns_policy`: the exit `MATCH` uses in the current
+/// mode, not a group of its own.
+pub const FOLLOW_FINAL: &str = "final";
+
 pub const RULE_ORDER: [&str; 10] = [
     "speedtest-in",
     "own-app",
@@ -212,13 +216,48 @@ impl<'a> Plan<'a> {
             .unwrap_or_else(|| crate::rule_profile::RuleProfile::shipped())
     }
 
-    /// Removed groups follow the file's ordered fallback list. With no
-    /// usable configured group, refuse DNS rather than silently bypass it.
+    /// Where `MATCH` sends what no other rule took in the current mode.
+    fn final_target(&self) -> &str {
+        let s = self.settings();
+        let profile = self.profile();
+        let mode = match s.mode {
+            ProxyMode::Direct => "direct",
+            ProxyMode::Global => "global",
+            ProxyMode::Smart => "smart",
+        };
+        if s.mode == ProxyMode::Smart && self.as_written() {
+            self.input
+                .split
+                .final_target
+                .as_deref()
+                .or_else(|| profile.final_targets.get(mode).map(String::as_str))
+        } else {
+            profile.final_targets.get(mode).map(String::as_str)
+        }
+        .unwrap_or("REJECT")
+    }
+
+    /// The exit of what the rules cannot place by name: IP-rule
+    /// pre-resolution, applications' own encrypted DNS and STUN/WebRTC.
+    ///
+    /// Direct mode sends nothing through a proxy. Otherwise the group the
+    /// user picked, else ([`FOLLOW_FINAL`], the shipped default) the one
+    /// `MATCH` sends to: a name no rule knows is resolved where it would
+    /// end up. Removed groups follow the file's ordered fallback list; with
+    /// none usable, DNS is refused rather than silently sent direct.
     fn dns_policy(&self) -> &str {
+        if self.settings().mode == ProxyMode::Direct {
+            return "DIRECT";
+        }
         let selected = if self.settings().dns_policy.is_empty() {
             &self.profile().default_dns_policy
         } else {
             &self.settings().dns_policy
+        };
+        let selected = if selected == FOLLOW_FINAL {
+            self.final_target()
+        } else {
+            selected
         };
         if self.known(selected) {
             selected
@@ -404,20 +443,7 @@ impl<'a> Plan<'a> {
             }
         }
         stages.insert("smart", smart);
-        let mode = match s.mode {
-            ProxyMode::Direct => "direct",
-            ProxyMode::Global => "global",
-            ProxyMode::Smart => "smart",
-        };
-        let catch_all = if s.mode == ProxyMode::Smart && as_written {
-            split
-                .final_target
-                .as_deref()
-                .or_else(|| profile.final_targets.get(mode).map(String::as_str))
-        } else {
-            profile.final_targets.get(mode).map(String::as_str)
-        }
-        .unwrap_or("REJECT");
+        let catch_all = self.final_target();
         stages.insert(
             "match",
             profile

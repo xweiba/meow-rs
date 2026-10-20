@@ -72,7 +72,7 @@
       "sources": ["https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/xai.mrs", "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/xai.mrs"]
     }
   },
-  "defaultDnsPolicy": "policy:ai",
+  "defaultDnsPolicy": "final",
   "bootstrapJsonUrls": [
     "https://223.5.5.5/resolve?name={host}&type=A",
     "https://1.1.1.1/dns-query?name={host}&type=A"
@@ -127,8 +127,8 @@
     "DOMAIN-SUFFIX,doh.opendns.com,{dnsPolicy}",
     "DOMAIN-SUFFIX,doh.cleanbrowsing.org,{dnsPolicy}",
     "DOMAIN-SUFFIX,dns.controld.com,{dnsPolicy}",
-    "DOMAIN-SUFFIX,doh.pub,{dnsPolicy}",
-    "DOMAIN-SUFFIX,dns.alidns.com,{dnsPolicy}",
+    "DOMAIN-SUFFIX,doh.pub,DIRECT",
+    "DOMAIN-SUFFIX,dns.alidns.com,DIRECT",
     "AND,((DST-PORT,443),(IP-CIDR,1.1.1.1/32,no-resolve)),{dnsPolicy}",
     "AND,((DST-PORT,443),(IP-CIDR,1.0.0.1/32,no-resolve)),{dnsPolicy}",
     "AND,((DST-PORT,443),(IP-CIDR,8.8.8.8/32,no-resolve)),{dnsPolicy}",
@@ -139,9 +139,9 @@
     "AND,((DST-PORT,443),(IP-CIDR,94.140.15.15/32,no-resolve)),{dnsPolicy}",
     "AND,((DST-PORT,443),(IP-CIDR,208.67.222.222/32,no-resolve)),{dnsPolicy}",
     "AND,((DST-PORT,443),(IP-CIDR,208.67.220.220/32,no-resolve)),{dnsPolicy}",
-    "AND,((DST-PORT,443),(IP-CIDR,223.5.5.5/32,no-resolve)),{dnsPolicy}",
+    "AND,((DST-PORT,443),(IP-CIDR,223.5.5.5/32,no-resolve)),DIRECT",
     "AND,((DST-PORT,443),(IP-CIDR,223.6.6.6/32,no-resolve)),{dnsPolicy}",
-    "AND,((DST-PORT,443),(IP-CIDR,119.29.29.29/32,no-resolve)),{dnsPolicy}",
+    "AND,((DST-PORT,443),(IP-CIDR,119.29.29.29/32,no-resolve)),DIRECT",
     "AND,((DST-PORT,443),(IP-CIDR6,2606:4700:4700::1111/128,no-resolve)),{dnsPolicy}",
     "AND,((DST-PORT,443),(IP-CIDR6,2606:4700:4700::1001/128,no-resolve)),{dnsPolicy}",
     "AND,((DST-PORT,443),(IP-CIDR6,2001:4860:4860::8888/128,no-resolve)),{dnsPolicy}",
