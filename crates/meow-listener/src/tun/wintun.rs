@@ -105,6 +105,46 @@ pub(super) fn resolve_from(
     ))
 }
 
+/// Copies `src_dir`'s `wintun.dll` into `dest_dir` when it is byte for byte
+/// the official DLL built into this binary, so a folder the core is copied
+/// to (a service's) loads the shipped, signed file beside it instead of
+/// extracting one. Whether `dest_dir` holds it afterwards; a missing or
+/// different source copies nothing (the core then extracts as before).
+#[cfg(target_os = "windows")]
+pub fn copy_bundled(src_dir: &Path, dest_dir: &Path) -> io::Result<bool> {
+    copy_if_same(src_dir, dest_dir, EMBEDDED_WINTUN)
+}
+
+pub(super) fn copy_if_same(src_dir: &Path, dest_dir: &Path, bytes: &[u8]) -> io::Result<bool> {
+    if bytes.is_empty() {
+        return Ok(false);
+    }
+    let dest = dest_dir.join(WINTUN_DLL);
+    if fs::read(&dest).is_ok_and(|b| b == bytes) {
+        return Ok(true);
+    }
+    let src = src_dir.join(WINTUN_DLL);
+    if !src.is_file() {
+        return Ok(false);
+    }
+    // Checked once copied: the source may change between a check and a copy.
+    let tmp = dest_dir.join(format!(".{WINTUN_DLL}.tmp"));
+    let _ = fs::remove_file(&tmp);
+    fs::copy(&src, &tmp)?;
+    if fs::read(&tmp).ok().as_deref() != Some(bytes) {
+        let _ = fs::remove_file(&tmp);
+        return Ok(false);
+    }
+    if dest.exists() {
+        let _ = fs::remove_file(&dest);
+    }
+    if let Err(e) = fs::rename(&tmp, &dest) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(true)
+}
+
 /// Where a bundled DLL may be written, in preference order.
 pub(super) fn extract_destinations(
     exe_dir: Option<&Path>,
@@ -179,7 +219,9 @@ fn write_dll(dest: &Path, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_destinations, extract_to_first_writable, resolve_from, WINTUN_DLL};
+    use super::{
+        copy_if_same, extract_destinations, extract_to_first_writable, resolve_from, WINTUN_DLL,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -324,5 +366,28 @@ mod tests {
         let err = extract_to_first_writable(&[PathBuf::from("/x/wintun.dll")], b"").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn copies_only_the_bundled_dll() {
+        let bundled = b"MZ official wintun";
+        let src = testdir();
+        let dest = testdir();
+        // Nothing beside the app: nothing copied.
+        assert!(!copy_if_same(&src, &dest, bundled).expect("no source"));
+        assert!(!dest.join(WINTUN_DLL).exists());
+        // Some other DLL under that name: refused, nothing left behind.
+        fs::write(src.join(WINTUN_DLL), b"MZ something else").expect("write");
+        assert!(!copy_if_same(&src, &dest, bundled).expect("other dll"));
+        assert_eq!(fs::read_dir(&dest).expect("dest").count(), 0);
+        // The bundled one: copied, and found there next time.
+        fs::write(src.join(WINTUN_DLL), bundled).expect("write");
+        assert!(copy_if_same(&src, &dest, bundled).expect("bundled"));
+        assert_eq!(fs::read(dest.join(WINTUN_DLL)).expect("copied"), bundled);
+        fs::remove_file(src.join(WINTUN_DLL)).expect("rm");
+        assert!(copy_if_same(&src, &dest, bundled).expect("already there"));
+        assert_eq!(fs::read_dir(&dest).expect("dest").count(), 1);
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&dest);
     }
 }

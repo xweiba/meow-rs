@@ -531,6 +531,14 @@ fn install_elevated(socket: &str, sid: &str) -> Result<()> {
     let me = std::env::current_exe()?;
     let exe = dir.join("meow.exe");
     std::fs::copy(&me, &exe).with_context(|| format!("copying to {}", exe.display()))?;
+    // The signed wintun.dll shipped beside the app, so this copy does not
+    // extract its own (not there: it does, as before).
+    #[cfg(feature = "listener-tun")]
+    if let Err(e) = me.parent().map_or(Ok(false), |app| {
+        meow_listener::tun::copy_bundled_wintun(app, &dir)
+    }) {
+        note(&format!("wintun.dll not copied: {e}"));
+    }
     let info = service_info(&exe, socket, sid);
     let service = match existing {
         Some(s) => {

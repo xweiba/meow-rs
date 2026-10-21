@@ -131,6 +131,8 @@ mod route;
 mod udp;
 #[cfg(any(test, target_os = "windows"))]
 mod wintun;
+#[cfg(target_os = "windows")]
+pub use wintun::copy_bundled as copy_bundled_wintun;
 
 use std::io;
 use std::net::SocketAddr;

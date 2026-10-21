@@ -187,6 +187,12 @@ fn trusted_core(path: &str) -> Result<std::path::PathBuf, String> {
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
         .map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &copy).map_err(|e| e.to_string())?;
+    // The signed wintun.dll shipped beside the app's core goes beside this
+    // copy too (only the one built in: the folder is root's).
+    #[cfg(all(windows, feature = "listener-tun"))]
+    let _ = src
+        .parent()
+        .map(|app| meow_listener::tun::copy_bundled_wintun(app, &dir));
     Ok(copy)
 }
 
