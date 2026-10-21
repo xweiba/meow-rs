@@ -619,6 +619,7 @@ pub fn build_clash_config(input: &EmitInput<'_>) -> ClashConfig {
                 s.outbound_interface.as_deref(),
                 rt.vpn.as_ref(),
                 rt.outbound.as_ref(),
+                plan.profile().known_vpn_clients(),
             ),
         );
     }

@@ -491,6 +491,18 @@ async fn t14b_vpn_coexistence_keys_land_in_global_mode_only() {
     assert_eq!(tun.vpn_domains[1].servers.len(), 2);
     assert_eq!(tun.vpn_domains[1].iface.as_deref(), Some("tun0"));
     assert_eq!(tun.vpn_client_apps, ["name:openconnect", "path:/opt/cisco"]);
+    let known = load_config_from_str(
+        "tun:\n  enable: true\n  auto-route: global\n  vpn-known-clients:\n    \
+         - name:vpnagentd\n    - ' path:/opt/cisco '\n    - name:vpnagentd\n",
+    )
+    .await
+    .expect("config must load")
+    .tun;
+    assert_eq!(
+        known.vpn_known_clients,
+        ["name:vpnagentd", "path:/opt/cisco"]
+    );
+    assert!(known.vpn_client_apps.is_empty());
     let gw = load_config_from_str(
         "tun:\n  enable: true\n  auto-route: global\n  vpn-gateway-domains:\n    \
          - '+.VPN.Corp.Example'\n    - vpn.corp.example\n    - gw.example.\n",

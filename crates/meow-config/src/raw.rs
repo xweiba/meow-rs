@@ -381,6 +381,10 @@ pub struct RawTun {
     /// real addresses (never a fake one) and dialled direct by the physical
     /// interface, before every rule. Global mode only.
     pub vpn_gateway_domains: Option<Vec<String>>,
+    /// PaoPao: well-known VPN client programs (same matchers as
+    /// `vpn-client-apps`), treated as such only while one runs — named or
+    /// not, before its tunnel exists. Global mode only.
+    pub vpn_known_clients: Option<Vec<String>>,
     // Upstream-only fields accepted for forward-compat; warn and ignore.
     pub stack: Option<serde_yaml::Value>,
     pub strict_route: Option<serde_yaml::Value>,

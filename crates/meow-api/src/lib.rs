@@ -78,6 +78,7 @@ pub fn tun_config_to_listener_config(
             domains: tun.vpn_domains.clone(),
             client_apps: tun.vpn_client_apps.clone(),
             gateway_domains: tun.vpn_gateway_domains.clone(),
+            known_clients: tun.vpn_known_clients.clone(),
         },
         dns_hijack: tun.dns_hijack,
         udp_timeout: tun.udp_timeout,

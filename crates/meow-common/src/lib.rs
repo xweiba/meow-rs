@@ -69,7 +69,8 @@ pub use outbound_iface::{
     install_outbound_interface, outbound_interface, set_rebind_hook, OutboundIfaceGuard,
 };
 pub use process_lookup::{
-    disable_socket_table_cache, find_process, find_process_async, note_tun_flow, ProcessInfo,
+    disable_socket_table_cache, find_process, find_process_async, note_tun_flow, running_programs,
+    ProcessInfo,
 };
 pub use replay_window::ReplayWindow;
 

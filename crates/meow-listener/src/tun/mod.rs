@@ -1135,6 +1135,13 @@ fn global_route_nets(ipv6: bool, exclude: &[ipnet::IpNet]) -> Vec<ipnet::IpNet> 
 /// *both* halves. Observed on macOS 26.6 (#375); removing the zero-keyed
 /// route alone restores the bound sockets.
 ///
+/// PaoPao: the upper half is two `/2`s there too, so no route of ours is a
+/// `/1`. A VPN started after us that takes all traffic adds `0.0.0.0/1` +
+/// `128.0.0.0/1` (OpenVPN `def1`, wg-quick, Tunnelblick): an identical
+/// destination and mask already present is refused (`File exists`) and
+/// such a client gives up. Ours, more specific, still win, and its routes
+/// are followed as when it was there first.
+///
 /// The skipped `0.0.0.0/8` is "this network" and never a destination. The
 /// skipped `::/8` holds the unspecified/loopback addresses and the
 /// IPv4-mapped and NAT64 (`64:ff9b::/96`) ranges, which therefore bypass
@@ -1158,10 +1165,12 @@ fn global_route_nets_for(
         "16.0.0.0/4",
         "32.0.0.0/3",
         "64.0.0.0/2",
-        "128.0.0.0/1",
+        "128.0.0.0/2",
+        "192.0.0.0/2",
     ];
     const V6_NO_ZERO_KEY: &[&str] = &[
-        "100::/8", "200::/7", "400::/6", "800::/5", "1000::/4", "2000::/3", "4000::/2", "8000::/1",
+        "100::/8", "200::/7", "400::/6", "800::/5", "1000::/4", "2000::/3", "4000::/2", "8000::/2",
+        "c000::/2",
     ];
     let (v4, v6) = if zero_key_shadows_default {
         (V4_NO_ZERO_KEY, V6_NO_ZERO_KEY)
@@ -1592,9 +1601,12 @@ mod tests {
     fn macos_global_routes_never_use_the_all_zero_destination() {
         let nets = global_route_nets_for(true, true, &[]);
         assert!(nets.iter().all(|n| !n.network().is_unspecified()));
-        assert_eq!(nets.iter().filter(|n| n.addr().is_ipv4()).count(), 8);
-        assert_eq!(nets.iter().filter(|n| n.addr().is_ipv6()).count(), 8);
-        assert_eq!(global_route_nets_for(false, true, &[]).len(), 8);
+        assert_eq!(nets.iter().filter(|n| n.addr().is_ipv4()).count(), 9);
+        assert_eq!(nets.iter().filter(|n| n.addr().is_ipv6()).count(), 9);
+        assert_eq!(global_route_nets_for(false, true, &[]).len(), 9);
+        // Nothing as wide as a /1: a later VPN's split default never
+        // collides with one of ours.
+        assert!(nets.iter().all(|n| n.prefix_len() >= 2));
 
         let covering = |ip: &str| {
             let ip: std::net::IpAddr = ip.parse().unwrap();

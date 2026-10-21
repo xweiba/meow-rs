@@ -46,6 +46,70 @@ pub fn find_process(network: Network, local_addr: SocketAddr) -> Option<ProcessI
     platform::find_process(network, local_addr)
 }
 
+/// PaoPao: every program running now, as `(pid, name, path)` (the name is
+/// the executable's file name; the path is empty where the system does not
+/// say, as for another user's process on Linux). One pass over the process
+/// list, no socket tables: cheap enough to repeat every few seconds. Empty
+/// where not implemented (Windows, Android).
+pub fn running_programs() -> Vec<(u32, String, String)> {
+    programs::list()
+}
+
+#[cfg(target_os = "macos")]
+mod programs {
+    use libproc::libproc::proc_pid::pidpath;
+    use libproc::processes::{pids_by_type, ProcFilter};
+
+    pub fn list() -> Vec<(u32, String, String)> {
+        let Ok(pids) = pids_by_type(ProcFilter::All) else {
+            return Vec::new();
+        };
+        pids.into_iter()
+            .filter(|pid| *pid != 0)
+            .filter_map(|pid| {
+                let path = pidpath(pid as i32).ok()?;
+                let name = path.rsplit('/').next().unwrap_or_default().to_owned();
+                Some((pid, name, path))
+            })
+            .collect()
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod programs {
+    pub fn list() -> Vec<(u32, String, String)> {
+        let Ok(dir) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        dir.flatten()
+            .filter_map(|entry| {
+                let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+                // Another user's `exe` cannot be read; `comm` (at most 15
+                // bytes) still names it.
+                let path = std::fs::read_link(entry.path().join("exe"))
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let name = match path.rsplit('/').next() {
+                    Some(n) if !n.is_empty() => n.to_owned(),
+                    _ => std::fs::read_to_string(entry.path().join("comm"))
+                        .ok()?
+                        .trim()
+                        .to_owned(),
+                };
+                Some((pid, name, path))
+            })
+            .collect()
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+mod programs {
+    pub fn list() -> Vec<(u32, String, String)> {
+        Vec::new()
+    }
+}
+
 /// Async counterpart of [`find_process`]: the platform scan is synchronous
 /// and can cost milliseconds on hosts with large socket tables — running it
 /// on a Tokio worker stalls every task sharing that worker (issue #515).

@@ -30,26 +30,87 @@ fn vpn_interfaces(table: &RouteTable, is_container: impl Fn(&str) -> bool) -> Ve
     names
 }
 
-/// Refresh the published list of VPN client processes.
+/// Who holds another VPN's device, as last scanned (kept between scans).
+static HOLDERS: parking_lot::Mutex<Vec<route_table::VpnClientProc>> =
+    parking_lot::Mutex::new(Vec::new());
+
+/// The running well-known clients (`tun.vpn-known-clients`) and when the
+/// process list was last read.
+static KNOWN: parking_lot::Mutex<(Option<std::time::Instant>, Vec<route_table::VpnClientProc>)> =
+    parking_lot::Mutex::new((None, Vec::new()));
+
+/// How often the process list is read for the well-known clients.
+const KNOWN_EVERY: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// The well-known clients running now (one pass over the process list at
+/// most every [`KNOWN_EVERY`]); none, and nothing read, without any listed.
+/// A client named here passes through from before its tunnel exists: its
+/// gateway's name gets a real answer and its handshake leaves by the
+/// physical interface, so a VPN started after the virtual adapter comes up.
+fn known_running() -> Vec<route_table::VpnClientProc> {
+    let matchers = route_table::vpn_manual().known_clients.clone();
+    let mut known = KNOWN.lock();
+    if matchers.is_empty() {
+        *known = (None, Vec::new());
+        return Vec::new();
+    }
+    if known.0.is_some_and(|at| at.elapsed() < KNOWN_EVERY) {
+        return known.1.clone();
+    }
+    let found: Vec<route_table::VpnClientProc> = meow_common::running_programs()
+        .into_iter()
+        .filter(|(_, name, path)| {
+            matchers
+                .iter()
+                .any(|m| route_table::app_matches(m, name, path))
+        })
+        .map(|(pid, name, path)| route_table::VpnClientProc {
+            pid,
+            name,
+            path,
+            iface: String::new(),
+        })
+        .collect();
+    *known = (Some(std::time::Instant::now()), found.clone());
+    found
+}
+
+/// Refresh the published list of VPN client processes: who holds another
+/// VPN's device, and the well-known clients running.
 pub(super) fn refresh(table: &RouteTable, changed: bool) {
     let ifaces = vpn_interfaces(table, super::route::is_container_like);
-    if ifaces.is_empty() {
-        route_table::publish_vpn_clients(Vec::new());
-        return;
+    let holders = if ifaces.is_empty() {
+        Vec::new()
+    } else if platform::due(changed) {
+        platform::scan(&ifaces)
+    } else {
+        HOLDERS.lock().clone()
+    };
+    HOLDERS.lock().clone_from(&holders);
+    let mut found = holders;
+    for k in known_running() {
+        if !found.iter().any(|c| c.pid == k.pid) {
+            found.push(k);
+        }
     }
-    if !platform::due(changed) {
-        return;
-    }
-    let found = platform::scan(&ifaces);
     if route_table::publish_vpn_clients(found) {
         for c in route_table::vpn_clients().iter() {
-            tracing::info!(
-                "vpn client: '{}' (pid {}, {}) holds '{}'; its own traffic is passed through",
-                c.name,
-                c.pid,
-                c.path,
-                c.iface
-            );
+            if c.iface.is_empty() {
+                tracing::info!(
+                    "vpn client: '{}' (pid {}, {}) is a known VPN client; its own traffic is passed through",
+                    c.name,
+                    c.pid,
+                    c.path
+                );
+            } else {
+                tracing::info!(
+                    "vpn client: '{}' (pid {}, {}) holds '{}'; its own traffic is passed through",
+                    c.name,
+                    c.pid,
+                    c.path,
+                    c.iface
+                );
+            }
         }
     }
 }
@@ -204,5 +265,37 @@ mod tests {
     #[test]
     fn the_proc_walk_finds_nobody_for_an_interface_nobody_holds() {
         assert!(super::platform::scan(&["meow-no-such-tun0".to_string()]).is_empty());
+    }
+
+    /// A well-known client is found while it runs — before any tunnel
+    /// exists — and is gone once it ends; nothing is read without any.
+    #[test]
+    fn a_running_known_client_is_found_by_its_program() {
+        use meow_common::route_table::{install_vpn_manual, VpnManual};
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep runs");
+        let pid = child.id();
+        let guard = install_vpn_manual(VpnManual {
+            known_clients: vec!["name:sleep".into()],
+            ..Default::default()
+        });
+        *super::KNOWN.lock() = (None, Vec::new());
+        let found = super::known_running();
+        assert!(
+            found
+                .iter()
+                .any(|c| c.pid == pid && c.name == "sleep" && c.iface.is_empty()),
+            "{found:?}"
+        );
+        // Asked again at once: the last pass, the process list not read.
+        assert_eq!(super::known_running(), found);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        *super::KNOWN.lock() = (None, Vec::new());
+        assert!(!super::known_running().iter().any(|c| c.pid == pid));
+        drop(guard);
+        assert!(super::known_running().is_empty());
     }
 }

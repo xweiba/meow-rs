@@ -66,6 +66,7 @@ pub fn tun(
     outbound_interface: Option<&str>,
     vpn: Option<&VpnOptions>,
     outbound: Option<&OutboundOptions>,
+    known_vpn_clients: &[String],
 ) -> Value {
     let mut t = serde_json::Map::new();
     t.insert("enable".into(), true.into());
@@ -128,6 +129,14 @@ pub fn tun(
         }
         if !v.client_apps.is_empty() {
             t.insert("vpn-client-apps".into(), v.client_apps.clone().into());
+        }
+        // The rule file's well-known clients: in force while one runs, so
+        // listing them costs nothing to those who have none.
+        if !known_vpn_clients.is_empty() {
+            t.insert(
+                "vpn-known-clients".into(),
+                known_vpn_clients.to_vec().into(),
+            );
         }
     }
     Value::Object(t)

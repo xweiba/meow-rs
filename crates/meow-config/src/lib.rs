@@ -313,6 +313,9 @@ pub struct TunConfig {
     /// PaoPao (`vpn-gateway-domains`): another VPN's server names entered
     /// by hand, lower case. Global mode only.
     pub vpn_gateway_domains: Vec<String>,
+    /// PaoPao (`vpn-known-clients`): well-known VPN client programs, in
+    /// force while one runs. Global mode only.
+    pub vpn_known_clients: Vec<String>,
     /// True when `dns-hijack` contains at least one usable (`:53`) entry.
     pub dns_hijack: bool,
     pub udp_timeout: std::time::Duration,
@@ -360,6 +363,7 @@ impl Default for TunConfig {
             vpn_domains: Vec::new(),
             vpn_client_apps: Vec::new(),
             vpn_gateway_domains: Vec::new(),
+            vpn_known_clients: Vec::new(),
             dns_hijack: false,
             udp_timeout: std::time::Duration::from_secs(60),
             max_connections: 256,
@@ -550,10 +554,22 @@ pub fn parse_tun_config(
              vpn-client-apps / vpn-gateway-domains: only used with 'auto-route: global'; ignored"
         );
     }
-    let (vpn_domains, vpn_client_apps, vpn_gateway_domains) = if global {
-        (vpn_domains, vpn_client_apps, vpn_gateway_domains)
+    let mut vpn_known_clients: Vec<String> = Vec::new();
+    for app in r.vpn_known_clients.iter().flatten() {
+        let app = app.trim();
+        if !app.is_empty() && !vpn_known_clients.iter().any(|a| a == app) {
+            vpn_known_clients.push(app.to_string());
+        }
+    }
+    let (vpn_domains, vpn_client_apps, vpn_gateway_domains, vpn_known_clients) = if global {
+        (
+            vpn_domains,
+            vpn_client_apps,
+            vpn_gateway_domains,
+            vpn_known_clients,
+        )
     } else {
-        (Vec::new(), Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
     };
     let default_via = if global {
         default_via
@@ -592,6 +608,7 @@ pub fn parse_tun_config(
         vpn_domains,
         vpn_client_apps,
         vpn_gateway_domains,
+        vpn_known_clients,
         dns_hijack,
         udp_timeout,
         max_connections: global_max_connections.unwrap_or(defaults.max_connections),

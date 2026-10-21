@@ -455,6 +455,7 @@ mod tests {
             }],
             client_apps: vec!["name:vpnagentd".into()],
             gateway_domains: vec!["vpn.corp.example".into()],
+            known_clients: Vec::new(),
         };
         let status = OutboundStatus {
             follow_routes: true,

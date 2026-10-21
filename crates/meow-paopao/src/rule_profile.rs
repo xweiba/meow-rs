@@ -71,6 +71,16 @@ pub struct RuleProfile {
     /// in version 1 files written before provider support; payloads stay native.
     #[serde(default)]
     pub rule_providers: serde_json::Map<String, Value>,
+    /// Other VPNs' client programs (`name:` / `path:` matchers) whose own
+    /// traffic passes through untouched — real DNS answers, out by the
+    /// physical interface — from before their tunnel exists. Without
+    /// these a client started after the virtual adapter has its gateway's
+    /// name answered with a fake address and its handshake sent through a
+    /// node, and never comes up: macOS and Windows cannot tell a client
+    /// until it is named, Linux only once it holds its device. Absent in
+    /// files written before it: the shipped list; empty: none.
+    #[serde(default)]
+    pub vpn_client_apps: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for RuleProfile {
@@ -92,6 +102,15 @@ impl RuleProfile {
             serde_json::from_str(DEFAULTS).expect("valid shipped routing profile")
         });
         &PROFILE
+    }
+
+    /// [`Self::vpn_client_apps`] as in force: the file's, else the shipped
+    /// list.
+    pub fn known_vpn_clients(&self) -> &[String] {
+        self.vpn_client_apps
+            .as_deref()
+            .or_else(|| Self::shipped().vpn_client_apps.as_deref())
+            .unwrap_or_default()
     }
 
     /// Expand only named runtime values. Matching conditions and targets
@@ -230,6 +249,16 @@ impl RuleProfile {
                 }
             }
         }
+        for app in self.vpn_client_apps.iter().flatten() {
+            let ok = app
+                .split_once(':')
+                .is_some_and(|(kind, v)| matches!(kind, "name" | "path") && !v.trim().is_empty());
+            if !ok {
+                return Err(format!(
+                    "vpnClientApps: '{app}' must be name:<program> or path:<file or folder>"
+                ));
+            }
+        }
         let mut groups = std::collections::HashSet::new();
         for p in &self.policies {
             if p.group.is_empty() || !groups.insert(&p.group) {
@@ -335,6 +364,27 @@ pub fn load(input: &mut Value) -> Result<Option<(&'static str, Value)>, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn well_known_vpn_clients_from_the_file_else_shipped() {
+        let shipped = RuleProfile::shipped();
+        assert!(shipped
+            .known_vpn_clients()
+            .contains(&"name:vpnagentd".to_owned()));
+        // Tailscale stays out: its servers may need a node.
+        assert!(!shipped
+            .known_vpn_clients()
+            .iter()
+            .any(|a| a.to_ascii_lowercase().contains("tailscale")));
+        let mut absent = shipped.clone();
+        absent.vpn_client_apps = None;
+        assert_eq!(absent.known_vpn_clients(), shipped.known_vpn_clients());
+        absent.vpn_client_apps = Some(Vec::new());
+        assert!(absent.known_vpn_clients().is_empty());
+        absent.validate().unwrap();
+        absent.vpn_client_apps = Some(vec!["vpnagentd".into()]);
+        assert!(absent.validate().unwrap_err().contains("vpnClientApps"));
+    }
+
     #[test]
     fn doh_beside_follow_domain_rules_is_refused_wherever_it_is() {
         // As meow-config refuses it at start: nameserver, fallback and

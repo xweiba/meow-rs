@@ -532,6 +532,11 @@ pub struct VpnManual {
     /// case: answered with real addresses, dialled by the physical
     /// interface.
     pub gateway_domains: Vec<String>,
+    /// PaoPao (`tun.vpn-known-clients`): well-known VPN client programs.
+    /// Unlike [`Self::client_apps`] they do not turn every connection's
+    /// process lookup on by being listed: only while one of them runs is
+    /// it published among the detected clients (by pid).
+    pub known_clients: Vec<String>,
 }
 
 static MANUAL: RwLock<Option<(u64, Arc<VpnManual>)>> = RwLock::new(None);

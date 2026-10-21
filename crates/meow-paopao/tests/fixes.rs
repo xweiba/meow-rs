@@ -564,7 +564,9 @@ fn vpn_options_only_add_tun_keys() {
     assert_eq!(
         empty["tun"],
         json!({"enable": true, "auto-route": "global", "auto-detect-interface": true,
-               "dns-hijack": ["any:53"], "follow-system-routes": true})
+               "dns-hijack": ["any:53"], "follow-system-routes": true,
+               "vpn-known-clients": meow_paopao::rule_profile::RuleProfile::shipped()
+                   .known_vpn_clients()})
     );
     let rest = |c: &serde_json::Map<String, Value>| {
         let mut c = c.clone();
@@ -603,6 +605,9 @@ fn vpn_options_only_add_tun_keys() {
             ],
             "vpn-gateway-domains": ["vpn.corp.example", "gw.example"],
             "vpn-client-apps": ["name:openconnect", "path:/opt/cisco/"],
+            // The rule file's well-known clients, in force while one runs.
+            "vpn-known-clients": meow_paopao::rule_profile::RuleProfile::shipped()
+                .known_vpn_clients(),
         })
     );
     assert_eq!(rest(&full), rest(&before));
@@ -713,7 +718,9 @@ fn outbound_options_choose_the_interfaces() {
         run(&v).config["tun"],
         json!({"enable": true, "auto-route": "global", "auto-detect-interface": true,
                "outbound-interfaces": ["en0", "en7"], "dns-hijack": ["any:53"],
-               "follow-system-routes": true})
+               "follow-system-routes": true,
+               "vpn-known-clients": meow_paopao::rule_profile::RuleProfile::shipped()
+                   .known_vpn_clients()})
     );
 
     // No TUN: nothing is bound, nothing to spread.
