@@ -56,6 +56,7 @@ use anyhow::Context;
 use anyhow::Result;
 use serde_json::{json, Value};
 
+mod system_dns;
 #[cfg(windows)]
 pub mod win;
 #[cfg(windows)]
@@ -246,6 +247,24 @@ fn signed_by(exe: &Path, team: &str) -> bool {
 
 struct Core {
     child: Option<WatchedChild>,
+}
+
+impl Core {
+    /// As the helper starts: the system DNS a core of before left changed
+    /// (the helper or the machine went down with it) put back.
+    fn new() -> Core {
+        if system_dns::restore_leftover() {
+            eprintln!("service: system DNS of an earlier core put back");
+        }
+        Core { child: None }
+    }
+}
+
+/// After a core exits, however: its system DNS put back, then the caches
+/// emptied (they may hold its fake-IP answers).
+fn after_core_exit() {
+    system_dns::restore_leftover();
+    meow_common::dns_cache::flush_after_capture();
 }
 
 /// The helper keeps a native exit watch even when neither panel nor tray
@@ -439,7 +458,7 @@ impl Core {
         }
         let child = cmd.spawn();
         let mut child = match child {
-            Ok(c) => match WatchedChild::new(c, meow_common::dns_cache::flush_after_capture) {
+            Ok(c) => match WatchedChild::new(c, after_core_exit) {
                 Ok(child) => child,
                 Err(e) => return json!({"ok": false, "error": e.to_string()}),
             },
@@ -454,6 +473,13 @@ impl Core {
             let lines: Vec<&str> = tail.lines().collect();
             let tail = lines[lines.len().saturating_sub(8)..].join("\n");
             return json!({"ok": false, "error": format!("core exited ({status})"), "log": tail});
+        }
+        if system_dns::tun_on(Path::new(config)) {
+            system_dns::apply();
+            // Ended meanwhile: its exit came before this change.
+            if !matches!(child.try_wait(), Ok(None)) {
+                system_dns::restore_leftover();
+            }
         }
         self.child = Some(child);
         json!({"ok": true})
@@ -592,7 +618,7 @@ pub fn serve(socket: &str, uid: u32) -> Result<()> {
     let listener = UnixListener::bind(path).with_context(|| format!("binding {socket}"))?;
     // Anyone may connect; only `uid` (and root) are answered.
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
-    let mut core = Core { child: None };
+    let mut core = Core::new();
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {

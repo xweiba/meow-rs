@@ -201,7 +201,7 @@ pub fn serve(socket: &str, sid: &str) -> Result<()> {
         return Ok(());
     }
     let pipe = create_pipe(socket, sid)?;
-    let core = Mutex::new(Core { child: None });
+    let core = Mutex::new(Core::new());
     serve_on(&pipe, &core);
     Ok(())
 }
@@ -261,7 +261,7 @@ fn helper_main(_arguments: Vec<OsString>) {
             return;
         }
     };
-    let core = Arc::new(Mutex::new(Core { child: None }));
+    let core = Arc::new(Mutex::new(Core::new()));
     let serving = Arc::clone(&core);
     std::thread::spawn(move || serve_on(&pipe, &serving));
     let _ = handle.set_service_status(status(ServiceState::Running, ServiceExitCode::NO_ERROR));
