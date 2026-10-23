@@ -740,7 +740,9 @@ impl CompiledRuleSet {
                         &mut on_missing,
                     ) {
                         ScanOutcome::Matched(matched) => LazyMatchOutcome::Matched(matched),
-                        ScanOutcome::Blocked { pos } => self.enrichment_needs(pos, &input),
+                        ScanOutcome::Blocked { pos } => {
+                            self.blocked(pos, &input, rules, &helper, probe, &mut on_missing)
+                        }
                         ScanOutcome::Exhausted => LazyMatchOutcome::NoMatch,
                     };
                 }
@@ -777,7 +779,14 @@ impl CompiledRuleSet {
                     // it, so enrichment is needed even though a domain rule
                     // stands ready.
                     ScanOutcome::Blocked { pos } => {
-                        break 'scan self.enrichment_needs(pos, &input);
+                        break 'scan self.blocked(
+                            pos,
+                            &input,
+                            rules,
+                            &helper,
+                            probe,
+                            &mut on_missing,
+                        );
                     }
                     ScanOutcome::Exhausted => {}
                 }
@@ -804,7 +813,9 @@ impl CompiledRuleSet {
                     &mut on_missing,
                 ) {
                     ScanOutcome::Matched(matched) => LazyMatchOutcome::Matched(matched),
-                    ScanOutcome::Blocked { pos } => self.enrichment_needs(pos, &input),
+                    ScanOutcome::Blocked { pos } => {
+                        self.blocked(pos, &input, rules, &helper, probe, &mut on_missing)
+                    }
                     ScanOutcome::Exhausted => LazyMatchOutcome::NoMatch,
                 }
             }
@@ -816,6 +827,59 @@ impl CompiledRuleSet {
             }
         }
         outcome
+    }
+
+    /// The lazy scan stopped at slot `pos`, which needs the address or the
+    /// program. Before asking for them, see whether the answer could change
+    /// anything: scanning on past every such slot, if the first rule that
+    /// matches without them has the same target as each of the slots
+    /// passed, the connection goes there whichever of them would have
+    /// matched — `GEOIP,CN,DIRECT` ahead of a domestic domain list that is
+    /// DIRECT as well needs no lookup. The match is the later rule's (its
+    /// name is what the connection shows). Otherwise the demands of `pos`
+    /// onward, as before.
+    fn blocked<'a>(
+        &'a self,
+        pos: usize,
+        input: &MatchInput<'_>,
+        rules: &'a [Box<dyn Rule>],
+        helper: &RuleMatchHelper,
+        probe: &dyn TargetProbe,
+        on_missing: &mut dyn FnMut(CompiledMatchResult<'a>),
+    ) -> LazyMatchOutcome<'a> {
+        let mut passed: SmallVec<[&str; 4]> = SmallVec::new();
+        let mut at = pos;
+        let decided = loop {
+            let slot = &self.slots[at];
+            // A rule picking its target as it evaluates (SUB-RULE) could
+            // go anywhere.
+            if slot.target_plan == TargetPlan::DynamicAdapter {
+                break None;
+            }
+            let target = self.adapter_names[slot.adapter_index()].as_str();
+            // A target that is skipped when it matches decides nothing.
+            if probe.check(target) == TargetCheck::Usable {
+                passed.push(target);
+            }
+            match self.scan_range_ctl::<true, true>(
+                at + 1..self.slots.len(),
+                input,
+                rules,
+                helper,
+                probe,
+                on_missing,
+            ) {
+                ScanOutcome::Matched(m) => {
+                    break passed.iter().all(|t| *t == m.adapter_name).then_some(m)
+                }
+                ScanOutcome::Blocked { pos } => at = pos,
+                ScanOutcome::Exhausted => break None,
+            }
+        };
+        match decided {
+            Some(m) => LazyMatchOutcome::Matched(m),
+            None => self.enrichment_needs(pos, input),
+        }
     }
 
     /// Union the demands of every slot at or after `from_pos`, filtered to
@@ -3848,6 +3912,48 @@ mod tests {
             .match_rules(&resolved, &rules, &|_: &str| true)
             .expect("must match");
         assert_eq!(result.adapter_name, "P7");
+    }
+
+    /// `GEOIP,CN,DIRECT`-like slots ahead of a domain rule with the same
+    /// target decide nothing: matched without a lookup, on both plans.
+    #[test]
+    fn lazy_match_skips_lookup_when_blocked_slots_agree_with_the_next_match() {
+        let host_meta = |host: &str| Metadata {
+            host: host.into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        for filler in [0, 70] {
+            let mut rules: Vec<Box<dyn Rule>> = vec![
+                Box::new(IpCidrRule::new("1.2.3.0/24", "DIRECT", false, false).unwrap()),
+                Box::new(IpCidrRule::new("5.6.7.0/24", "DEAD", false, false).unwrap()),
+                Box::new(IpCidrRule::new("8.9.0.0/16", "DIRECT", false, false).unwrap()),
+            ];
+            rules.extend(filler_suffix_rules(filler));
+            rules.push(Box::new(DomainSuffixRule::new("cn.test", "DIRECT")));
+            rules.push(Box::new(DomainSuffixRule::new("abroad.test", "Proxy")));
+            rules.push(Box::new(FinalRule::new("Final")));
+            let set = CompiledRuleSet::build(&rules);
+            assert_eq!(set.uses_linear_scan_plan(), filler == 0);
+            let usable = |name: &str| name != "DEAD";
+
+            match set.match_rules_lazy(&host_meta("www.cn.test"), &rules, &usable) {
+                LazyMatchOutcome::Matched(m) => {
+                    assert_eq!(m.adapter_name, "DIRECT");
+                    assert_eq!(m.rule_payload, "cn.test", "the later rule's match");
+                }
+                _ => panic!("same target ahead and after: no lookup ({filler})"),
+            }
+            for host in ["www.abroad.test", "nowhere.test"] {
+                assert!(
+                    matches!(
+                        set.match_rules_lazy(&host_meta(host), &rules, &usable),
+                        LazyMatchOutcome::NeedsEnrichment { needs_ip: true, .. }
+                    ),
+                    "{host}: the address can change the target ({filler})"
+                );
+            }
+        }
     }
 
     #[test]
