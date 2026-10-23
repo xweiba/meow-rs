@@ -323,10 +323,7 @@ pub fn materialize(input: &mut Value) -> Result<Option<Value>, String> {
         return Ok(None);
     };
     let mut document = match read_document(path, MAX_BYTES)? {
-        Some(mut document) => {
-            migrate_bootstrap_dns(&mut document);
-            document
-        }
+        Some(document) => document,
         None => {
             let mut document: Value = serde_json::from_str(DEFAULTS).map_err(|e| e.to_string())?;
             // One-time migration of the formerly separate encrypted DNS file.
@@ -350,35 +347,6 @@ pub fn materialize(input: &mut Value) -> Result<Option<Value>, String> {
     Ok(Some(input["runtime"]["rulesProfile"].clone()))
 }
 
-/// The DNS that resolves node hostnames (and bootstraps named upstreams)
-/// shipped before as `https://1.1.1.1` beside AliDNS: from the mainland,
-/// 1.1.1.1:443 is not reachable directly, and those lookups always go
-/// direct — every one left a 5 s timeout behind. A file still holding
-/// exactly the old shipped value gets the current one; anything the user
-/// wrote stays.
-fn migrate_bootstrap_dns(document: &mut Value) {
-    let Some(dns) = document.get_mut("dns").and_then(Value::as_object_mut) else {
-        return;
-    };
-    let shipped = &RuleProfile::shipped().dns;
-    for (key, old) in [
-        (
-            "default-nameserver",
-            serde_json::json!(["https://1.1.1.1/dns-query"]),
-        ),
-        (
-            "proxy-server-nameserver",
-            serde_json::json!(["https://223.5.5.5/dns-query", "https://1.1.1.1/dns-query"]),
-        ),
-    ] {
-        if let (Some(value), Some(now)) = (dns.get_mut(key), shipped.get(key)) {
-            if *value == old {
-                *value = now.clone();
-            }
-        }
-    }
-}
-
 /// Shared boundary for the FFI and resident core's rebuild child. The
 /// legacy resolver-only file remains readable for older controllers.
 pub fn load(input: &mut Value) -> Result<Option<(&'static str, Value)>, String> {
@@ -397,44 +365,14 @@ pub fn load(input: &mut Value) -> Result<Option<(&'static str, Value)>, String> 
 mod tests {
     use super::*;
     #[test]
-    fn the_old_shipped_bootstrap_dns_is_replaced_and_a_users_own_kept() {
-        let shipped = &RuleProfile::shipped().dns;
+    fn shipped_bootstrap_dns_is_reachable_from_the_mainland() {
+        let dns = &RuleProfile::shipped().dns;
         for key in ["default-nameserver", "proxy-server-nameserver"] {
             assert!(
-                !shipped[key].to_string().contains("1.1.1.1"),
+                !dns[key].to_string().contains("1.1.1.1"),
                 "{key} reaches 1.1.1.1 directly"
             );
         }
-        let path = std::env::temp_dir().join(format!(
-            "meow-paopao-bootstrap-dns-{}.json",
-            std::process::id()
-        ));
-        let mut old: Value = serde_json::from_str(DEFAULTS).unwrap();
-        old["dns"]["default-nameserver"] = serde_json::json!(["https://1.1.1.1/dns-query"]);
-        old["dns"]["proxy-server-nameserver"] =
-            serde_json::json!(["https://223.5.5.5/dns-query", "https://1.1.1.1/dns-query"]);
-        std::fs::write(&path, old.to_string()).unwrap();
-        let mut input = serde_json::json!({"runtime": {"rulesFile": path.to_str().unwrap()}});
-        let got = materialize(&mut input).unwrap().unwrap();
-        assert_eq!(
-            got["dns"]["default-nameserver"],
-            shipped["default-nameserver"]
-        );
-        assert_eq!(
-            got["dns"]["proxy-server-nameserver"],
-            shipped["proxy-server-nameserver"]
-        );
-
-        let mine = serde_json::json!(["https://1.1.1.1/dns-query", "https://9.9.9.9/dns-query"]);
-        old["dns"]["proxy-server-nameserver"] = mine.clone();
-        std::fs::write(&path, old.to_string()).unwrap();
-        let mut input = serde_json::json!({"runtime": {"rulesFile": path.to_str().unwrap()}});
-        let got = materialize(&mut input).unwrap().unwrap();
-        assert_eq!(
-            got["dns"]["proxy-server-nameserver"], mine,
-            "the user's own stays"
-        );
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
