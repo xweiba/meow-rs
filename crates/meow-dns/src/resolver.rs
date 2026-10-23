@@ -270,6 +270,9 @@ pub struct Resolver {
     router: parking_lot::RwLock<Option<Arc<dyn crate::domain_route::DomainRouter>>>,
     /// Bounded views retain both node and routing generation identities.
     routed: parking_lot::Mutex<lru::LruCache<(usize, usize, usize), RoutedGeneration>>,
+    /// Names [`Resolver::resolve_classification_ip`] found no address for,
+    /// and when.
+    classify_misses: parking_lot::Mutex<lru::LruCache<Arc<str>, tokio::time::Instant>>,
 }
 
 struct DirectSystemGeneration {
@@ -525,6 +528,11 @@ impl FamilySet {
 /// negative is returned.
 const NEGATIVE_GRACE_PERIOD: Duration = Duration::from_millis(300);
 
+/// How long a name the classification lookup found no address for is left
+/// unclassified before it is asked again (see
+/// [`Resolver::resolve_classification_ip`]).
+const CLASSIFY_MISS_TTL: Duration = Duration::from_secs(15);
+
 /// Query a pool of clients in parallel for the requested family set `want`,
 /// returning `(set, error)`: the first positive resolution or, after a short
 /// grace period, the first definitive negative (review issue C: a fast
@@ -779,6 +787,9 @@ impl Resolver {
             router: parking_lot::RwLock::new(None),
             routed: parking_lot::Mutex::new(lru::LruCache::new(
                 std::num::NonZeroUsize::new(32).unwrap(),
+            )),
+            classify_misses: parking_lot::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(256).unwrap(),
             )),
         }
     }
@@ -1057,6 +1068,9 @@ impl Resolver {
             router: parking_lot::RwLock::new(None),
             routed: parking_lot::Mutex::new(lru::LruCache::new(
                 std::num::NonZeroUsize::new(32).unwrap(),
+            )),
+            classify_misses: parking_lot::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(256).unwrap(),
             )),
         })
     }
@@ -1616,8 +1630,48 @@ impl Resolver {
 
     /// Only the address used to classify an IP-based routing rule. Final
     /// direct/UDP dials resolve in the chosen egress view afterwards.
+    ///
+    /// While every nameserver currently leaves DIRECT (a `#policy` group
+    /// set to DIRECT), the interface DNS answers instead: the query would
+    /// leave by the NIC unencrypted either way, and the interface DNS is
+    /// the near one — not a far resolver dialed over TCP from the same
+    /// network, which can hang for the whole query timeout. A name that
+    /// got no address is not asked again for [`CLASSIFY_MISS_TTL`]: every
+    /// connection to it would otherwise wait out the same failure.
     pub async fn resolve_classification_ip(&self, host: &str) -> Option<IpAddr> {
-        crate::domain_route::classify(self.resolve_ip_real(host)).await
+        if self
+            .classify_misses
+            .lock()
+            .get(host)
+            .is_some_and(|at| at.elapsed() < CLASSIFY_MISS_TTL)
+        {
+            return None;
+        }
+        let ip = if self.classification_on_interface_dns(host) {
+            match self.resolve_direct_ips_on(host, None).await {
+                Ok(ips) => ips.and_then(|ips| ips.into_iter().next()),
+                Err(e) => {
+                    debug!("classifying {host} on interface DNS failed: {e}");
+                    crate::domain_route::classify(self.resolve_ip_real(host)).await
+                }
+            }
+        } else {
+            crate::domain_route::classify(self.resolve_ip_real(host)).await
+        };
+        let mut misses = self.classify_misses.lock();
+        if ip.is_some() {
+            misses.pop(host);
+        } else {
+            misses.put(Arc::from(host), tokio::time::Instant::now());
+        }
+        ip
+    }
+
+    fn classification_on_interface_dns(&self, host: &str) -> bool {
+        self.direct_system.is_some()
+            && !self.main.is_empty()
+            && self.policy.as_ref().and_then(|p| p.lookup(host)).is_none()
+            && self.main.iter().all(|client| client.routes_direct())
     }
 
     pub async fn lookup_ipv4(&self, host: &str) -> Option<IpAddr> {
@@ -4507,5 +4561,51 @@ mod tests {
             ),
         ];
         assert_eq!(resolver.resolve_ips("gone.example").await.unwrap(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn classification_miss_is_not_asked_again_at_once() {
+        let (resolver, dials) = emfile_resolver_gated(None);
+        assert_eq!(
+            resolver.resolve_classification_ip("down.example").await,
+            None
+        );
+        let first = dials.load(Ordering::SeqCst);
+        assert!(first > 0);
+
+        assert_eq!(
+            resolver.resolve_classification_ip("down.example").await,
+            None
+        );
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            first,
+            "a fresh miss is not asked again"
+        );
+
+        tokio::time::advance(CLASSIFY_MISS_TTL + Duration::from_secs(1)).await;
+        assert_eq!(
+            resolver.resolve_classification_ip("down.example").await,
+            None
+        );
+        assert!(
+            dials.load(Ordering::SeqCst) > first,
+            "an old miss is asked again"
+        );
+    }
+
+    #[test]
+    fn classification_uses_interface_dns_only_while_nameservers_leave_direct() {
+        // The mock behind `emfile_resolver_gated` is a DIRECT adapter.
+        let (mut resolver, _) = emfile_resolver_gated(None);
+        assert!(!resolver.classification_on_interface_dns("a.example"));
+        resolver.set_direct_system_dns(true);
+        assert!(resolver.classification_on_interface_dns("a.example"));
+
+        // An untagged nameserver is asked as configured.
+        resolver
+            .main
+            .push(Arc::new(DnsClient::udp("203.0.113.54:53".parse().unwrap())));
+        assert!(!resolver.classification_on_interface_dns("a.example"));
     }
 }

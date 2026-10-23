@@ -550,6 +550,46 @@ impl DnsClient {
         self.proxy.as_ref()
     }
 
+    /// Whether a query sent now would leave DIRECT: the client names a
+    /// proxy (a `#policy` group) whose current selection, followed down,
+    /// ends at a direct adapter. A peek — no group state advances. `false`
+    /// for an untagged upstream: that one is dialed as configured.
+    pub fn routes_direct(&self) -> bool {
+        use meow_common::{AdapterType, ConnType, Metadata, Network};
+        let Some(mut current) = self
+            .proxy
+            .clone()
+            .or_else(|| self.weak_proxy.as_ref().and_then(std::sync::Weak::upgrade))
+        else {
+            return false;
+        };
+        let addr = match &self.transport {
+            Transport::Udp { addr } | Transport::Tcp { addr } => *addr,
+            _ => return false,
+        };
+        let metadata = Metadata {
+            network: Network::Tcp,
+            conn_type: ConnType::Inner,
+            host: smol_str::SmolStr::from(addr.ip().to_string()),
+            dst_ip: Some(addr.ip()),
+            dst_port: addr.port(),
+            internal: true,
+            ..Default::default()
+        };
+        for _ in 0..16 {
+            match current.unwrap_proxy(&metadata, false) {
+                Some(next) => current = next,
+                None => {
+                    return matches!(
+                        current.adapter_type(),
+                        AdapterType::Direct | AdapterType::Compatible
+                    )
+                }
+            }
+        }
+        false
+    }
+
     /// Drop this client's pooled `tcp://` connections so the next query
     /// dials a fresh socket (issue #695). Idle streams close now unless the
     /// pool is mid-checkout, in which case they close on the next checkout;
@@ -2750,5 +2790,104 @@ mod tests {
         )
         .unwrap();
         assert!(r.ips.is_empty());
+    }
+
+    /// A leaf of `kind`, or a group currently selecting `next`.
+    struct KindProxy {
+        kind: meow_common::AdapterType,
+        next: Option<Arc<dyn meow_common::Proxy>>,
+        health: meow_common::ProxyHealth,
+    }
+
+    fn kind_proxy(
+        kind: meow_common::AdapterType,
+        next: Option<Arc<dyn meow_common::Proxy>>,
+    ) -> Arc<dyn meow_common::Proxy> {
+        Arc::new(KindProxy {
+            kind,
+            next,
+            health: meow_common::ProxyHealth::new(),
+        })
+    }
+
+    #[async_trait::async_trait]
+    impl meow_common::ProxyAdapter for KindProxy {
+        fn name(&self) -> &str {
+            "kind"
+        }
+        fn adapter_type(&self) -> meow_common::AdapterType {
+            self.kind
+        }
+        fn addr(&self) -> &str {
+            ""
+        }
+        fn support_udp(&self) -> bool {
+            false
+        }
+        fn unwrap_proxy(
+            &self,
+            _metadata: &meow_common::Metadata,
+            _touch: bool,
+        ) -> Option<Arc<dyn meow_common::Proxy>> {
+            self.next.clone()
+        }
+        async fn dial_tcp(
+            &self,
+            _m: &meow_common::Metadata,
+        ) -> meow_common::Result<Box<dyn meow_common::ProxyConn>> {
+            unimplemented!("kind mock is never dialed")
+        }
+        async fn dial_udp(
+            &self,
+            _m: &meow_common::Metadata,
+        ) -> meow_common::Result<Box<dyn meow_common::ProxyPacketConn>> {
+            unimplemented!("kind mock is never dialed")
+        }
+        fn health(&self) -> &meow_common::ProxyHealth {
+            &self.health
+        }
+    }
+
+    impl meow_common::Proxy for KindProxy {
+        fn alive(&self) -> bool {
+            true
+        }
+        fn alive_for_url(&self, _url: &str) -> bool {
+            true
+        }
+        fn last_delay(&self) -> u16 {
+            0
+        }
+        fn last_delay_for_url(&self, _url: &str) -> u16 {
+            0
+        }
+        fn delay_history(&self) -> Vec<meow_common::DelayHistory> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn routes_direct_follows_the_group_selection_to_its_leaf() {
+        use meow_common::AdapterType;
+        let addr: SocketAddr = "8.8.8.8:53".parse().unwrap();
+        let direct = kind_proxy(AdapterType::Direct, None);
+        let node = kind_proxy(AdapterType::Vless, None);
+        let on_direct = kind_proxy(
+            AdapterType::Selector,
+            Some(kind_proxy(AdapterType::Selector, Some(Arc::clone(&direct)))),
+        );
+        let on_node = kind_proxy(AdapterType::Selector, Some(node));
+
+        assert!(DnsClient::tcp(addr).with_proxy(direct).routes_direct());
+        assert!(DnsClient::tcp(addr)
+            .with_proxy(Arc::clone(&on_direct))
+            .routes_direct());
+        // A routed view holds its node weakly; the generation keeps it.
+        assert!(DnsClient::udp(addr)
+            .through_node(Arc::clone(&on_direct))
+            .routes_direct());
+        assert!(!DnsClient::tcp(addr).with_proxy(on_node).routes_direct());
+        // An untagged upstream is dialed as configured.
+        assert!(!DnsClient::tcp(addr).routes_direct());
     }
 }
