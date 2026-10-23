@@ -32,6 +32,10 @@ use meow_transport::{
 /// Default per-query timeout (matches the hickory-resolver value previously
 /// used in `Resolver::build_*`).
 pub const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+/// When a `udp://` query unanswered is sent again (then twice as long each
+/// time, up to [`UDP_RETRANSMIT_MAX`]).
+const UDP_RETRANSMIT: Duration = Duration::from_millis(500);
+const UDP_RETRANSMIT_MAX: Duration = Duration::from_secs(2);
 /// Maximum number of *idle* pooled `tcp://` streams per [`DnsClient`].
 ///
 /// This bounds only the keep-alive pool: a stream is pushed on return
@@ -1440,8 +1444,23 @@ async fn udp_exchange(
     sock.connect(addr).await?;
     sock.send(wire).await?;
     let mut buf = vec![0u8; 4096];
+    // A datagram lost on the way (Wi-Fi drops a few in a hundred) would
+    // otherwise cost the whole query timeout: the same query goes again
+    // after UDP_RETRANSMIT, then twice as long each time, as stub
+    // resolvers do; any copy's answer is the answer.
+    let mut retransmit = UDP_RETRANSMIT;
+    let mut resend = Box::pin(tokio::time::sleep(retransmit));
     loop {
-        let n = sock.recv(&mut buf).await?;
+        let n = tokio::select! {
+            n = sock.recv(&mut buf) => n?,
+            () = &mut resend => {
+                // A failed resend leaves the copies already sent to answer.
+                let _ = sock.send(wire).await;
+                retransmit = (retransmit * 2).min(UDP_RETRANSMIT_MAX);
+                resend.as_mut().reset(tokio::time::Instant::now() + retransmit);
+                continue;
+            }
+        };
         let Ok(response) = decode_validated_response(&buf[..n], expected) else {
             // A connected UDP socket only filters the peer tuple. Ignore
             // malformed or unrelated datagrams and keep waiting under the
@@ -1702,7 +1721,8 @@ mod tests {
         // The sink is never read and never writes a reply. It only has to stay
         // bound for the duration of the query: a closed port would yield
         // ECONNREFUSED on the client's connected socket instead of a timeout.
-        // The client sends a single datagram, so the kernel recv buffer never
+        // The client sends a single datagram (the timeout ends the query
+        // before its first retransmit), so the kernel recv buffer never
         // fills and no drain task is needed. Binding for the whole test scope
         // covers that; the sink needs no explicit drop at the end — the query
         // has already completed by then (review low item).
@@ -1711,6 +1731,40 @@ mod tests {
         let client = DnsClient::udp(addr).with_timeout(Duration::from_millis(200));
         let r = client.query("example.test", RecordType::A).await;
         assert!(matches!(r, Err(ClientError::Timeout(_))));
+    }
+
+    /// The first datagram is lost: the query is sent again and answered,
+    /// well inside the query timeout.
+    #[tokio::test]
+    async fn udp_query_is_sent_again_when_a_datagram_is_lost() {
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        let received = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&received);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                let (n, peer) = server.recv_from(&mut buf).await.unwrap();
+                if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                    continue; // dropped
+                }
+                let request = Message::from_bytes(&buf[..n]).unwrap();
+                let response = response_for(&request, request.metadata.id);
+                server
+                    .send_to(&response.to_bytes().unwrap(), peer)
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = DnsClient::udp(addr).with_timeout(Duration::from_secs(5));
+        let started = std::time::Instant::now();
+        client.query("lossy.example", RecordType::A).await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(received.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
