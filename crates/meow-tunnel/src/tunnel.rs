@@ -351,9 +351,13 @@ impl TunnelInner {
     ///
     /// `None` — the usual case, at the cost of two atomic-sized reads —
     /// routes the connection as usual.
+    ///
+    /// `any_name: false` resolves only the VPN's own names here; any other
+    /// name is left to [`Self::named_other_vpn_route`], after the rules.
     async fn other_vpn_passthrough(
         &self,
         metadata: &Metadata,
+        any_name: bool,
     ) -> Option<(ResolvedTarget, Option<IpAddr>)> {
         use meow_common::route_table as rt;
         if metadata.conn_type == ConnType::Tun && OWN_PID_LOOKUP && rt::vpn_clients_known() {
@@ -391,7 +395,7 @@ impl TunnelInner {
             // the address tells. A miss leaves the metadata as it was.
             None if !metadata.host.is_empty()
                 && (rt::vpn_dns_for(&metadata.host).is_some()
-                    || meow_common::outbound_iface::has_other_vpn_routes()) =>
+                    || any_name && meow_common::outbound_iface::has_other_vpn_routes()) =>
             {
                 let ip = self
                     .resolver()
@@ -682,7 +686,7 @@ impl TunnelInner {
         if let Some(target) = self.own_loop_reject(metadata).await {
             return Some(target);
         }
-        if let Some((target, _)) = self.other_vpn_passthrough(metadata).await {
+        if let Some((target, _)) = self.other_vpn_passthrough(metadata, true).await {
             return Some(target);
         }
         self.resolve_proxy_checked(metadata).await
@@ -761,12 +765,95 @@ impl TunnelInner {
         if let Some(target) = self.own_loop_reject(metadata).await {
             return Some(target);
         }
-        if let Some((target, resolved)) = self.other_vpn_passthrough(metadata).await {
+        let named = metadata.dst_ip.is_none() && !metadata.host.is_empty();
+        if let Some((target, resolved)) = self.other_vpn_passthrough(metadata, false).await {
             if let Some(ip) = resolved {
                 metadata.dst_ip = Some(ip);
             }
             return Some(target);
         }
+        let target = self.resolve_proxy_lazy_routed(metadata).await?;
+        if !named {
+            return Some(target);
+        }
+        Some(self.named_other_vpn_route(metadata, target).await)
+    }
+
+    /// After the rules, a destination known by name only is compared with
+    /// another VPN's routes, as [`Self::other_vpn_passthrough`] does for
+    /// an address before them — unless it goes plain DIRECT: that dial
+    /// resolves at the interface DNS and follows those routes by itself, so
+    /// it is spared a lookup ahead of the connection. Anything else (a
+    /// node, a group, REJECT, an interface picked by rule) still passes
+    /// through when the name's address is inside such a route.
+    async fn named_other_vpn_route(
+        &self,
+        metadata: &mut Metadata,
+        target: ResolvedTarget,
+    ) -> ResolvedTarget {
+        use meow_common::outbound_iface as oi;
+        if !oi::has_other_vpn_routes() || Self::plain_direct(&target, metadata) {
+            return target;
+        }
+        let ip = match metadata.dst_ip {
+            Some(ip) => ip.to_canonical(),
+            None => match self
+                .resolver()
+                .resolve_classification_ip(&metadata.host)
+                .await
+            {
+                Some(ip) => ip,
+                None => return target,
+            },
+        };
+        let Some(hit) = oi::other_vpn_route(ip) else {
+            return target;
+        };
+        debug!(
+            "{} is inside {} of '{}' (another VPN's route): passed through",
+            metadata.remote_address(),
+            hit.prefix,
+            hit.iface
+        );
+        metadata.dst_ip = Some(ip);
+        ResolvedTarget {
+            adapter: Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>,
+            rule_name: SmolStr::new_static("OtherRoute"),
+            rule_payload: SmolStr::new(&*hit.iface),
+            route: self.route(),
+            chains: Default::default(),
+        }
+    }
+
+    /// Whether `target`, its group selections followed down (a peek), ends
+    /// at a direct adapter bound to no interface of its own.
+    fn plain_direct(target: &ResolvedTarget, metadata: &Metadata) -> bool {
+        let leaf = |p: &dyn ProxyAdapter| {
+            (
+                p.adapter_type(),
+                p.dns_interface(),
+                p.unwrap_proxy(metadata, false),
+            )
+        };
+        let (mut kind, mut iface, mut next) = match target.route.proxies.get(target.adapter.name())
+        {
+            Some(proxy) => leaf(proxy.as_ref()),
+            None => leaf(target.adapter.as_ref()),
+        };
+        for _ in 0..16 {
+            if matches!(kind, AdapterType::Direct | AdapterType::Compatible) {
+                return iface.is_none();
+            }
+            let Some(proxy) = next else {
+                return false;
+            };
+            (kind, iface, next) = leaf(proxy.as_ref());
+        }
+        false
+    }
+
+    /// [`Self::resolve_proxy_lazy`] past another VPN's checks.
+    async fn resolve_proxy_lazy_routed(&self, metadata: &mut Metadata) -> Option<ResolvedTarget> {
         if let Some((target, ip)) = self.paopao_lan_direct(metadata) {
             // Normally already set by `pre_handle_metadata`; make sure the
             // DIRECT dial connects to the pinned address either way.
@@ -846,7 +933,7 @@ impl TunnelInner {
             return false;
         }
         if self.own_loop_reject(&m).await.is_some()
-            || self.other_vpn_passthrough(&m).await.is_some()
+            || self.other_vpn_passthrough(&m, true).await.is_some()
         {
             return true;
         }
@@ -909,7 +996,7 @@ impl TunnelInner {
         let _ = self.pre_handle_metadata(&mut meta);
         // Another VPN's destination is decided before everything else, as
         // for live traffic (the query has no process: no `VpnClient`).
-        if let Some((target, _)) = self.other_vpn_passthrough(&meta).await {
+        if let Some((target, _)) = self.other_vpn_passthrough(&meta, true).await {
             let rule = match target.rule_name.as_str() {
                 "VpnClient" => "VpnClient",
                 "VpnGateway" => "VpnGateway",
@@ -2951,6 +3038,33 @@ mod tests {
             let got = inner.resolve_proxy(&to(ip, ConnType::Tun)).await.unwrap();
             assert_eq!(got.adapter.adapter_type(), AdapterType::Reject, "{ip}");
         }
+        // By name, where the rules send it plain DIRECT: not looked up
+        // ahead of the dial, which follows the VPN's routes by itself.
+        let res = meow_config::rebuild_from_raw(&Default::default()).unwrap();
+        tunnel.update_routing(
+            res.proxies,
+            vec![Box::new(meow_rules::final_rule::FinalRule::new("DIRECT")) as Box<dyn Rule>],
+            res.dialer_registry,
+        );
+        for conn_type in [ConnType::Tun, ConnType::Socks5] {
+            let mut meta = named("fronted.example.com", conn_type);
+            let got = inner.resolve_proxy_lazy(&mut meta).await.unwrap();
+            assert_ne!(got.rule_name, "OtherRoute", "direct, {conn_type:?}");
+            assert_eq!(got.adapter.adapter_type(), AdapterType::Direct);
+            assert_eq!(meta.dst_ip, None, "no lookup ahead of a DIRECT dial");
+        }
+        // An address is still compared before the rules.
+        let got = inner
+            .resolve_proxy_lazy(&mut to("10.99.1.1", ConnType::Tun))
+            .await
+            .unwrap();
+        assert_eq!(got.rule_name, "OtherRoute");
+        let res = meow_config::rebuild_from_raw(&Default::default()).unwrap();
+        tunnel.update_routing(
+            res.proxies,
+            vec![Box::new(meow_rules::final_rule::FinalRule::new("REJECT")) as Box<dyn Rule>],
+            res.dialer_registry,
+        );
 
         // The VPN's client program: found holding the device, or named.
         let here: IpAddr = "127.0.0.1".parse().unwrap();
