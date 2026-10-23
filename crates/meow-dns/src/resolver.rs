@@ -270,9 +270,35 @@ pub struct Resolver {
     router: parking_lot::RwLock<Option<Arc<dyn crate::domain_route::DomainRouter>>>,
     /// Bounded views retain both node and routing generation identities.
     routed: parking_lot::Mutex<lru::LruCache<(usize, usize, usize), RoutedGeneration>>,
-    /// Names [`Resolver::resolve_classification_ip`] found no address for,
-    /// and when.
-    classify_misses: parking_lot::Mutex<lru::LruCache<Arc<str>, tokio::time::Instant>>,
+    /// Names [`Resolver::resolve_classification_ip`] found no address for.
+    classify_misses: parking_lot::Mutex<lru::LruCache<Arc<str>, ClassifyMiss>>,
+}
+
+/// When a classification lookup found no address, and the network it
+/// asked on: another VPN coming up (routes, DNS servers) asks again at once.
+struct ClassifyMiss {
+    at: tokio::time::Instant,
+    routes: Arc<meow_common::route_table::RouteTable>,
+    dns: Arc<Vec<meow_common::route_table::IfaceDns>>,
+}
+
+impl ClassifyMiss {
+    fn now() -> Self {
+        Self {
+            at: tokio::time::Instant::now(),
+            routes: meow_common::route_table::route_table(),
+            dns: meow_common::route_table::iface_dns(),
+        }
+    }
+
+    fn fresh(&self) -> bool {
+        fn same<T: PartialEq>(old: &Arc<T>, now: &Arc<T>) -> bool {
+            Arc::ptr_eq(old, now) || **old == **now
+        }
+        self.at.elapsed() < CLASSIFY_MISS_TTL
+            && same(&self.routes, &meow_common::route_table::route_table())
+            && same(&self.dns, &meow_common::route_table::iface_dns())
+    }
 }
 
 struct DirectSystemGeneration {
@@ -1636,14 +1662,15 @@ impl Resolver {
     /// leave by the NIC unencrypted either way, and the interface DNS is
     /// the near one — not a far resolver dialed over TCP from the same
     /// network, which can hang for the whole query timeout. A name that
-    /// got no address is not asked again for [`CLASSIFY_MISS_TTL`]: every
-    /// connection to it would otherwise wait out the same failure.
+    /// got no address is not asked again for [`CLASSIFY_MISS_TTL`] on the
+    /// same network: every connection to it would otherwise wait out the
+    /// same failure.
     pub async fn resolve_classification_ip(&self, host: &str) -> Option<IpAddr> {
         if self
             .classify_misses
             .lock()
             .get(host)
-            .is_some_and(|at| at.elapsed() < CLASSIFY_MISS_TTL)
+            .is_some_and(ClassifyMiss::fresh)
         {
             return None;
         }
@@ -1662,7 +1689,7 @@ impl Resolver {
         if ip.is_some() {
             misses.pop(host);
         } else {
-            misses.put(Arc::from(host), tokio::time::Instant::now());
+            misses.put(Arc::from(host), ClassifyMiss::now());
         }
         ip
     }
@@ -4591,6 +4618,32 @@ mod tests {
         assert!(
             dials.load(Ordering::SeqCst) > first,
             "an old miss is asked again"
+        );
+    }
+
+    #[tokio::test]
+    async fn classification_miss_is_asked_again_once_another_vpn_comes_up() {
+        let (resolver, dials) = emfile_resolver_gated(None);
+        assert_eq!(
+            resolver.resolve_classification_ip("intra.example").await,
+            None
+        );
+        let first = dials.load(Ordering::SeqCst);
+
+        meow_common::route_table::publish_iface_dns(vec![meow_common::route_table::IfaceDns {
+            iface: "utun9".into(),
+            kind: meow_common::route_table::RouteIfaceKind::OtherVpn,
+            servers: vec![IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1))],
+            domains: vec!["corp.example".into()],
+        }]);
+        assert_eq!(
+            resolver.resolve_classification_ip("intra.example").await,
+            None
+        );
+        meow_common::route_table::clear_iface_dns();
+        assert!(
+            dials.load(Ordering::SeqCst) > first,
+            "a new network asks again"
         );
     }
 
