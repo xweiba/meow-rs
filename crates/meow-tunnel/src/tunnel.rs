@@ -829,6 +829,64 @@ impl TunnelInner {
         }
     }
 
+    /// TUN connect-before-handshake on a port the sniffer reads: whether
+    /// this flow, known only by its addresses (and program), already goes
+    /// DIRECT or is refused whatever name its first bytes would show — no
+    /// rule that reads a name comes before the one deciding it. Then the
+    /// flow can be dialed before the client's handshake completes, like
+    /// any other flow to a real address.
+    ///
+    /// Conservative: a proxy or group target (the sniffed name may be what
+    /// the node is asked for), a named special proxy, or a name-reading
+    /// rule ahead of the decision (any rule-set: its behavior is not known
+    /// here) all answer `false`. No match statistics are recorded.
+    pub async fn decided_without_name(&self, metadata: &Metadata) -> bool {
+        let mut m = metadata.clone();
+        if self.pre_handle_metadata(&mut m) == PreHandleVerdict::Drop || !m.host.is_empty() {
+            return false;
+        }
+        if self.own_loop_reject(&m).await.is_some()
+            || self.other_vpn_passthrough(&m).await.is_some()
+        {
+            return true;
+        }
+        if !m.special_proxy.is_empty() {
+            return false;
+        }
+        match *self.mode.read() {
+            TunnelMode::Direct => return true,
+            TunnelMode::Global => return false,
+            TunnelMode::Rule => {}
+        }
+        let route = self.route();
+        if route.compiled_rules.needs_process_lookup() {
+            if let Some(e) = match_engine::maybe_enrich_with_process_async(&m).await {
+                m = e;
+            }
+        }
+        let rules = route.rules.as_ref();
+        let found = route
+            .compiled_rules
+            .match_rules(&m, rules, &Self::target_probe(&route, &m));
+        let (upto, target) = found
+            .as_ref()
+            .map_or((rules.len(), "DIRECT"), |f| (f.rule_index, f.adapter_name));
+        let direct_or_reject = target == "DIRECT"
+            || matches!(
+                route.proxies.get(target).map(|p| p.adapter_type()),
+                Some(
+                    AdapterType::Direct
+                        | AdapterType::Compatible
+                        | AdapterType::Reject
+                        | AdapterType::RejectDrop
+                )
+            );
+        direct_or_reject
+            && !rules[..upto.min(rules.len())]
+                .iter()
+                .any(|r| reads_name(r.as_ref()))
+    }
+
     /// Explain which rule decides `metadata` right now, without dialing or
     /// touching match statistics — the `/rules/match` API. Same order as
     /// [`Self::resolve_proxy_lazy`]: paopao-hosts LAN pin, then mode, then
@@ -1713,6 +1771,29 @@ impl Clone for Tunnel {
         Self {
             inner: Arc::clone(&self.inner),
         }
+    }
+}
+
+/// Whether `rule` can match on a connection's name (what the sniffer
+/// fills in). Logic rules are judged by the rule types their payload names.
+fn reads_name(rule: &dyn Rule) -> bool {
+    use meow_common::RuleType as T;
+    match rule.rule_type() {
+        T::Domain
+        | T::DomainSuffix
+        | T::DomainKeyword
+        | T::DomainRegex
+        | T::DomainWildcard
+        | T::GeoSite
+        | T::RuleSet
+        | T::SubRule => true,
+        T::And | T::Or | T::Not => {
+            let p = rule.payload();
+            ["DOMAIN", "GEOSITE", "RULE-SET", "SUB-RULE"]
+                .iter()
+                .any(|k| p.contains(k))
+        }
+        _ => false,
     }
 }
 
@@ -3117,6 +3198,45 @@ mod tests {
             assert_eq!(eager.rule_name, want, "{conn_type:?} {name}");
             let lazy = tunnel.inner().resolve_proxy_lazy(&mut m).await.unwrap();
             assert_eq!(lazy.rule_name, want, "lazy, {conn_type:?} {name}");
+        }
+    }
+
+    /// TUN connect-before-handshake on a sniffed port: decided without the
+    /// name only by a DIRECT/REJECT rule that comes before every rule
+    /// reading a name.
+    #[tokio::test]
+    async fn decided_without_name_only_before_name_rules() {
+        let tunnel = test_tunnel();
+        let res = meow_config::rebuild_from_raw(&Default::default()).unwrap();
+        let ctx = meow_rules::ParserContext::empty();
+        let rules = [
+            "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+            "PROCESS-PATH,/opt/rd,DIRECT",
+            "AND,((NETWORK,TCP),(DST-PORT,8443)),REJECT",
+            "DOMAIN-SUFFIX,example.com,REJECT",
+            "IP-CIDR,9.9.9.9/32,DIRECT,no-resolve",
+            "MATCH,GLOBAL",
+        ]
+        .map(|l| meow_rules::parse_rule(l, &ctx).expect("rule line parses"));
+        tunnel.update_routing(res.proxies, rules.into(), res.dialer_registry);
+
+        let to = |ip: &str, port: u16, path: &str| Metadata {
+            network: Network::Tcp,
+            conn_type: ConnType::Tun,
+            process_path: path.into(),
+            dst_ip: Some(ip.parse().unwrap()),
+            dst_port: port,
+            ..Default::default()
+        };
+        let cases = [
+            (to("192.168.3.9", 443, ""), true, "a LAN range"),
+            (to("8.8.8.8", 443, "/opt/rd/rd"), true, "a program"),
+            (to("8.8.8.8", 8443, ""), true, "REJECT by port"),
+            (to("9.9.9.9", 443, ""), false, "a name rule comes first"),
+            (to("8.8.8.8", 443, ""), false, "the catch-all is a group"),
+        ];
+        for (m, want, why) in cases {
+            assert_eq!(tunnel.inner().decided_without_name(&m).await, want, "{why}");
         }
     }
 

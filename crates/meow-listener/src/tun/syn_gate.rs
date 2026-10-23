@@ -16,9 +16,15 @@
 //! SYNs are dropped while the dial runs and reset for a short while after
 //! it failed.
 //!
+//! On a port the sniffer reads, the route may depend on the name in the
+//! client's first bytes, which only come after the handshake. Such a SYN
+//! is held only until the tunnel has decided whether a name could matter
+//! (a DIRECT or REJECT rule that reads no name decides first, such as a
+//! program's or a LAN range's): if it could, the SYN goes to lwIP as
+//! before and the flow is sniffed; if not, it is dialed like the others.
+//!
 //! Not gated, as before: fake-IP destinations (the name, not a peer, is
-//! dialed), ports the sniffer reads (their route may depend on the name
-//! in the first bytes), DNS hijack and the TUN's own subnet.
+//! dialed), DNS hijack and the TUN's own subnet.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -59,6 +65,18 @@ pub(super) enum Verdict {
     Reply(Vec<u8>),
 }
 
+/// Whether a SYN to a destination is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Gating {
+    /// Into the stack as before.
+    No,
+    /// Held until its dial.
+    Dial,
+    /// Held until the tunnel decided whether its name could matter
+    /// (a sniffed port): then dialed, or handed to the stack unrouted.
+    Decide,
+}
+
 /// Packets the gate sends from outside the pump.
 pub(super) enum GateOut {
     /// A held SYN whose dial succeeded: into the stack.
@@ -74,9 +92,12 @@ enum Flow {
     Handshaking(oneshot::Sender<lwip::TcpStream>),
     /// Dial failed: SYNs get a RST until then.
     Refused(Instant),
+    /// Handed to lwIP undialed (its name may decide its route): the
+    /// accepted stream takes the usual sniffing path. Forgotten then.
+    Unrouted(Instant),
 }
 
-type Eligible = dyn Fn(SocketAddr) -> bool + Send + Sync;
+type Eligible = dyn Fn(SocketAddr) -> Gating + Send + Sync;
 
 struct Shared {
     flows: Mutex<HashMap<FlowKey, Flow>>,
@@ -97,11 +118,11 @@ pub(super) struct SynGate {
 }
 
 impl SynGate {
-    /// `eligible(dst)`: whether a SYN to `dst` is held until its dial.
+    /// `eligible(dst)`: whether (and how) a SYN to `dst` is held.
     /// Returns the gate, the flows to dial (for the accept loop) and the
     /// packets to send (for the device → stack pump).
     pub(super) fn new(
-        eligible: impl Fn(SocketAddr) -> bool + Send + Sync + 'static,
+        eligible: impl Fn(SocketAddr) -> Gating + Send + Sync + 'static,
     ) -> (
         Self,
         mpsc::UnboundedReceiver<GatedConn>,
@@ -125,7 +146,8 @@ impl SynGate {
         let Some(syn) = parse_syn(pkt) else {
             return Verdict::Pass;
         };
-        if !(self.shared.eligible)(syn.dst) {
+        let gating = (self.shared.eligible)(syn.dst);
+        if gating == Gating::No {
             return Verdict::Pass;
         }
         let key = (syn.src, syn.dst);
@@ -134,13 +156,16 @@ impl SynGate {
         match flows.get(&key) {
             Some(Flow::Dialing) => return Verdict::Hold,
             Some(Flow::Handshaking(_)) => return Verdict::Pass,
+            Some(Flow::Unrouted(until)) if now < *until => return Verdict::Pass,
             Some(Flow::Refused(until)) if now < *until => {
                 return Verdict::Reply(build_rst(&syn));
             }
             _ => {}
         }
         if flows.len() >= MAX_HELD {
-            flows.retain(|_, f| !matches!(f, Flow::Refused(until) if now >= *until));
+            flows.retain(
+                |_, f| !matches!(f, Flow::Refused(until) | Flow::Unrouted(until) if now >= *until),
+            );
             if flows.len() >= MAX_HELD {
                 return Verdict::Pass;
             }
@@ -150,6 +175,7 @@ impl SynGate {
             key,
             syn: pkt.to_vec(),
             seq: syn.seq,
+            decide: gating == Gating::Decide,
             state: Mutex::new(State::Dialing),
         };
         flows.insert(key, Flow::Dialing);
@@ -174,8 +200,13 @@ impl SynGate {
         dst: SocketAddr,
     ) -> Option<lwip::TcpStream> {
         let mut flows = self.shared.flows();
-        if !matches!(flows.get(&(src, dst)), Some(Flow::Handshaking(_))) {
-            return Some(stream);
+        match flows.get(&(src, dst)) {
+            Some(Flow::Handshaking(_)) => {}
+            Some(Flow::Unrouted(_)) => {
+                flows.remove(&(src, dst));
+                return Some(stream);
+            }
+            _ => return Some(stream),
         }
         if let Some(Flow::Handshaking(tx)) = flows.remove(&(src, dst)) {
             // The dialed flow gave up meanwhile: the stream just closes.
@@ -198,6 +229,8 @@ pub(super) struct GatedConn {
     key: FlowKey,
     syn: Vec<u8>,
     seq: u32,
+    /// [`Gating::Decide`]: see [`Self::needs_decision`].
+    decide: bool,
     state: Mutex<State>,
 }
 
@@ -220,6 +253,30 @@ impl GatedConn {
 
     pub(super) fn dst(&self) -> SocketAddr {
         self.key.1
+    }
+
+    /// A sniffed port's flow: the caller asks the tunnel first whether its
+    /// name could matter, and if so hands it over with [`Self::unrouted`].
+    pub(super) fn needs_decision(&self) -> bool {
+        self.decide
+    }
+
+    /// Its name may decide its route: the SYN goes to lwIP undialed and
+    /// the accepted stream takes the usual path (sniffed, then dialed).
+    pub(super) fn unrouted(self) {
+        if self
+            .gate
+            .out_tx
+            .send(GateOut::ToStack(self.syn.clone()))
+            .is_ok()
+        {
+            self.gate
+                .flows()
+                .insert(self.key, Flow::Unrouted(Instant::now() + HANDSHAKE_WAIT));
+        } else {
+            self.gate.flows().remove(&self.key);
+        }
+        *self.state.lock().unwrap_or_else(PoisonError::into_inner) = State::Disarmed;
     }
 
     fn disarm(self) {
@@ -584,7 +641,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_dial_resets_the_syn_and_its_retries() {
-        let (gate, mut dials, mut out) = SynGate::new(|_| true);
+        let (gate, mut dials, mut out) = SynGate::new(|_| Gating::Dial);
         let (c, p) = (CLIENT.parse().unwrap(), PEER.parse().unwrap());
         let syn = v4_syn(c, p, 9, FLAG_SYN);
         assert_eq!(gate.on_packet(&syn), Verdict::Hold);
@@ -608,7 +665,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_successful_dial_releases_the_syn_on_first_poll() {
-        let (gate, mut dials, mut out) = SynGate::new(|_| true);
+        let (gate, mut dials, mut out) = SynGate::new(|_| Gating::Dial);
         let (c, p) = (CLIENT.parse().unwrap(), PEER.parse().unwrap());
         let syn = v4_syn(c, p, 9, FLAG_SYN);
         assert_eq!(gate.on_packet(&syn), Verdict::Hold);
@@ -631,8 +688,33 @@ mod tests {
     }
 
     #[test]
+    fn an_unrouted_flow_takes_the_usual_path() {
+        let (gate, mut dials, mut out) = SynGate::new(|_| Gating::Decide);
+        let (c, p) = (CLIENT.parse().unwrap(), "1.1.1.1:443".parse().unwrap());
+        let syn = v4_syn(c, p, 3, FLAG_SYN);
+        assert_eq!(gate.on_packet(&syn), Verdict::Hold);
+        let conn = dials.try_recv().unwrap();
+        assert!(conn.needs_decision());
+        conn.unrouted();
+        let Ok(GateOut::ToStack(released)) = out.try_recv() else {
+            panic!("the SYN goes to the stack undialed")
+        };
+        assert_eq!(released, syn);
+        // No RST on drop, and its retransmissions reach lwIP.
+        assert!(out.try_recv().is_err());
+        assert_eq!(gate.on_packet(&syn), Verdict::Pass);
+        assert!(dials.try_recv().is_err());
+    }
+
+    #[test]
     fn ineligible_destinations_pass() {
-        let (gate, mut dials, _out) = SynGate::new(|dst| dst.port() != 443);
+        let (gate, mut dials, _out) = SynGate::new(|dst| {
+            if dst.port() == 443 {
+                Gating::No
+            } else {
+                Gating::Dial
+            }
+        });
         let c = CLIENT.parse().unwrap();
         let syn = v4_syn(c, "1.1.1.1:443".parse().unwrap(), 1, FLAG_SYN);
         assert_eq!(gate.on_packet(&syn), Verdict::Pass);

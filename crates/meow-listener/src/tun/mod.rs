@@ -932,10 +932,16 @@ impl TunListener {
             let sniffer = self.sniffer.clone();
             let dns_hijack = cfg.dns_hijack;
             syn_gate::SynGate::new(move |dst| {
-                !(dns_hijack && dst.port() == 53)
-                    && !udp::is_looping_dst(dst.ip(), tun_net)
-                    && !sniffer.as_ref().is_some_and(|s| s.sniffs_port(dst.port()))
-                    && !tunnel.resolver().in_fake_ip_range(dst.ip())
+                if (dns_hijack && dst.port() == 53)
+                    || udp::is_looping_dst(dst.ip(), tun_net)
+                    || tunnel.resolver().in_fake_ip_range(dst.ip())
+                {
+                    syn_gate::Gating::No
+                } else if sniffer.as_ref().is_some_and(|s| s.sniffs_port(dst.port())) {
+                    syn_gate::Gating::Decide
+                } else {
+                    syn_gate::Gating::Dial
+                }
             })
         };
         let (mut pump_in, mut pump_out) =
@@ -1001,18 +1007,22 @@ impl TunListener {
                     let sem = conn_limit.clone();
                     let warned = Arc::clone(&warned_saturated);
                     tasks.spawn(async move {
+                        let metadata = tun_metadata(conn.src(), conn.dst(), &name);
+                        // A sniffed port: dialed now only when no name
+                        // could change where it goes.
+                        if conn.needs_decision()
+                            && !tunnel.inner().decided_without_name(&metadata).await
+                        {
+                            conn.unrouted();
+                            return;
+                        }
                         let Some(_permit) = flow_slot(sem, &warned, &name).await else {
                             return;
                         };
-                        let (src, dst) = (conn.src(), conn.dst());
                         // The tunnel matches and dials; the held SYN reaches
                         // lwIP only once that dial succeeded.
-                        meow_tunnel::tcp::handle_tcp(
-                            tunnel.inner(),
-                            Box::new(conn),
-                            tun_metadata(src, dst, &name),
-                        )
-                        .await;
+                        meow_tunnel::tcp::handle_tcp(tunnel.inner(), Box::new(conn), metadata)
+                            .await;
                     });
                 }
                 accepted = tcp_listener.next() => match accepted {
