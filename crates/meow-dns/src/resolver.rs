@@ -4590,8 +4590,13 @@ mod tests {
         assert_eq!(resolver.resolve_ips("gone.example").await.unwrap(), None);
     }
 
+    /// Held by the tests that read or publish the process-wide network
+    /// snapshot a classification miss is taken under.
+    static NETWORK_SNAPSHOT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test(start_paused = true)]
     async fn classification_miss_is_not_asked_again_at_once() {
+        let _network = NETWORK_SNAPSHOT.lock().await;
         let (resolver, dials) = emfile_resolver_gated(None);
         assert_eq!(
             resolver.resolve_classification_ip("down.example").await,
@@ -4623,6 +4628,7 @@ mod tests {
 
     #[tokio::test]
     async fn classification_miss_is_asked_again_once_another_vpn_comes_up() {
+        let _network = NETWORK_SNAPSHOT.lock().await;
         let (resolver, dials) = emfile_resolver_gated(None);
         assert_eq!(
             resolver.resolve_classification_ip("intra.example").await,

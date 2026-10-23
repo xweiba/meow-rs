@@ -70,6 +70,10 @@ const TCP_POOL_CAPACITY: usize = 4;
 /// server timeouts; 30 s stays under the shortest of those while still
 /// covering the bursts pooling exists to serve.
 const TCP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a query waits on a pooled stream through a proxy before the
+/// stream is presumed dropped and a fresh one is dialed: about a few round
+/// trips to a far node.
+const PROXY_POOL_REUSE_BUDGET: Duration = Duration::from_secs(1);
 
 /// Process-wide generation of pooled upstream connections (issue #695).
 ///
@@ -241,13 +245,17 @@ pub struct DnsClient {
     /// Idle direct `tcp://` connections. Streams are checked out for the whole
     /// exchange and returned only after the DNS response is fully validated.
     tcp_pool: TcpPool,
+    /// Idle streams through `proxy` / `weak_proxy`, each tagged with the
+    /// leaf it was dialed through: a group that changed its selection
+    /// meanwhile gets a fresh stream through the new one.
+    proxy_pool: TcpPool<ProxiedStream>,
 }
 
-struct TcpPool {
+struct TcpPool<S = TcpStream> {
     /// Idle streams paired with the instant they were returned to the pool.
     /// Pushed and popped at the end, so the freshest stream is reused first
     /// and the staler ones age out instead of being handed to a query.
-    idle: AsyncMutex<Vec<(PooledTcp, Instant)>>,
+    idle: AsyncMutex<Vec<(PooledTcp<S>, Instant)>>,
     idle_timeout: Duration,
     /// This pool's own generation, bumped by [`DnsClient::reset_connections`]
     /// — the per-client counterpart of [`CONNECTION_GENERATION`].
@@ -264,12 +272,19 @@ struct PoolGeneration {
 
 /// A pooled `tcp://` stream plus the [`PoolGeneration`] captured before its
 /// socket was created.
-struct PooledTcp {
-    stream: TcpStream,
+struct PooledTcp<S = TcpStream> {
+    stream: S,
     generation: PoolGeneration,
 }
 
-impl TcpPool {
+/// A DNS stream dialed through a proxy, and the leaf it went through
+/// (its address, as an identity only).
+struct ProxiedStream {
+    conn: Box<dyn meow_common::ProxyConn>,
+    leaf: usize,
+}
+
+impl<S> TcpPool<S> {
     fn new() -> Self {
         Self {
             idle: AsyncMutex::new(Vec::with_capacity(TCP_POOL_CAPACITY)),
@@ -300,7 +315,7 @@ impl TcpPool {
     /// emergent property of the exchange path — so any future caller
     /// (e.g. a background reaper returning streams) cannot silently grow
     /// the pool beyond [`TCP_POOL_CAPACITY`].
-    async fn push(&self, pooled: PooledTcp) {
+    async fn push(&self, pooled: PooledTcp<S>) {
         let mut idle = self.idle.lock().await;
         if idle.len() < TCP_POOL_CAPACITY && pooled.generation == self.generation() {
             idle.push((pooled, Instant::now()));
@@ -310,7 +325,7 @@ impl TcpPool {
 
     /// Pop the freshest reusable stream, closing every idle-expired or
     /// generation-retired one on the way.
-    async fn take(&self) -> Option<PooledTcp> {
+    async fn take(&self) -> Option<PooledTcp<S>> {
         let generation = self.generation();
         let mut idle = self.idle.lock().await;
         idle.retain(|(pooled, _)| pooled.generation == generation);
@@ -429,6 +444,7 @@ impl DnsClient {
             proxy: None,
             interface: None,
             tcp_pool: TcpPool::new(),
+            proxy_pool: TcpPool::new(),
         }
     }
     /// Pin plain upstream DNS to the NIC that supplied its server address.
@@ -447,6 +463,7 @@ impl DnsClient {
             label: None,
             interface: None,
             tcp_pool: TcpPool::new(),
+            proxy_pool: TcpPool::new(),
         }
     }
 
@@ -460,6 +477,7 @@ impl DnsClient {
             label: None,
             interface: None,
             tcp_pool: TcpPool::new(),
+            proxy_pool: TcpPool::new(),
         }
     }
 
@@ -473,6 +491,7 @@ impl DnsClient {
             label: None,
             interface: None,
             tcp_pool: TcpPool::new(),
+            proxy_pool: TcpPool::new(),
         }
     }
 
@@ -490,6 +509,7 @@ impl DnsClient {
             label: None,
             interface: None,
             tcp_pool: TcpPool::new(),
+            proxy_pool: TcpPool::new(),
         }
     }
 
@@ -508,6 +528,7 @@ impl DnsClient {
             label: None,
             interface: None,
             tcp_pool: TcpPool::new(),
+            proxy_pool: TcpPool::new(),
         }
     }
 
@@ -555,7 +576,7 @@ impl DnsClient {
     /// ends at a direct adapter. A peek — no group state advances. `false`
     /// for an untagged upstream: that one is dialed as configured.
     pub fn routes_direct(&self) -> bool {
-        use meow_common::{AdapterType, ConnType, Metadata, Network};
+        use meow_common::AdapterType;
         let Some(mut current) = self
             .proxy
             .clone()
@@ -567,15 +588,7 @@ impl DnsClient {
             Transport::Udp { addr } | Transport::Tcp { addr } => *addr,
             _ => return false,
         };
-        let metadata = Metadata {
-            network: Network::Tcp,
-            conn_type: ConnType::Inner,
-            host: smol_str::SmolStr::from(addr.ip().to_string()),
-            dst_ip: Some(addr.ip()),
-            dst_port: addr.port(),
-            internal: true,
-            ..Default::default()
-        };
+        let metadata = proxy_dns_metadata(addr);
         for _ in 0..16 {
             match current.unwrap_proxy(&metadata, false) {
                 Some(next) => current = next,
@@ -590,6 +603,64 @@ impl DnsClient {
         false
     }
 
+    /// The leaf a dial through `proxy` to `addr` would use now (a peek, as
+    /// [`Self::routes_direct`]), as an identity.
+    fn leaf_id(proxy: &DnsProxy, addr: SocketAddr) -> usize {
+        let metadata = proxy_dns_metadata(addr);
+        let mut current = Arc::clone(proxy);
+        for _ in 0..16 {
+            match current.unwrap_proxy(&metadata, false) {
+                Some(next) => current = next,
+                None => break,
+            }
+        }
+        Arc::as_ptr(&current) as *const () as usize
+    }
+
+    /// One exchange through `proxy`, on an idle stream through the same
+    /// leaf when there is one: a fresh proxied connection costs the node's
+    /// whole handshake (one more round trip abroad, a TLS/Reality one) on
+    /// every query otherwise.
+    async fn proxy_exchange_pooled(
+        &self,
+        proxy: &DnsProxy,
+        addr: SocketAddr,
+        wire: &[u8],
+        expected: &ExpectedResponse,
+    ) -> Result<Message, ClientError> {
+        let leaf = Self::leaf_id(proxy, addr);
+        if let Some(mut pooled) = self
+            .proxy_pool
+            .take()
+            .await
+            .filter(|p| p.stream.leaf == leaf)
+        {
+            // A reused stream answers within one round trip through the
+            // node; much slower, it is presumed silently dropped.
+            let budget = (self.timeout / 2).min(PROXY_POOL_REUSE_BUDGET);
+            let attempt = async {
+                write_lp(&mut pooled.stream.conn, wire).await?;
+                let response = read_lp(&mut pooled.stream.conn).await?;
+                decode_validated_response(&response, expected)
+            };
+            if let Ok(Ok(response)) = tokio::time::timeout(budget, attempt).await {
+                self.proxy_pool.push(pooled).await;
+                return Ok(response);
+            }
+        }
+        let generation = self.proxy_pool.generation();
+        let mut conn = proxy_dial(proxy, addr).await?;
+        write_lp(&mut conn, wire).await?;
+        let response = decode_validated_response(&read_lp(&mut conn).await?, expected)?;
+        self.proxy_pool
+            .push(PooledTcp {
+                stream: ProxiedStream { conn, leaf },
+                generation,
+            })
+            .await;
+        Ok(response)
+    }
+
     /// Drop this client's pooled `tcp://` connections so the next query
     /// dials a fresh socket (issue #695). Idle streams close now unless the
     /// pool is mid-checkout, in which case they close on the next checkout;
@@ -598,7 +669,7 @@ impl DnsClient {
     /// Returns the idle streams closed now. UDP, DoT and DoH open a socket
     /// per query and pool nothing.
     pub fn reset_connections(&self) -> usize {
-        self.tcp_pool.reset()
+        self.tcp_pool.reset() + self.proxy_pool.reset()
     }
 
     /// Human-readable upstream identifier for API/UI surfaces.
@@ -987,8 +1058,9 @@ impl DnsClient {
                     ));
                 }
             };
-            let response = proxy_tcp_exchange(proxy, addr, wire).await?;
-            return decode_validated_response(&response, expected);
+            return self
+                .proxy_exchange_pooled(proxy, addr, wire, expected)
+                .await;
         }
         match &self.transport {
             Transport::Udp { addr } => {
@@ -1069,13 +1141,21 @@ fn socket_label(addr: SocketAddr, default_port: u16) -> String {
     }
 }
 
+#[cfg(test)]
 async fn proxy_tcp_exchange(
     proxy: &DnsProxy,
     addr: SocketAddr,
     wire: &[u8],
 ) -> Result<Vec<u8>, ClientError> {
+    let mut stream = proxy_dial(proxy, addr).await?;
+    write_lp(&mut stream, wire).await?;
+    read_lp(&mut stream).await
+}
+
+/// What a DNS exchange through a proxy dials.
+fn proxy_dns_metadata(addr: SocketAddr) -> meow_common::Metadata {
     use meow_common::{ConnType, Metadata, Network};
-    let metadata = Metadata {
+    Metadata {
         network: Network::Tcp,
         conn_type: ConnType::Inner,
         host: smol_str::SmolStr::from(addr.ip().to_string()),
@@ -1085,17 +1165,21 @@ async fn proxy_tcp_exchange(
         // group serving this dial must not count it as use.
         internal: true,
         ..Default::default()
-    };
-    let mut stream = proxy
-        .dial_tcp(&metadata)
+    }
+}
+
+async fn proxy_dial(
+    proxy: &DnsProxy,
+    addr: SocketAddr,
+) -> Result<Box<dyn meow_common::ProxyConn>, ClientError> {
+    Ok(proxy
+        .dial_tcp(&proxy_dns_metadata(addr))
         .await
         // `into_io_error` keeps the innermost `Io` verbatim: an errno-bearing
         // dial failure (EMFILE under local fd pressure) must not be flattened
         // into a context-only `Other` before it reaches the resolver's
         // classifier (#682) — and `Unsupported` refusals keep their kind.
-        .map_err(|e| e.into_io_error("dns-via-proxy dial"))?;
-    write_lp(&mut stream, wire).await?;
-    read_lp(&mut stream).await
+        .map_err(|e| e.into_io_error("dns-via-proxy dial"))?)
 }
 
 fn ip_from_record(rec: &Record) -> Option<IpAddr> {
@@ -2795,7 +2879,7 @@ mod tests {
     /// A leaf of `kind`, or a group currently selecting `next`.
     struct KindProxy {
         kind: meow_common::AdapterType,
-        next: Option<Arc<dyn meow_common::Proxy>>,
+        next: std::sync::Mutex<Option<Arc<dyn meow_common::Proxy>>>,
         health: meow_common::ProxyHealth,
     }
 
@@ -2805,7 +2889,7 @@ mod tests {
     ) -> Arc<dyn meow_common::Proxy> {
         Arc::new(KindProxy {
             kind,
-            next,
+            next: std::sync::Mutex::new(next),
             health: meow_common::ProxyHealth::new(),
         })
     }
@@ -2829,13 +2913,17 @@ mod tests {
             _metadata: &meow_common::Metadata,
             _touch: bool,
         ) -> Option<Arc<dyn meow_common::Proxy>> {
-            self.next.clone()
+            self.next.lock().unwrap().clone()
         }
         async fn dial_tcp(
             &self,
-            _m: &meow_common::Metadata,
+            m: &meow_common::Metadata,
         ) -> meow_common::Result<Box<dyn meow_common::ProxyConn>> {
-            unimplemented!("kind mock is never dialed")
+            // A group dials through its selection.
+            let next = self.next.lock().unwrap().clone();
+            next.expect("a leaf kind mock is never dialed")
+                .dial_tcp(m)
+                .await
         }
         async fn dial_udp(
             &self,
@@ -2889,5 +2977,119 @@ mod tests {
         assert!(!DnsClient::tcp(addr).with_proxy(on_node).routes_direct());
         // An untagged upstream is dialed as configured.
         assert!(!DnsClient::tcp(addr).routes_direct());
+    }
+
+    /// A node that "tunnels" every dial to one local TCP DNS server.
+    struct LocalNode {
+        server: SocketAddr,
+        dials: Arc<AtomicUsize>,
+        health: meow_common::ProxyHealth,
+    }
+
+    #[async_trait::async_trait]
+    impl meow_common::ProxyAdapter for LocalNode {
+        fn name(&self) -> &str {
+            "node"
+        }
+        fn adapter_type(&self) -> meow_common::AdapterType {
+            meow_common::AdapterType::Vless
+        }
+        fn addr(&self) -> &str {
+            ""
+        }
+        fn support_udp(&self) -> bool {
+            false
+        }
+        async fn dial_tcp(
+            &self,
+            _m: &meow_common::Metadata,
+        ) -> meow_common::Result<Box<dyn meow_common::ProxyConn>> {
+            self.dials.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(TcpStream::connect(self.server).await?))
+        }
+        async fn dial_udp(
+            &self,
+            _m: &meow_common::Metadata,
+        ) -> meow_common::Result<Box<dyn meow_common::ProxyPacketConn>> {
+            unimplemented!("local node has no UDP")
+        }
+        fn health(&self) -> &meow_common::ProxyHealth {
+            &self.health
+        }
+    }
+
+    impl meow_common::Proxy for LocalNode {
+        fn alive(&self) -> bool {
+            true
+        }
+        fn alive_for_url(&self, _url: &str) -> bool {
+            true
+        }
+        fn last_delay(&self) -> u16 {
+            0
+        }
+        fn last_delay_for_url(&self, _url: &str) -> u16 {
+            0
+        }
+        fn delay_history(&self) -> Vec<meow_common::DelayHistory> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn queries_through_a_node_reuse_its_stream_until_the_selection_moves() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    while let Ok(request) = read_lp(&mut stream).await {
+                        let request = Message::from_bytes(&request).unwrap();
+                        let response = response_for(&request, request.metadata.id);
+                        if write_lp(&mut stream, &response.to_bytes().unwrap())
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        let node = |dials: &Arc<AtomicUsize>| -> Arc<dyn meow_common::Proxy> {
+            Arc::new(LocalNode {
+                server,
+                dials: Arc::clone(dials),
+                health: meow_common::ProxyHealth::new(),
+            })
+        };
+        let (first, second) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let group = Arc::new(KindProxy {
+            kind: meow_common::AdapterType::Selector,
+            next: std::sync::Mutex::new(Some(node(&first))),
+            health: meow_common::ProxyHealth::new(),
+        });
+        let client = DnsClient::tcp("192.0.2.53:53".parse().unwrap())
+            .with_proxy(Arc::clone(&group) as Arc<dyn meow_common::Proxy>);
+
+        for name in ["a.example", "b.example", "c.example"] {
+            client.query(name, RecordType::A).await.unwrap();
+        }
+        assert_eq!(first.load(Ordering::SeqCst), 1, "one dial, then reuse");
+
+        *group.next.lock().unwrap() = Some(node(&second));
+        client.query("d.example", RecordType::A).await.unwrap();
+        client.query("e.example", RecordType::A).await.unwrap();
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            second.load(Ordering::SeqCst),
+            1,
+            "the new selection's own stream"
+        );
+
+        assert_eq!(client.reset_connections(), 1);
+        client.query("f.example", RecordType::A).await.unwrap();
+        assert_eq!(second.load(Ordering::SeqCst), 2, "a reset dials afresh");
     }
 }
