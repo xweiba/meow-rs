@@ -11,8 +11,10 @@ use std::sync::Arc;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use lwip::NetStack;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 
+use super::syn_gate::{GateOut, SynGate, Verdict};
 use super::TunDevice;
 
 /// One IP packet. UDP/TCP over IPv4/v6 tops out below 64 KiB regardless of
@@ -38,15 +40,22 @@ struct PumpEnd<D, H> {
     half: H,
 }
 
+/// `gate`: held SYNs ([`super::syn_gate`]); its packets arrive on `gate_out`.
 pub(super) fn spawn_pumps(
     device: Arc<TunDevice>,
     stack: NetStack,
+    gate: SynGate,
+    gate_out: UnboundedReceiver<GateOut>,
 ) -> (JoinHandle<io::Result<()>>, JoinHandle<io::Result<()>>) {
     let (stack_sink, stack_stream) = stack.split();
-    let inbound = tokio::spawn(device_to_stack(PumpEnd {
-        device: Arc::clone(&device),
-        half: stack_sink,
-    }));
+    let inbound = tokio::spawn(device_to_stack(
+        PumpEnd {
+            device: Arc::clone(&device),
+            half: stack_sink,
+        },
+        gate,
+        gate_out,
+    ));
     let outbound = tokio::spawn(stack_to_device(PumpEnd {
         device,
         half: stack_stream,
@@ -61,17 +70,42 @@ pub(super) fn spawn_pumps(
 /// `end` is only ever borrowed: moving its fields out into locals would
 /// give them the locals' drop order (reverse of declaration) and undo
 /// [`PumpEnd`]'s ordering.
+///
+/// A SYN the gate holds stays out of the stack until its dial succeeded
+/// (`GateOut::ToStack`); a failed one is answered on the device
+/// (`GateOut::ToDevice`). `recv` is cancel safe on every platform.
 async fn device_to_stack(
     mut end: PumpEnd<Arc<TunDevice>, SplitSink<NetStack, Vec<u8>>>,
+    gate: SynGate,
+    mut gate_out: UnboundedReceiver<GateOut>,
 ) -> io::Result<()> {
     let mut buf = vec![0u8; PACKET_BUF];
     loop {
-        let n = end.device.device.recv(&mut buf).await?;
-        if n == 0 {
-            continue;
-        }
+        let pkt = tokio::select! {
+            n = end.device.device.recv(&mut buf) => {
+                let n = n?;
+                if n == 0 {
+                    continue;
+                }
+                match gate.on_packet(&buf[..n]) {
+                    Verdict::Pass => buf[..n].to_vec(),
+                    Verdict::Hold => continue,
+                    Verdict::Reply(reply) => {
+                        end.device.device.send(&reply).await?;
+                        continue;
+                    }
+                }
+            }
+            Some(out) = gate_out.recv() => match out {
+                GateOut::ToStack(pkt) => pkt,
+                GateOut::ToDevice(reply) => {
+                    end.device.device.send(&reply).await?;
+                    continue;
+                }
+            },
+        };
         end.half
-            .send(buf[..n].to_vec())
+            .send(pkt)
             .await
             .map_err(|e| io::Error::other(format!("netstack ingress closed: {e}")))?;
     }

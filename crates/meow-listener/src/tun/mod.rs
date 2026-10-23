@@ -67,6 +67,7 @@ mod iface_dns;
 mod outbound_binding;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod route;
+mod syn_gate;
 mod vpn_clients;
 
 /// Keep read-only NIC DNS discovery alive even when only the proxy port is
@@ -924,7 +925,21 @@ impl TunListener {
             v4: cfg.inet4_address,
             v6: cfg.inet6_address,
         };
-        let (mut pump_in, mut pump_out) = device::spawn_pumps(device, stack);
+        // Connect before the handshake (`syn_gate`): what is held is what
+        // the accept loop would route by its address alone.
+        let (gate, mut gated_dials, gate_out) = {
+            let tunnel = self.tunnel.clone();
+            let sniffer = self.sniffer.clone();
+            let dns_hijack = cfg.dns_hijack;
+            syn_gate::SynGate::new(move |dst| {
+                !(dns_hijack && dst.port() == 53)
+                    && !udp::is_looping_dst(dst.ip(), tun_net)
+                    && !sniffer.as_ref().is_some_and(|s| s.sniffs_port(dst.port()))
+                    && !tunnel.resolver().in_fake_ip_range(dst.ip())
+            })
+        };
+        let (mut pump_in, mut pump_out) =
+            device::spawn_pumps(device, stack, gate.clone(), gate_out);
         tasks.push(&pump_in);
         tasks.push(&pump_out);
         // Live UDP flow-table occupancy, readable via `TunReady::Ready` →
@@ -980,8 +995,32 @@ impl TunListener {
 
         let result = loop {
             tokio::select! {
+                Some(conn) = gated_dials.recv() => {
+                    let tunnel = self.tunnel.clone();
+                    let name = self.name.clone();
+                    let sem = conn_limit.clone();
+                    let warned = Arc::clone(&warned_saturated);
+                    tasks.spawn(async move {
+                        let Some(_permit) = flow_slot(sem, &warned, &name).await else {
+                            return;
+                        };
+                        let (src, dst) = (conn.src(), conn.dst());
+                        // The tunnel matches and dials; the held SYN reaches
+                        // lwIP only once that dial succeeded.
+                        meow_tunnel::tcp::handle_tcp(
+                            tunnel.inner(),
+                            Box::new(conn),
+                            tun_metadata(src, dst, &name),
+                        )
+                        .await;
+                    });
+                }
                 accepted = tcp_listener.next() => match accepted {
                     Some((stream, src, dst)) => {
+                        // A gated flow's stream joins its dialed upstream.
+                        let Some(stream) = gate.take_accepted(stream, src, dst) else {
+                            continue;
+                        };
                         // DNS-over-TCP uses length-prefixed DNS frames,
                         // never TLS sniffing or ordinary private-IP rules.
                         if cfg.dns_hijack && dst.port() == 53 {
@@ -1046,28 +1085,9 @@ impl TunListener {
                             // slot for its lifetime, exactly as on the other
                             // inbounds. Flows queued here at saturation are
                             // bounded by lwIP's MEMP_NUM_TCP_PCB.
-                            let permit = if let Some(sem) = sem {
-                                if sem.available_permits() == 0
-                                    && !warned.swap(true, Ordering::Relaxed)
-                                {
-                                    warn!(
-                                        "TUN listener '{name}' saturated at max-connections; \
-                                         new flows will wait for a free slot before dialing"
-                                    );
-                                }
-                                match Arc::clone(&sem).acquire_owned().await {
-                                    Ok(p) => {
-                                        if sem.available_permits() > 0 {
-                                            warned.store(false, Ordering::Relaxed);
-                                        }
-                                        Some(p)
-                                    }
-                                    Err(_) => return,
-                                }
-                            } else {
-                                None
+                            let Some(_permit) = flow_slot(sem, &warned, &name).await else {
+                                return;
                             };
-                            let _permit = permit;
                             handle_tcp_flow(tunnel, stream, prefix, src, dst, &name, sniffer.as_deref())
                                 .await;
                         });
@@ -1251,6 +1271,47 @@ where
     Ok(buf)
 }
 
+/// A `max-connections` slot for a flow leaving the accept loop: `Some(None)`
+/// without a limit, `None` when the limit is gone (listener shutting down).
+async fn flow_slot(
+    sem: Option<Arc<Semaphore>>,
+    warned: &AtomicBool,
+    name: &str,
+) -> Option<Option<tokio::sync::OwnedSemaphorePermit>> {
+    let Some(sem) = sem else {
+        return Some(None);
+    };
+    if sem.available_permits() == 0 && !warned.swap(true, Ordering::Relaxed) {
+        warn!(
+            "TUN listener '{name}' saturated at max-connections; \
+             new flows will wait for a free slot before dialing"
+        );
+    }
+    let permit = Arc::clone(&sem).acquire_owned().await.ok()?;
+    if sem.available_permits() > 0 {
+        warned.store(false, Ordering::Relaxed);
+    }
+    Some(Some(permit))
+}
+
+/// What the tunnel knows of a TUN TCP flow before rules (and the sniffer)
+/// look at it.
+fn tun_metadata(src: SocketAddr, dst: SocketAddr, in_name: &str) -> Metadata {
+    // Android: the owning app is asked with both ends, before the fake-IP
+    // rewrite changes `dst` (a no-op elsewhere).
+    meow_common::note_tun_flow(Network::Tcp, src, dst);
+    Metadata {
+        network: Network::Tcp,
+        conn_type: ConnType::Tun,
+        src_ip: Some(src.ip()),
+        src_port: src.port(),
+        dst_ip: Some(dst.ip()),
+        dst_port: dst.port(),
+        in_name: in_name.into(),
+        ..Default::default()
+    }
+}
+
 async fn handle_tcp_flow(
     tunnel: Tunnel,
     mut tcp: lwip::TcpStream,
@@ -1260,19 +1321,7 @@ async fn handle_tcp_flow(
     in_name: &str,
     sniffer: Option<&SnifferRuntime>,
 ) {
-    // Android: the owning app is asked with both ends, before the fake-IP
-    // rewrite changes `dst` (a no-op elsewhere).
-    meow_common::note_tun_flow(Network::Tcp, src, dst);
-    let mut metadata = Metadata {
-        network: Network::Tcp,
-        conn_type: ConnType::Tun,
-        src_ip: Some(src.ip()),
-        src_port: src.port(),
-        dst_ip: Some(dst.ip()),
-        dst_port: dst.port(),
-        in_name: in_name.into(),
-        ..Default::default()
-    };
+    let mut metadata = tun_metadata(src, dst, in_name);
     if let Some(sniffer) = sniffer {
         // A fake address names its site through the pool; only flows to
         // real addresses have nothing else to go on.

@@ -66,6 +66,12 @@ impl SnifferRuntime {
         self.port_map.contains_key(&metadata.dst_port)
     }
 
+    /// Whether a flow to `port` may be sniffed (for a flow known only by
+    /// its address).
+    pub fn sniffs_port(&self, port: u16) -> bool {
+        self.cfg.enable && self.port_map.contains_key(&port)
+    }
+
     /// Whether `port` is sniffed as TLS (its ClientHello may need more than
     /// one read before it parses).
     pub fn is_tls_port(&self, port: u16) -> bool {
