@@ -1,7 +1,7 @@
 //! PaoPao: read-only views of the system network for the UI — where
 //! traffic leaves, the system routes, and the other VPNs we live next to.
-//! Everything is built from what the TUN listener's monitor already
-//! published (`meow_common::route_table`); the builders are pure.
+//! Views use the TUN monitor's published snapshots (`meow_common::route_table`)
+//! and current device ownership to exclude our TUN even from stale snapshots.
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -182,6 +182,9 @@ pub(crate) fn vpns_body(view: &VpnView<'_>, is_container: impl Fn(&str) -> bool)
             names.push(&d.iface);
         }
     }
+    // A snapshot read before the device was registered can still call it
+    // another VPN. Check current ownership while combining both sources.
+    names.retain(|name| !meow_common::route_table::is_own_tun(name));
     names.sort_unstable();
     let vpns: Vec<Value> = names
         .iter()
@@ -426,6 +429,51 @@ mod tests {
         let empty = routes_body(&RouteTable::default(), None, None, false);
         assert_eq!(empty["defaultInterface"], Value::Null);
         assert_eq!(empty["routes"], json!([]));
+    }
+
+    #[test]
+    fn own_tun_is_not_listed_from_stale_dns_or_routes() {
+        use meow_common::route_table::{register_own_tun, RawRoute};
+
+        let name = "meow-api-own-regression";
+        let _own = register_own_tun(name);
+        // The route/DNS snapshots can predate registration during startup.
+        let table = RouteTable::build(
+            [RawRoute {
+                net: "198.18.0.0/30".parse().unwrap(),
+                iface: name.into(),
+                index: 9,
+                gateway: None,
+                metric: 0,
+                table: None,
+                scoped: false,
+            }],
+            |_| false,
+            |_| RouteIfaceKind::OtherVpn,
+        );
+        let dns = [name, "tun-api-other-regression"].map(|iface| IfaceDns {
+            iface: iface.into(),
+            kind: RouteIfaceKind::OtherVpn,
+            servers: vec!["10.8.0.1".parse().unwrap()],
+            domains: vec!["corp.example".into()],
+        });
+        let body = vpns_body(
+            &VpnView {
+                table: &table,
+                dns: &dns,
+                addresses: &[],
+                counters: &HashMap::new(),
+                clients: &[],
+                manual: &VpnManual::default(),
+                status: &OutboundStatus::default(),
+                published: true,
+            },
+            |_| false,
+        );
+        let vpns = body["vpns"].as_array().unwrap();
+        assert_eq!(vpns.len(), 1);
+        assert_eq!(vpns[0]["name"], "tun-api-other-regression");
+        assert_eq!(vpns[0]["dns"], json!(["10.8.0.1"]));
     }
 
     #[test]

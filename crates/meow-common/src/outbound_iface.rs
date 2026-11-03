@@ -291,7 +291,7 @@ fn interface_index(name: &str) -> io::Result<Option<u32>> {
     clippy::unnecessary_wraps,
     reason = "signature shared with the other platforms' interface_index"
 )]
-fn interface_index(name: &str) -> io::Result<Option<u32>> {
+pub fn interface_index(name: &str) -> io::Result<Option<u32>> {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToIndex,
     };
@@ -342,6 +342,127 @@ pub fn interface_metric_v4(index: u32) -> Option<u32> {
         row.Family = AF_INET;
         row.InterfaceIndex = index;
         (GetIpInterfaceEntry(&raw mut row) == 0).then_some(row.Metric)
+    }
+}
+
+/// Windows' live adapter identity, independent of its localized or renamed alias.
+#[cfg(target_os = "windows")]
+pub struct InterfaceState {
+    /// The adapter is operationally up; disconnected adapters may retain routes.
+    pub up: bool,
+    /// Windows reports a hardware interface rather than a software tunnel/filter.
+    pub hardware: bool,
+    /// Built-in wireless, loopback and IPv6 transition services are not
+    /// VPN clients. Their live specific routes still belong to the system.
+    pub system_virtual: bool,
+}
+
+/// Query native adapter state without launching a shell or depending on its name.
+/// `None` means the adapter vanished or Windows could not read it.
+#[cfg(target_os = "windows")]
+pub fn interface_state(name: &str) -> Option<InterfaceState> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetIfEntry2Ex, MibIfEntryNormalWithoutStatistics, MIB_IF_ROW2,
+    };
+    use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+
+    let mut row = MIB_IF_ROW2 {
+        InterfaceIndex: interface_index(name).ok()??,
+        ..MIB_IF_ROW2::default()
+    };
+    // SAFETY: the initialized index identifies the requested adapter; Windows
+    // fills this exclusively borrowed row. Statistics are not needed here.
+    if unsafe { GetIfEntry2Ex(MibIfEntryNormalWithoutStatistics, &raw mut row) } != 0 {
+        return None;
+    }
+    let hardware = row.InterfaceAndOperStatusFlags._bitfield & 1 != 0;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        IF_TYPE_IEEE80211, IF_TYPE_SOFTWARE_LOOPBACK,
+    };
+    use windows_sys::Win32::NetworkManagement::Ndis::{
+        TUNNEL_TYPE_6TO4, TUNNEL_TYPE_ISATAP, TUNNEL_TYPE_TEREDO,
+    };
+    Some(InterfaceState {
+        up: row.OperStatus == IfOperStatusUp,
+        // HardwareInterface is the first bit of the SDK's documented bitfield.
+        hardware,
+        system_virtual: !hardware
+            && (matches!(row.Type, IF_TYPE_IEEE80211 | IF_TYPE_SOFTWARE_LOOPBACK)
+                || matches!(
+                    row.TunnelType,
+                    TUNNEL_TYPE_6TO4 | TUNNEL_TYPE_ISATAP | TUNNEL_TYPE_TEREDO
+                )),
+    })
+}
+
+/// A newly configured Wintun address is unusable while Windows performs DAD.
+/// Wait on the configured addresses, rather than declaring readiness when
+/// merely creating the adapter succeeded. Called on the device-build thread.
+#[cfg(target_os = "windows")]
+pub fn wait_preferred_addresses(index: u32, addresses: &[std::net::IpAddr]) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetUnicastIpAddressEntry, InitializeUnicastIpAddressEntry, MIB_UNICASTIPADDRESS_ROW,
+    };
+    use windows_sys::Win32::Networking::WinSock::{
+        IpDadStateDuplicate, IpDadStatePreferred, AF_INET, AF_INET6, IN6_ADDR, IN6_ADDR_0, IN_ADDR,
+        IN_ADDR_0, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let mut ready = true;
+        for &ip in addresses {
+            let mut row = MIB_UNICASTIPADDRESS_ROW::default();
+            // SAFETY: the exclusively borrowed row is initialized for the OS query.
+            unsafe {
+                InitializeUnicastIpAddressEntry(&raw mut row);
+            }
+            row.InterfaceIndex = index;
+            row.Address = match ip {
+                std::net::IpAddr::V4(ip) => SOCKADDR_INET {
+                    Ipv4: SOCKADDR_IN {
+                        sin_family: AF_INET,
+                        sin_addr: IN_ADDR {
+                            S_un: IN_ADDR_0 {
+                                S_addr: u32::from_ne_bytes(ip.octets()),
+                            },
+                        },
+                        ..SOCKADDR_IN::default()
+                    },
+                },
+                std::net::IpAddr::V6(ip) => SOCKADDR_INET {
+                    Ipv6: SOCKADDR_IN6 {
+                        sin6_family: AF_INET6,
+                        sin6_addr: IN6_ADDR {
+                            u: IN6_ADDR_0 { Byte: ip.octets() },
+                        },
+                        ..SOCKADDR_IN6::default()
+                    },
+                },
+            };
+            // SAFETY: the index/address identify the queried entry; the OS fills the row.
+            let status = unsafe { GetUnicastIpAddressEntry(&raw mut row) };
+            if status != 0 && status != ERROR_NOT_FOUND {
+                return Err(io::Error::from_raw_os_error(status as i32));
+            }
+            if status == 0 && row.DadState == IpDadStateDuplicate {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("TUN address {ip} is duplicate"),
+                ));
+            }
+            ready &= status == 0 && row.DadState == IpDadStatePreferred;
+        }
+        if ready {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "TUN addresses did not become Preferred",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 

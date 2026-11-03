@@ -452,6 +452,9 @@ impl Core {
         {
             use std::os::windows::process::CommandExt as _;
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            if let Some(path) = system_dns::backup_path() {
+                cmd.env(meow_common::windows_dns::BACKUP_ENV, path);
+            }
             if let Some(d) = exe.parent() {
                 cmd.current_dir(d);
             }
@@ -474,7 +477,10 @@ impl Core {
             let tail = lines[lines.len().saturating_sub(8)..].join("\n");
             return json!({"ok": false, "error": format!("core exited ({status})"), "log": tail});
         }
-        if system_dns::tun_on(Path::new(config)) {
+        // Windows preserves physical DNS and captures queries through TUN
+        // routes. The helper only restores legacy records; it must never
+        // install a resolver address that depends on the core staying alive.
+        if !cfg!(windows) && system_dns::tun_on(Path::new(config)) {
             system_dns::apply();
             // Ended meanwhile: its exit came before this change.
             if !matches!(child.try_wait(), Ok(None)) {

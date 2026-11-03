@@ -548,6 +548,13 @@ impl TunListener {
 
         let cfg = &self.cfg;
 
+        // Migrate only our durable legacy DNS record. Never point physical
+        // adapters at a resolver whose availability depends on this process.
+        #[cfg(target_os = "windows")]
+        tokio::task::spawn_blocking(meow_common::windows_dns::restore)
+            .await
+            .map_err(io::Error::other)??;
+
         // Windows: sidecar wintun.dll next to the exe / in cwd, else extract
         // the official DLL embedded in this binary. Fail before the retry
         // loop so a missing library is not a generic device-create error.
@@ -651,7 +658,19 @@ impl TunListener {
                 {
                     builder = builder.wintun_file(wintun_file).wintun_log(true);
                 }
-                builder.build_async()
+                let device = builder.build_async()?;
+                #[cfg(target_os = "windows")]
+                {
+                    let mut addresses = vec![std::net::IpAddr::V4(addr)];
+                    if let Some(v6) = inet6 {
+                        addresses.push(std::net::IpAddr::V6(v6.addr()));
+                    }
+                    meow_common::outbound_iface::wait_preferred_addresses(
+                        device.if_index()?,
+                        &addresses,
+                    )?;
+                }
+                Ok::<_, io::Error>(device)
             })
             .await
             {
@@ -982,7 +1001,7 @@ impl TunListener {
             },
         );
 
-        // Signal readiness: device, stack, and child tasks are all up.
+        // Signal readiness only after addresses and DNS routes are usable.
         // The payload hands the owner the lwIP core's done signal so a
         // later `stop_tun` can await real teardown (issue #514). An `Err`
         // return from this function sends `TunReady::Failed` (with the

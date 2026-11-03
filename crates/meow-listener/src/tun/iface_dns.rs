@@ -534,7 +534,12 @@ mod platform {
 
     /// Per adapter: alias, connection-specific suffix, servers. Then the
     /// effective NRPT rules. Output format: see [`parse_windows_dns`].
-    const WINDOWS_SCRIPT: &str = r#"Get-DnsClient -ErrorAction SilentlyContinue | ForEach-Object { $s = (Get-DnsClientServerAddress -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses }) -join ','; 'if|' + $_.InterfaceAlias + '|' + $_.ConnectionSpecificSuffix + '|' + $s }; Get-DnsClientNrptPolicy -Effective -ErrorAction SilentlyContinue | ForEach-Object { 'nrpt|' + ($_.Namespace -join ',') + '|' + ($_.NameServers -join ',') }"#;
+    // Redirected Windows PowerShell output otherwise uses the OEM code page:
+    // a Chinese/custom alias would no longer match the native route snapshot.
+    // Read effective per-interface DNS through the system networking API.
+    // Repeated CIM enumeration added seconds to each startup and route change.
+    // NRPT remains a separate effective-policy query so split DNS is preserved.
+    const WINDOWS_SCRIPT: &str = r#"[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object OperationalStatus -eq 'Up' | ForEach-Object { $p = $_.GetIPProperties(); $s = ($p.DnsAddresses | ForEach-Object { $_.ToString() }) -join ','; 'if|' + $_.Name + '|' + $p.DnsSuffix + '|' + $s }; Get-DnsClientNrptPolicy -Effective -ErrorAction SilentlyContinue | ForEach-Object { 'nrpt|' + ($_.Namespace -join ',') + '|' + ($_.NameServers -join ',') }"#;
 
     pub(super) fn due(changed: bool) -> bool {
         slow_reader_due(changed)
@@ -544,17 +549,66 @@ mod platform {
         let mut cmd = std::process::Command::new("powershell");
         cmd.args(["-NoProfile", "-Command", WINDOWS_SCRIPT]);
         match run_with_timeout(cmd, READER_TIMEOUT) {
-            Ok((_, out)) => parse_windows_dns(&String::from_utf8_lossy(&out))
-                .into_iter()
-                // Our own loopback takeover is not somebody's DNS.
-                .filter(|f| !f.servers.iter().all(|s| s.is_loopback()))
-                .collect(),
+            Ok((_, out)) => active_windows_rows(
+                parse_windows_dns(&String::from_utf8_lossy(&out)),
+                super::super::route::usable_interface,
+            )
+            .into_iter()
+            .map(|mut f| {
+                if let Some(ref name) = f.iface {
+                    if f.servers.iter().any(IpAddr::is_loopback) {
+                        if let Some(index) = meow_common::outbound_iface::interface_index(name)
+                            .ok()
+                            .flatten()
+                        {
+                            if let Some(original) =
+                                meow_common::windows_dns::original_servers(index)
+                            {
+                                f.servers = original_upstreams(f.servers, &original);
+                            }
+                        }
+                    }
+                }
+                f
+            })
+            // Our own loopback takeover is not somebody's DNS.
+            .filter(|f| !f.servers.iter().all(|s| s.is_loopback()))
+            .collect(),
             Err(e) => {
                 tracing::debug!("per-interface dns: powershell: {e}");
                 Vec::new()
             }
         }
     }
+}
+
+/// Disconnected interfaces can retain placeholder DNS even after their
+/// routes disappear. Keep NRPT rows (no named interface) and active VPNs.
+#[cfg(any(target_os = "windows", test))]
+fn active_windows_rows(found: Vec<Found>, usable: impl Fn(&str) -> bool) -> Vec<Found> {
+    found
+        .into_iter()
+        .filter(|f| f.iface.as_deref().is_none_or(&usable))
+        .collect()
+}
+
+/// Substitute only our loopback family. If an administrator changed the
+/// other family during capture, its new upstream remains authoritative.
+#[cfg(any(target_os = "windows", test))]
+fn original_upstreams(current: Vec<IpAddr>, original: &[IpAddr]) -> Vec<IpAddr> {
+    let mut servers = Vec::new();
+    for ip in current {
+        if ip == IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            || ip == IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+        {
+            for &upstream in original.iter().filter(|s| s.is_ipv4() == ip.is_ipv4()) {
+                push_unique(&mut servers, upstream);
+            }
+        } else {
+            push_unique(&mut servers, ip);
+        }
+    }
+    servers
 }
 
 #[cfg(test)]
@@ -715,6 +769,33 @@ resolver #1\n\
     }
 
     #[test]
+    fn own_tun_dns_is_excluded_by_the_real_classifier() {
+        // Use the production classifier, not the fixture's `kind`: Windows
+        // reports our adapter's non-loopback DNS just like another VPN's.
+        let name = "meow-dns-own-regression";
+        let own = route_table::register_own_tun(name);
+        let text = format!(
+            "if|Ethernet||192.0.2.53\r\n\
+             if|{name}|local.example|198.18.0.1,fd00::53\r\n\
+             if|tun-other-regression|corp.example|10.8.0.1,fd08::53\r\n"
+        );
+        let classify = super::super::route::route_kind;
+        assert_eq!(classify(name), RouteIfaceKind::OwnTun);
+        let list = attribute(parse_windows_dns(&text), &RouteTable::default(), classify);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].iface, "Ethernet");
+        assert_eq!(list[0].kind, RouteIfaceKind::Physical);
+        assert_eq!(list[1].iface, "tun-other-regression");
+        assert_eq!(list[1].kind, RouteIfaceKind::OtherVpn);
+        assert_eq!(list[1].servers, ips(&["10.8.0.1", "fd08::53"]));
+        assert_eq!(list[1].domains, ["corp.example"]);
+
+        // Ownership follows the device lifetime, not a name blacklist.
+        drop(own);
+        assert_eq!(classify(name), RouteIfaceKind::OtherVpn);
+    }
+
+    #[test]
     fn windows_adapter_and_nrpt_lines() {
         let text = "if|Ethernet||192.168.1.1\r\n\
                     if|Cisco AnyConnect|corp.example.com|10.8.0.1,10.8.0.2\r\n\
@@ -737,6 +818,17 @@ resolver #1\n\
             ["corp.example.com", "lab.example", "dev.example"]
         );
         assert_eq!(list[1].iface, "Ethernet");
+    }
+
+    #[test]
+    fn windows_dns_preserves_localized_and_renamed_aliases() {
+        let bytes = "if|以太网||192.168.1.1\r\nif|Büro 网络|corp.example|10.8.0.1\r\n".as_bytes();
+        let found = parse_windows_dns(&String::from_utf8_lossy(bytes));
+        let list = attribute(found, &RouteTable::default(), |_| RouteIfaceKind::Physical);
+        let nic = list.iter().find(|row| row.iface == "以太网").unwrap();
+        assert_eq!(nic.servers, ips(&["192.168.1.1"]));
+        let renamed = list.iter().find(|row| row.iface == "Büro 网络").unwrap();
+        assert_eq!(renamed.domains, ["corp.example"]);
     }
 
     /// A helper program's output comes back whole; one that hangs is
@@ -769,5 +861,36 @@ resolver #1\n\
         assert_eq!(clean_domain("~."), None);
         assert_eq!(clean_domain("."), None);
         assert_eq!(clean_domain(""), None);
+    }
+
+    #[test]
+    fn windows_dns_drops_disconnected_wifi_direct_but_keeps_live_vpn_and_nrpt() {
+        let found = parse_windows_dns("if|本地连接* 1||fec0:0:0:ffff::1\nif|本地连接* 2||fec0:0:0:ffff::2\nif|Ethernet||192.168.1.1\nif|Corporate|corp.example|10.8.0.1\nnrpt|.lab.example|10.8.0.1\n");
+        let kept = active_windows_rows(found, |name| !name.starts_with("本地连接"));
+        assert_eq!(kept.len(), 3);
+        assert_eq!(kept[0].iface.as_deref(), Some("Ethernet"));
+        assert_eq!(kept[1].iface.as_deref(), Some("Corporate"));
+        assert!(kept[2].iface.is_none());
+    }
+
+    #[test]
+    fn captured_dns_keeps_independent_changes_without_querying_our_loopback() {
+        let original = ips(&["192.168.1.1", "fd00::53"]);
+        assert_eq!(
+            original_upstreams(ips(&["127.0.0.1", "::1"]), &original),
+            original
+        );
+        assert_eq!(
+            original_upstreams(ips(&["9.9.9.9", "::1"]), &original),
+            ips(&["9.9.9.9", "fd00::53"])
+        );
+        assert_eq!(
+            original_upstreams(ips(&["127.0.0.1", "2001:db8::53"]), &original),
+            ips(&["192.168.1.1", "2001:db8::53"])
+        );
+        assert_eq!(
+            original_upstreams(ips(&["127.0.0.2", "::1"]), &original),
+            ips(&["127.0.0.2", "fd00::53"])
+        );
     }
 }

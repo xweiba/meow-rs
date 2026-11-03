@@ -609,12 +609,6 @@ const RAW_SOCKET_ALLOWLIST: &[(&str, &str, usize, &str)] = &[
         "IP_TRANSPARENT reply socket towards the inbound client",
     ),
     (
-        "crates/meow-listener/src/tun/local_dns.rs",
-        "UdpSocket::bind(",
-        2,
-        "loopback DNS listener (127.0.0.1:53 / [::1]:53)",
-    ),
-    (
         "crates/meow-tunnel/src/tunnel.rs",
         "UdpSocket::bind(",
         1,

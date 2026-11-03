@@ -261,10 +261,18 @@ pub fn kind_by_name(name: &str) -> IfaceKind {
     IfaceKind::Unknown
 }
 
-/// [`IfaceKind`] of a live interface: the name first, then (Linux) whether
-/// it has a device behind it (`/sys/class/net/<if>/device`).
+/// [`IfaceKind`] of a live interface: Windows' hardware flag, Linux's device
+/// backing, then the name when no native identity is available.
 pub fn interface_kind(name: &str) -> IfaceKind {
     let by_name = kind_by_name(name);
+    #[cfg(target_os = "windows")]
+    {
+        return kind_with_hardware(
+            by_name,
+            meow_common::outbound_iface::interface_state(name)
+                .map(|s| (s.hardware, s.system_virtual)),
+        );
+    }
     #[cfg(target_os = "linux")]
     {
         if by_name != IfaceKind::Virtual
@@ -276,7 +284,32 @@ pub fn interface_kind(name: &str) -> IfaceKind {
             return IfaceKind::Physical;
         }
     }
+    #[cfg(not(target_os = "windows"))]
     by_name
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn kind_with_hardware(by_name: IfaceKind, hardware: Option<(bool, bool)>) -> IfaceKind {
+    match hardware {
+        Some((true, _)) => IfaceKind::Physical,
+        Some((false, true)) => IfaceKind::Unknown,
+        Some((false, false)) => IfaceKind::Virtual,
+        None => by_name,
+    }
+}
+
+/// Disconnected Windows adapters can retain default routes. Exclude them from
+/// both selection and the snapshot, including fallback and per-destination dials.
+pub(super) fn usable_interface(name: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        meow_common::outbound_iface::interface_state(name).is_none_or(|s| s.up)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = name;
+        true
+    }
 }
 
 /// The ranking the outbound binding starts from (PaoPao: what is actually
@@ -332,7 +365,11 @@ fn default_candidates() -> std::io::Result<Vec<DefaultCandidate>> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let routes = RouteManager::new()?.list()?;
-        Ok(routes.iter().map(default_candidate).collect())
+        Ok(routes
+            .iter()
+            .filter(|r| r.if_name().is_some_and(|name| usable_interface(name)))
+            .map(default_candidate)
+            .collect())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
@@ -412,9 +449,16 @@ fn pick_default_interface(
         .map(|(_, name)| name)
 }
 
-/// PaoPao: [`IfaceKind`] as the route snapshot names it.
+/// PaoPao: interface ownership first, then its platform/name classification.
 pub fn route_kind(name: &str) -> RouteIfaceKind {
-    route_kind_of(interface_kind(name))
+    // DNS discovery also uses this entry point, without RouteTable::build's
+    // separate ownership check. Our adapter must never become another VPN's
+    // DNS or be added back to the VPN list from its resolver configuration.
+    if meow_common::route_table::is_own_tun(name) {
+        RouteIfaceKind::OwnTun
+    } else {
+        route_kind_of(interface_kind(name))
+    }
 }
 
 fn route_kind_of(kind: IfaceKind) -> RouteIfaceKind {
@@ -430,6 +474,9 @@ fn route_kind_of(kind: IfaceKind) -> RouteIfaceKind {
 /// interface) are of no use to a per-socket binding.
 fn raw_route(route: &Route) -> Option<RawRoute> {
     let iface = route.if_name()?.clone();
+    if !usable_interface(&iface) {
+        return None;
+    }
     let net = IpNet::new(route.destination(), route.prefix()).ok()?;
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     let metric = route.metric().unwrap_or(0);
@@ -1264,6 +1311,57 @@ mod tests {
             candidate("0.0.0.0/0", "Wi-Fi", false, 25),
         ];
         assert_eq!(pick(tie).as_deref(), Some("Ethernet"));
+    }
+
+    /// Native identity must work for Chinese/custom aliases and software
+    /// adapters misleadingly called Ethernet. A missing identity keeps fallback.
+    #[test]
+    fn windows_hardware_identity_overrides_alias_heuristics() {
+        use super::kind_with_hardware;
+        for name in ["以太网", "公司网络", "Ethernet", "VPN uplink"] {
+            assert_eq!(
+                kind_with_hardware(kind_by_name(name), Some((true, false))),
+                IfaceKind::Physical
+            );
+        }
+        assert_eq!(
+            kind_with_hardware(kind_by_name("Ethernet 2"), Some((false, false))),
+            IfaceKind::Virtual
+        );
+        assert_eq!(
+            kind_with_hardware(kind_by_name("custom"), None),
+            IfaceKind::Unknown
+        );
+        let routes = [
+            candidate("0.0.0.0/0", "WLAN", false, 281),
+            candidate("0.0.0.0/0", "以太网", false, 25),
+        ];
+        let got = pick_default_interface(routes, |name| {
+            kind_with_hardware(kind_by_name(name), Some((true, false)))
+        });
+        assert_eq!(got.as_deref(), Some("以太网"));
+    }
+
+    #[test]
+    fn system_virtual_services_are_not_vpns_even_with_custom_aliases() {
+        use super::{kind_with_hardware, route_kind_of};
+        for name in [
+            "本地连接* 1",
+            "Office VPN",
+            "Wi-Fi Direct",
+            "Teredo Tunneling Pseudo-Interface",
+            "Renamed transition interface",
+        ] {
+            let kind = kind_with_hardware(kind_by_name(name), Some((false, true)));
+            assert_eq!(route_kind_of(kind), RouteIfaceKind::Other);
+        }
+        assert_eq!(
+            route_kind_of(kind_with_hardware(
+                kind_by_name("Corporate"),
+                Some((false, false))
+            )),
+            RouteIfaceKind::OtherVpn
+        );
     }
 
     /// Issue #695, on the route-table platforms: a reload detects the

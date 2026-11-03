@@ -57,7 +57,7 @@ struct Saved {
 }
 
 /// Where what was there is kept: beside the helper's own files.
-fn backup_path() -> Option<PathBuf> {
+pub(super) fn backup_path() -> Option<PathBuf> {
     if cfg!(target_os = "macos") {
         Some("/Library/Application Support/PaoPao/system-dns.json".into())
     } else if cfg!(windows) {
@@ -111,6 +111,19 @@ pub(super) fn apply() {
 /// The core ended (or the helper starts): what was there put back. True
 /// when there was something.
 pub(super) fn restore_leftover() -> bool {
+    // Recovery only: new Windows cores never replace physical DNS. Restore
+    // an older loopback record first; the array backend migrates public DNS.
+    #[cfg(windows)]
+    if let Some(path) = backup_path() {
+        match meow_common::windows_dns::restore_at(&path) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("service: system DNS restore pending: {e}");
+                return true;
+            }
+        }
+    }
     match (current_os(), backup_path()) {
         (Some(os), Some(path)) => {
             let _busy = BUSY.lock().unwrap_or_else(PoisonError::into_inner);
@@ -139,9 +152,17 @@ fn restore(os: Os, run: &dyn Run, path: &Path) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return false;
     };
-    let saved: Vec<Saved> = serde_json::from_slice(&bytes).unwrap_or_default();
+    let Ok(saved) = serde_json::from_slice::<Vec<Saved>>(&bytes) else {
+        eprintln!("service: invalid system DNS recovery record preserved");
+        return false;
+    };
+    let mut restored = true;
     for s in &saved {
-        put_back(os, run, s);
+        restored &= put_back(os, run, s);
+    }
+    if !restored {
+        eprintln!("service: system DNS restore pending; recovery record preserved");
+        return false;
     }
     if let Err(e) = std::fs::remove_file(path) {
         eprintln!("service: {} not removed: {e}", path.display());
@@ -235,11 +256,14 @@ fn set(os: Os, run: &dyn Run, id: &str) -> bool {
 }
 
 /// Put back when it still reads as ours; else someone set their own since.
-fn put_back(os: Os, run: &dyn Run, s: &Saved) {
+fn put_back(os: Os, run: &dyn Run, s: &Saved) -> bool {
     match os {
         Os::MacOs => {
-            if mac_get(run, &s.id) != Some(ours()) {
-                return;
+            let Some(current) = mac_get(run, &s.id) else {
+                return false;
+            };
+            if current != ours() {
+                return true;
             }
             let list: Vec<String> = s.servers.iter().map(ToString::to_string).collect();
             let mut args = vec!["-setdnsservers", s.id.as_str()];
@@ -248,11 +272,11 @@ fn put_back(os: Os, run: &dyn Run, s: &Saved) {
             } else {
                 args.extend(list.iter().map(String::as_str));
             }
-            run.out(NETWORKSETUP, &args);
+            run.out(NETWORKSETUP, &args).is_some()
         }
         Os::Windows => {
             let Some(guid) = valid_guid(&s.id) else {
-                return;
+                return false;
             };
             let back = if s.servers.is_empty() {
                 "-ResetServerAddresses".to_owned()
@@ -260,11 +284,11 @@ fn put_back(os: Os, run: &dyn Run, s: &Saved) {
                 format!("-ServerAddresses ({})", ps_list(&s.servers))
             };
             let script = format!(
-                "{}; $p = Get-ItemProperty -Path ('{TCPIP}' + '{guid}') -ErrorAction SilentlyContinue; if ($a -and ((($p.NameServer -split '[, ]') | Where-Object {{ $_ }}) -join ',') -eq '{}') {{ Set-DnsClientServerAddress -InterfaceIndex $a.InterfaceIndex {back} }}",
+                "$ErrorActionPreference='Stop'; {}; if (-not $a) {{ throw 'DNS adapter unavailable' }}; $p = Get-ItemProperty -Path ('{TCPIP}' + '{guid}') -ErrorAction Stop; if (((($p.NameServer -split '[, ]') | Where-Object {{ $_ }}) -join ',') -eq '{}') {{ Set-DnsClientServerAddress -InterfaceIndex $a.InterfaceIndex {back} -ErrorAction Stop }}",
                 windows_adapter(guid),
                 SERVERS.join(",")
             );
-            powershell(run, &script);
+            powershell(run, &script).is_some()
         }
     }
 }

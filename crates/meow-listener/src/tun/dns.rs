@@ -1,8 +1,8 @@
 //! Read-only compatibility with the former Linux resolver rewrite.
 //!
-//! TUN DNS capture uses temporary packet interception/routes. No platform
-//! rewrites resolver settings, resets adapters to DHCP, or guesses which
-//! configured DNS values belong to an older core. An old Linux marker may
+//! Linux TUN DNS capture uses temporary packet interception. Windows uses
+//! upstream host routes and only restores legacy loopback DNS records; its
+//! backend never assigns a local resolver. An old Linux marker may
 //! still have a precise sidecar; read it without restoring or deleting it.
 
 #[cfg(target_os = "linux")]

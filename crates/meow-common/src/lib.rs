@@ -46,6 +46,8 @@ pub mod rule;
 pub mod sniffer;
 pub mod socket_protect;
 pub mod tunnel_mode;
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_dns;
 
 pub use adapter::{
     reset_sessions_reachable, DelayHistory, ProviderSlot, Proxy, ProxyAdapter, ProxyHealth,
