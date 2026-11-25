@@ -2,6 +2,8 @@
 //! through `tun.file-descriptor`), so there is nothing to install here.
 
 use ipnet::IpNet;
+use meow_common::outbound_balance::{Link, LinkKind, LinkSource};
+use meow_common::route_table::{RawRoute, RouteIfaceKind};
 
 pub(super) struct RouteGuard;
 
@@ -40,6 +42,35 @@ fn unsupported<T>() -> std::io::Result<T> {
     Err(std::io::Error::other(
         "routes and the default interface are managed by the platform VPN here",
     ))
+}
+
+pub(super) fn system_routes() -> std::io::Result<Vec<RawRoute>> {
+    unsupported()
+}
+
+pub(super) fn route_kind(_name: &str) -> RouteIfaceKind {
+    RouteIfaceKind::Other
+}
+
+/// The platform VPN owns interface selection on phones, so there are no
+/// system links for the balancer to read here.
+#[derive(Debug, Clone, Default)]
+pub(super) struct SystemLinks;
+
+impl SystemLinks {
+    pub(super) fn from_routes(_raw: &[RawRoute]) -> Self {
+        Self
+    }
+}
+
+impl LinkSource for SystemLinks {
+    fn links(&self) -> Vec<Link> {
+        Vec::new()
+    }
+
+    fn kind_of(&self, _name: &str) -> Option<LinkKind> {
+        None
+    }
 }
 
 pub(super) fn route_snapshot() -> std::io::Result<meow_common::route_table::RouteTable> {
