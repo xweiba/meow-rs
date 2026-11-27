@@ -25,18 +25,18 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use axum::{
-    body::Body,
-    extract::{Query, Request, State},
-    http::{header, Method, StatusCode},
-    response::{IntoResponse, Response},
     Router,
+    body::Body,
+    extract::{ConnectInfo, Query, Request, State},
+    http::{Method, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 
 use super::service::Service;
-use super::store::{write_atomic, Store};
+use super::store::{Store, write_atomic};
 use super::track;
 
 /// `route.json`: where the API listens and its key.
@@ -111,7 +111,12 @@ impl Service {
         let addr = listener.local_addr().map_err(|e| e.to_string())?;
         let app = Router::new().fallback(handle).with_state(Arc::clone(self));
         let task = tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
+            if let Err(e) = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            {
                 tracing::warn!("paopao route API: {e}");
             }
         });
@@ -217,7 +222,11 @@ fn public(p: &Value) -> Value {
     json!({ "id": p.get("id"), "name": p.get("name"), "kind": p.get("kind") })
 }
 
-async fn handle(State(svc): State<Arc<Service>>, req: Request) -> Response {
+async fn handle(
+    State(svc): State<Arc<Service>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
     let path = req.uri().path().to_owned();
     let q: HashMap<String, String> =
         Query::try_from_uri(req.uri()).map_or_else(|_| HashMap::new(), |Query(q)| q);
@@ -251,6 +260,12 @@ async fn handle(State(svc): State<Arc<Service>>, req: Request) -> Response {
         )
             .into_response();
     }
+    if !peer.ip().is_loopback() {
+        return error(
+            StatusCode::FORBIDDEN,
+            "route and location data are local only",
+        );
+    }
     // loc.json is fetched by a script that can only give a URL.
     if path == "/v1/location.json"
         && !key.is_empty()
@@ -265,7 +280,7 @@ async fn handle(State(svc): State<Arc<Service>>, req: Request) -> Response {
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if auth != format!("Bearer {key}") {
+    if key.trim().is_empty() || auth != format!("Bearer {key}") {
         return error(StatusCode::UNAUTHORIZED, "bad or missing key");
     }
     if req.method() != Method::GET {
